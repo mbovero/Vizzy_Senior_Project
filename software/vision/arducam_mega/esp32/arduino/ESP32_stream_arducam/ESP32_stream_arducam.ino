@@ -104,7 +104,7 @@ void captureAndSendPicture()
 void setup() 
 {
   // Initialize serial communication
-  Serial.begin(115200);
+  Serial.begin(921600);
   while (!Serial); // Wait for the serial port to connect
   Serial.println("Connected to serial port!");
 
