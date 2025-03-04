@@ -6,8 +6,8 @@ import threading
 
 # Configure the serial port
 ser = serial.Serial(
-    port='COMX',       # Replace with your COM port (e.g., 'COM3' on Windows or '/dev/ttyUSB0' on Linux)
-    baudrate=115200,   # Match the baud rate in your Arduino code
+    port='/dev/ttyUSB0',       # Replace with your COM port (e.g., 'COM3' on Windows or '/dev/ttyUSB0' on Linux)
+    baudrate=921600,   # Match the baud rate in your Arduino code
     timeout=1          # Timeout for reading
 )
 
