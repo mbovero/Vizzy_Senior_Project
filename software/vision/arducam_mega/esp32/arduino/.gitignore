@@ -1,0 +1,17 @@
+# Ignore build files and temporary files
+*.hex
+*.elf
+*.bin
+*.eep
+*.o
+*.d
+*.bak
+*.tmp
+*.log
+
+# Ignore Arduino libraries (if installed externally)
+libraries/
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
