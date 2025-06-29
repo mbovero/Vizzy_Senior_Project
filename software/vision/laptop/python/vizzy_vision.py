@@ -124,7 +124,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Using device: {device}")
 
 # Load model
-model = YOLO("yolo11m-seg.engine").to(device)
+model = YOLO("yolo11m-seg.engine")
 # if device == 'cuda':
 #     model.model.half()
 #     _ = model.predict(torch.zeros(1, 3, 640, 640).half().to(device))
@@ -190,39 +190,39 @@ try:
             print("Failed to grab frame")
             break
 
-        results = model(frame, classes=[TARGET_CLASS], stream=True)  # Use specified class
+        # Process the generator results
+        for result in model(frame, classes=[TARGET_CLASS], stream=True):
+            if len(result.boxes) > 0:
+                largest_obj = None
+                max_area = 0
 
-        if len(results[0]) > 0:
-            largest_obj = None
-            max_area = 0
+                for box in result.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    area = (x2 - x1) * (y2 - y1)
+                    if area > max_area:
+                        max_area = area
+                        largest_obj = ((x1 + x2) // 2, (y1 + y2) // 2)
 
-            for box in results[0].boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                area = (x2 - x1) * (y2 - y1)
-                if area > max_area:
-                    max_area = area
-                    largest_obj = ((x1 + x2) // 2, (y1 + y2) // 2)
+                if largest_obj:
+                    dx, dy = calculate_servo_movement(largest_obj, (center_x, center_y))
+                    send_servo_command(dx, dy)
 
-            if largest_obj:
-                dx, dy = calculate_servo_movement(largest_obj, (center_x, center_y))
-                send_servo_command(dx, dy)
+                    # Visualization
+                    cv2.circle(frame, largest_obj, 5, (0, 255, 0), -1)
+                    cv2.circle(frame, (center_x, center_y), 5, (255, 0, 0), -1)
+                    cv2.line(frame, largest_obj, (center_x, center_y), (0, 0, 255), 2)
+                    cv2.putText(frame, f"Tracking: {COCO_CLASSES[TARGET_CLASS]}",
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-                # Visualization
-                cv2.circle(frame, largest_obj, 5, (0, 255, 0), -1)
-                cv2.circle(frame, (center_x, center_y), 5, (255, 0, 0), -1)
-                cv2.line(frame, largest_obj, (center_x, center_y), (0, 0, 255), 2)
-                cv2.putText(frame, f"Tracking: {COCO_CLASSES[TARGET_CLASS]}",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-        #cv2.imshow("YOLO Detection", results[0].plot())
-        annotated_frame = results[0].plot()
-        height, width = annotated_frame.shape[:2]
-        resized_frame = cv2.resize(annotated_frame,
-                                  (int(width * DISPLAY_SCALE),
-                                  int(height * DISPLAY_SCALE)))
-        cv2.imshow("YOLO Detection", resized_frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            # Display the results
+            annotated_frame = result.plot()
+            height, width = annotated_frame.shape[:2]
+            resized_frame = cv2.resize(annotated_frame,
+                                    (int(width * DISPLAY_SCALE),
+                                    int(height * DISPLAY_SCALE)))
+            cv2.imshow("YOLO Detection", resized_frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
 
 finally:
     stop_command = {'type': 'stop'}
