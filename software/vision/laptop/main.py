@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 
 # Initialize model
-model = YOLO("yolo11x-seg.engine")
+model = YOLO("yolo11m-seg.engine")
 
 def get_contour_center(mask):
     """Calculate object center using contour moments"""
