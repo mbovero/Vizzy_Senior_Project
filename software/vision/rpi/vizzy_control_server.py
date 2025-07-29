@@ -52,34 +52,38 @@ def move_servos(pi, horizontal, vertical):
     current_horizontal = new_horizontal
     current_vertical = new_vertical
 
+SEARCH_H_STEP = 50
+SEARCH_V_STEP = 100
+SEARCH_DELAY = 0.75
+
 def search_pattern(pi):
     """Sweep servos through a predefined pattern while search_active is set."""
     global current_horizontal, current_vertical
 
     print("Search started")
     while search_active.is_set():
-        for h in range(SERVO_MIN, SERVO_MAX + 1, 100):
+        for h in range(SERVO_MIN, SERVO_MAX + 1, SEARCH_H_STEP):
             if not search_active.is_set():
                 break
             pi.set_servo_pulsewidth(SERVO_BTM, h)
             current_horizontal = h
-            for v in range(SERVO_MIN, SERVO_MAX + 1, 250):
+            for v in range(SERVO_MIN, SERVO_MAX + 1, SEARCH_V_STEP):
                 if not search_active.is_set():
                     break
                 pi.set_servo_pulsewidth(SERVO_TOP, v)
                 current_vertical = v
-                time.sleep(0.2)
-        for h in range(SERVO_MAX, SERVO_MIN - 1, -100):
+                time.sleep(SEARCH_DELAY)
+        for h in range(SERVO_MAX, SERVO_MIN - 1, -SEARCH_H_STEP):
             if not search_active.is_set():
                 break
             pi.set_servo_pulsewidth(SERVO_BTM, h)
             current_horizontal = h
-            for v in range(SERVO_MAX, SERVO_MIN - 1, -250):
+            for v in range(SERVO_MAX, SERVO_MIN - 1, -SEARCH_V_STEP):
                 if not search_active.is_set():
                     break
                 pi.set_servo_pulsewidth(SERVO_TOP, v)
                 current_vertical = v
-                time.sleep(0.2)
+                time.sleep(SEARCH_DELAY)
     print("Search stopped")
 
 def handle_client(conn, pi):
