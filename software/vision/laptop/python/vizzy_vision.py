@@ -6,7 +6,7 @@ import json
 import time
 import argparse
 
-DISPLAY_SCALE = 2  # Adjust this value to make the window larger (1.5 = 150%)
+DISPLAY_SCALE = 1.5  # Adjust this value to make the window larger (1.5 = 150%)
 
 # COCO class names and IDs (partial list)
 COCO_CLASSES = {
