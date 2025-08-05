@@ -52,7 +52,7 @@ def move_servos(pi, horizontal, vertical):
     current_horizontal = new_horizontal
     current_vertical = new_vertical
 
-SEARCH_H_STEP = 50
+SEARCH_H_STEP = 250
 SEARCH_V_STEP = 100
 SEARCH_DELAY = 0.75
 
@@ -67,7 +67,7 @@ def search_pattern(pi):
                 break
             pi.set_servo_pulsewidth(SERVO_BTM, h)
             current_horizontal = h
-            for v in range(SERVO_MIN, SERVO_MAX + 1, SEARCH_V_STEP):
+            for v in range(SERVO_MIN+100, SERVO_MAX + 1, SEARCH_V_STEP):
                 if not search_active.is_set():
                     break
                 pi.set_servo_pulsewidth(SERVO_TOP, v)
@@ -78,7 +78,7 @@ def search_pattern(pi):
                 break
             pi.set_servo_pulsewidth(SERVO_BTM, h)
             current_horizontal = h
-            for v in range(SERVO_MAX, SERVO_MIN - 1, -SEARCH_V_STEP):
+            for v in range(SERVO_MAX, SERVO_MIN+99, -SEARCH_V_STEP):
                 if not search_active.is_set():
                     break
                 pi.set_servo_pulsewidth(SERVO_TOP, v)
