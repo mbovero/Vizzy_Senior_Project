@@ -52,9 +52,11 @@ def move_servos(pi, horizontal, vertical):
     current_horizontal = new_horizontal
     current_vertical = new_vertical
 
+SEARCH_MIN = SERVO_MIN + 200
+SEARCH_MAX = SERVO_MAX - 200
 SEARCH_H_STEP = 250
 SEARCH_V_STEP = 100
-SEARCH_DELAY = 0.75
+SEARCH_DELAY = 0.70
 
 def search_pattern(pi):
     """Sweep servos through a predefined pattern while search_active is set."""
@@ -62,23 +64,23 @@ def search_pattern(pi):
 
     print("Search started")
     while search_active.is_set():
-        for h in range(SERVO_MIN, SERVO_MAX + 1, SEARCH_H_STEP):
+        for h in range(SEARCH_MIN, SEARCH_MAX + 1, SEARCH_H_STEP):
             if not search_active.is_set():
                 break
             pi.set_servo_pulsewidth(SERVO_BTM, h)
             current_horizontal = h
-            for v in range(SERVO_MIN+100, SERVO_MAX + 1, SEARCH_V_STEP):
+            for v in range(SEARCH_MIN, SEARCH_MAX + 1, SEARCH_V_STEP):
                 if not search_active.is_set():
                     break
                 pi.set_servo_pulsewidth(SERVO_TOP, v)
                 current_vertical = v
                 time.sleep(SEARCH_DELAY)
-        for h in range(SERVO_MAX, SERVO_MIN - 1, -SEARCH_H_STEP):
+        for h in range(SEARCH_MAX, SEARCH_MIN - 1, -SEARCH_H_STEP):
             if not search_active.is_set():
                 break
             pi.set_servo_pulsewidth(SERVO_BTM, h)
             current_horizontal = h
-            for v in range(SERVO_MAX, SERVO_MIN+99, -SEARCH_V_STEP):
+            for v in range(SEARCH_MAX, SEARCH_MIN -1, -SEARCH_V_STEP):
                 if not search_active.is_set():
                     break
                 pi.set_servo_pulsewidth(SERVO_TOP, v)
