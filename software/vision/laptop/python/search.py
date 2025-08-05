@@ -94,8 +94,8 @@ COCO_CLASSES = {
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Object Tracking with YOLO')
-parser.add_argument('--class-id', type=int, default=72,
-                   help=f'COCO class ID to track (default: 72 for cell phone)\nAvailable classes:\n{COCO_CLASSES}')
+parser.add_argument('--class-id', type=int, default=-1,  # Changed default to -1
+                   help=f'COCO class ID to track (-1 for all classes)\nAvailable classes:\n{COCO_CLASSES}')
 parser.add_argument('--ip', type=str, default='192.168.1.30',
                    help='Raspberry Pi IP address')
 parser.add_argument('--port', type=int, default=65432,
@@ -109,15 +109,15 @@ TARGET_CLASS = args.class_id
 SERVO_SPEED = 0.2
 DEADZONE = 30
 
-# Verify class ID is valid
-if TARGET_CLASS not in COCO_CLASSES:
+# Verify class ID is valid (updated for -1 case)
+if TARGET_CLASS != -1 and TARGET_CLASS not in COCO_CLASSES:
     print(f"Error: Class ID {TARGET_CLASS} not found in COCO classes")
     print("Available classes:")
     for id, name in COCO_CLASSES.items():
         print(f"{id}: {name}")
     exit()
 
-print(f"Tracking: {COCO_CLASSES[TARGET_CLASS]} (class ID: {TARGET_CLASS})")
+print(f"Tracking: {'ALL CLASSES' if TARGET_CLASS == -1 else COCO_CLASSES[TARGET_CLASS]} (class ID: {TARGET_CLASS})")
 
 # Set device
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -125,9 +125,6 @@ print(f"Using device: {device}")
 
 # Load model
 model = YOLO("yolo11m-seg.engine")
-# if device == 'cuda':
-#     model.model.half()
-#     _ = model.predict(torch.zeros(1, 3, 640, 640).half().to(device))
 
 # Socket connection
 def connect_to_pi():
@@ -204,44 +201,53 @@ def send_search_command(active):
 
 try:
     while True:
-        key = cv2.waitKey(1) & 0xFF
+        key = cv2.waitKey(5) & 0xFF
         if key == ord('s'):
             search_mode = not search_mode
             send_search_command(search_mode)
             print(f"{'Entering' if search_mode else 'Exiting'} search mode")
 
-        if search_mode:
-            continue  # Skip tracking logic
-
-        
         ret, frame = cap.read()
         if not ret:
             print("Failed to grab frame")
             break
 
-        # Process the generator results
-        for result in model(frame, classes=[TARGET_CLASS], stream=True):
+        # Process with or without class filtering
+        if TARGET_CLASS == -1:
+            results = model(frame, stream=True)  # Detect all classes
+        else:
+            results = model(frame, classes=[TARGET_CLASS], stream=True)
+
+        for result in results:
             if len(result.boxes) > 0:
                 largest_obj = None
                 max_area = 0
+                best_class = None
 
                 for box in result.boxes:
+                    # Only consider the target class if specified
+                    if TARGET_CLASS != -1 and int(box.cls) != TARGET_CLASS:
+                        continue
+                        
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     area = (x2 - x1) * (y2 - y1)
                     if area > max_area:
                         max_area = area
                         largest_obj = ((x1 + x2) // 2, (y1 + y2) // 2)
+                        best_class = int(box.cls) if TARGET_CLASS == -1 else TARGET_CLASS
 
                 if largest_obj:
                     dx, dy = calculate_servo_movement(largest_obj, (center_x, center_y))
-                    send_servo_command(dx, dy)
+                    if not search_mode:
+                        send_servo_command(dx, dy)
 
-                    # Visualization
+                    # Visualization (show class name if in all-classes mode)
                     cv2.circle(frame, largest_obj, 5, (0, 255, 0), -1)
                     cv2.circle(frame, (center_x, center_y), 5, (255, 0, 0), -1)
                     cv2.line(frame, largest_obj, (center_x, center_y), (0, 0, 255), 2)
-                    cv2.putText(frame, f"Tracking: {COCO_CLASSES[TARGET_CLASS]}",
-                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    display_text = f"Tracking: {COCO_CLASSES[best_class]}" if TARGET_CLASS == -1 else f"Tracking: {COCO_CLASSES[TARGET_CLASS]}"
+                    cv2.putText(frame, display_text,
+                               (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
             # Display the results
             annotated_frame = result.plot()
@@ -252,7 +258,7 @@ try:
             cv2.imshow("YOLO Detection", resized_frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-
+            
 finally:
     stop_command = {'type': 'stop'}
     try:
