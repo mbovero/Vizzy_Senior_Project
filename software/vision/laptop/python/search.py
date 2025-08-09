@@ -9,13 +9,58 @@ import argparse
 import threading
 import statistics
 
+# ---- HUD drawing with word-wrap ----
+import math
+
+HUD_FONT = cv2.FONT_HERSHEY_SIMPLEX
+HUD_SCALE = 0.7            # ↓ smaller than before
+HUD_THICK = 2
+HUD_LINE_GAP = 6           # px between lines
+
+def draw_wrapped_text(img, text, x, y, max_width, scale=HUD_SCALE, color=(0,0,255), thick=HUD_THICK):
+    """
+    Draw 'text' wrapped to fit max_width (pixels), starting at (x,y).
+    Returns bottom y coordinate after drawing.
+    """
+    words = text.split()
+    if not words:
+        return y
+
+    line = ""
+    ascent = cv2.getTextSize("Ag", HUD_FONT, scale, thick)[0][1]
+    line_h = int(ascent + HUD_LINE_GAP)
+
+    for w in words:
+        test = (w if not line else (line + " " + w))
+        (tw, _), _ = cv2.getTextSize(test, HUD_FONT, scale, thick)
+        if tw <= max_width:
+            line = test
+        else:
+            # draw current line and wrap
+            cv2.putText(img, line, (x, y), HUD_FONT, scale, color, thick, cv2.LINE_AA)
+            y += line_h
+            line = w
+
+    if line:
+        cv2.putText(img, line, (x, y), HUD_FONT, scale, color, thick, cv2.LINE_AA)
+        y += line_h
+
+    return y
+
 # ==============================
 # Config / CLI
 # ==============================
 DISPLAY_SCALE = 1.5
 SERVO_SPEED = 0.2
 DEADZONE = 30
-MIN_FRAMES_FOR_CLASS = 8   # require at least this many frames in the scan window
+
+# Scan summarizer robustness
+MIN_FRAMES_FOR_CLASS = 4  # ignore classes that appear in too few frames in a scan window
+
+# --- Centering success criteria (tune here) ---
+CENTER_CONF_THRESHOLD   = 0.60   # min per-frame conf during centering
+CENTER_MOVE_NORM_EPS    = 0.035  # |ndx| and |ndy| must both be below this to be "stable"
+REQUIRED_GOOD_FRAMES    = 12     # total (not necessarily consecutive) frames meeting all criteria
 
 parser = argparse.ArgumentParser(description='Laptop client for YOLO-driven robotic arm')
 parser.add_argument('--class-id', type=int, default=-1,
@@ -30,7 +75,11 @@ parser.add_argument('--engine', type=str, default='yolo11m-seg.engine',
                     help='Path to YOLO engine or model')
 parser.add_argument('--camera-index', type=int, default=4,
                     help='OpenCV camera index')
+parser.add_argument('--debug', action='store_true',
+                    help='Enable verbose diagnostics during centering verification')
 args = parser.parse_args()
+
+DEBUG_DIAG = bool(args.debug)
 
 PI_IP = args.ip
 PI_PORT = args.port
@@ -44,7 +93,7 @@ print(f"Using device: {device}")
 model = YOLO(args.engine)
 
 # Names mapping from the loaded model (authoritative)
-NAMES = model.names  # can be dict[int,str] or list[str]
+NAMES = model.names  # dict[int,str] or list[str]
 
 def get_name(cid: int) -> str:
     try:
@@ -243,7 +292,7 @@ def run_scan_window(duration_s: float, class_filter: int, exclude_ids=None):
         if not ok:
             break
 
-        # Be explicit: ALL classes => classes=None (also clears sticky filter)
+        # ALL classes => classes=None (clears sticky filter)
         if class_filter == -1:
             results = model(frame, classes=None, stream=True)
         else:
@@ -289,12 +338,11 @@ def run_scan_window(duration_s: float, class_filter: int, exclude_ids=None):
             cv2.imshow("YOLO Detection", resized)
             cv2.waitKey(1)
 
-    # Build summary
+    # Build summary (apply min-frames gate)
     objects = []
     for cls_id, confs in per_class_conf.items():
         if len(confs) < MIN_FRAMES_FOR_CLASS:
-            continue  # NEW: skip weak/hallucinated hits
-
+            continue
         avg_conf = sum(confs) / len(confs)
         med_cx = statistics.median(per_class_cx[cls_id])
         med_cy = statistics.median(per_class_cy[cls_id])
@@ -311,28 +359,56 @@ def run_scan_window(duration_s: float, class_filter: int, exclude_ids=None):
     return {"frames": int(frames), "objects": objects}
 
 # ==============================
-# CENTERING LOOP: center on a single target class for duration
+# CENTERING LOOP: quota-based verification + optional diagnostics
 # ==============================
 def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
     """
-    For ~duration_s, run YOLO on target_cls. Send 'move' commands to RPi
-    to reduce pixel error vs image center. Keep the UI updating.
+    Try to center on target_cls for ~duration_s.
+
+    Success requires a QUOTA of frames (REQUIRED_GOOD_FRAMES) where ALL are true:
+      - conf >= CENTER_CONF_THRESHOLD
+      - pixel error <= epsilon_px
+      - |ndx| and |ndy| < CENTER_MOVE_NORM_EPS
+
+    Sends CENTER_DONE with:
+      - 'success': bool
+      - 'diag': {...} only if --debug is enabled
     """
     t0 = time.time()
     label = f"CENTERING {get_name(target_cls)} (id {target_cls})"
+
+    good_frames = 0
+    success = False
+
+    # Diagnostics (populated only if DEBUG_DIAG)
+    total_frames = 0
+    frames_conf_ok = 0
+    frames_err_ok = 0
+    frames_move_small = 0
+
+    max_conf_seen = 0.0
+    min_err_px_seen = float('inf')
+    min_move_norm_seen = float('inf')
+
+    last_conf = 0.0
+    last_err_px = None
+    last_move_norm = None
+
     while (time.time() - t0) < duration_s:
         ok, frame = cap.read()
         if not ok:
             break
 
-        # Restrict to the target class during centering
         results = model(frame, classes=[target_cls], stream=True)
 
         for result in results:
+            total_frames += 1
             annotated = result.plot()
 
             best = None
+            best_conf = 0.0
             max_area = 0
+
             if len(result.boxes) > 0:
                 for box in result.boxes:
                     if int(box.cls) != int(target_cls):
@@ -342,27 +418,89 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
                     if area > max_area:
                         max_area = area
                         best = ((x1 + x2) // 2, (y1 + y2) // 2)
+                        best_conf = float(box.conf[0])
+
+            conf_ok = False
+            err_ok = False
+            move_small = False
 
             if best is not None:
                 dx = (center_x - best[0])
                 dy = (best[1] - center_y)
-                if abs(dx) > epsilon_px or abs(dy) > epsilon_px:
-                    ndx = dx / center_x
-                    ndy = dy / center_y
+                err_px = max(abs(dx), abs(dy))
+                ndx = dx / center_x
+                ndy = dy / center_y
+                move_norm = max(abs(ndx), abs(ndy))
+
+                conf_ok = (best_conf >= CENTER_CONF_THRESHOLD)
+                err_ok = (abs(dx) <= epsilon_px and abs(dy) <= epsilon_px)
+                move_small = (abs(ndx) < CENTER_MOVE_NORM_EPS and abs(ndy) < CENTER_MOVE_NORM_EPS)
+
+                # Drive servos if not yet inside the stability box
+                if not (err_ok and move_small):
                     try:
                         send_json(pi_socket, {'type': 'move',
                                               'horizontal': ndx * SERVO_SPEED,
-                                              'vertical': ndy * SERVO_SPEED})
+                                              'vertical':   ndy * SERVO_SPEED})
                     except (BrokenPipeError, ConnectionResetError, OSError):
                         new_sock = connect_to_pi()
                         globals()['pi_socket'] = new_sock
                         send_json(pi_socket, {'type': 'move',
                                               'horizontal': ndx * SERVO_SPEED,
-                                              'vertical': ndy * SERVO_SPEED})
+                                              'vertical':   ndy * SERVO_SPEED})
 
-            # HUD + repaint
-            cv2.putText(annotated, label, (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                # Update counters
+                if conf_ok and err_ok and move_small:
+                    good_frames += 1
+                    if good_frames >= REQUIRED_GOOD_FRAMES:
+                        success = True  # latch; we still run until duration (or break early if you want)
+                if DEBUG_DIAG:
+                    max_conf_seen = max(max_conf_seen, best_conf)
+                    min_err_px_seen = min(min_err_px_seen, err_px)
+                    min_move_norm_seen = min(min_move_norm_seen, move_norm)
+                    last_conf = best_conf
+                    last_err_px = err_px
+                    last_move_norm = move_norm
+                    if conf_ok: frames_conf_ok += 1
+                    if err_ok: frames_err_ok += 1
+                    if move_small: frames_move_small += 1
+
+            if DEBUG_DIAG:
+                # Live numbers (fall back to last seen when target is missing)
+                disp_conf = best_conf if best is not None else (last_conf if last_conf else 0.0)
+                disp_err  = err_px    if best is not None else (last_err_px if last_err_px is not None else 0)
+                disp_move = move_norm if best is not None else (last_move_norm if last_move_norm is not None else 0.0)
+
+                # Per-criterion indicators
+                conf_tag  = "OK" if disp_conf >= CENTER_CONF_THRESHOLD else "low"
+                err_tag   = "OK" if disp_err <= epsilon_px else "high"
+                move_tag  = "OK" if disp_move < CENTER_MOVE_NORM_EPS else "moving"
+
+                if best is None:
+                    hud = (
+                        f"{label}  "
+                        f"quota {good_frames}/{REQUIRED_GOOD_FRAMES}  "
+                        f"[NO TARGET IN FRAME]  "
+                        f"conf {disp_conf:.2f} (>={CENTER_CONF_THRESHOLD:.2f}) {conf_tag}  "
+                        f"err {disp_err:.0f}px (<={epsilon_px}px) {err_tag}  "
+                        f"move {disp_move:.3f} (<{CENTER_MOVE_NORM_EPS:.3f}) {move_tag}"
+                    )
+                else:
+                    hud = (
+                        f"{label}  "
+                        f"quota {good_frames}/{REQUIRED_GOOD_FRAMES}  "
+                        f"conf {disp_conf:.2f} (>={CENTER_CONF_THRESHOLD:.2f}) {conf_tag}  "
+                        f"err {disp_err:.0f}px (<={epsilon_px}px) {err_tag}  "
+                        f"move {disp_move:.3f} (<{CENTER_MOVE_NORM_EPS:.3f}) {move_tag}"
+                    )
+            else:
+                hud = (
+                    f"{label}  "
+                    f"quota {good_frames}/{REQUIRED_GOOD_FRAMES}  "
+                )
+
+            max_w = int(annotated.shape[1] * 0.92)
+            draw_wrapped_text(annotated, hud, 10, 24, max_w)
             h, w = annotated.shape[:2]
             resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
             cv2.imshow("YOLO Detection", resized)
@@ -371,13 +509,41 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
     # Make sure future scans use ALL classes again (clear sticky class filter)
     clear_model_class_filter()
 
-    # Notify RPi we’re done centering
+    # Build diagnostics (only if debugging)
+    diag = None
+    if DEBUG_DIAG:
+        diag = {
+            "thresholds": {
+                "conf_per_frame": CENTER_CONF_THRESHOLD,
+                "pixel_epsilon": epsilon_px,
+                "move_norm_eps": CENTER_MOVE_NORM_EPS,
+                "required_good_frames": REQUIRED_GOOD_FRAMES
+            },
+            "observed": {
+                "total_frames": int(total_frames),
+                "good_frames": int(good_frames),
+                "max_conf_seen": round(max_conf_seen, 4),
+                "min_err_px_seen": None if min_err_px_seen == float('inf') else int(min_err_px_seen),
+                "min_move_norm_seen": None if min_move_norm_seen == float('inf') else round(min_move_norm_seen, 4),
+                "last_conf": round(last_conf, 4),
+                "last_err_px": None if last_err_px is None else int(last_err_px),
+                "last_move_norm": None if last_move_norm is None else round(last_move_norm, 4),
+                "frames_conf_ok": int(frames_conf_ok),
+                "frames_err_ok": int(frames_err_ok),
+                "frames_move_small": int(frames_move_small),
+            }
+        }
+
+    # Notify RPi we’re done centering, include success + diagnostics (if any)
+    payload = {"type": "CENTER_DONE", "target_cls": int(target_cls), "success": bool(success)}
+    if diag is not None:
+        payload["diag"] = diag
     try:
-        send_json(pi_socket, {"type": "CENTER_DONE", "target_cls": int(target_cls)})
+        send_json(pi_socket, payload)
     except (BrokenPipeError, ConnectionResetError, OSError):
         new_sock = connect_to_pi()
         globals()['pi_socket'] = new_sock
-        send_json(pi_socket, {"type": "CENTER_DONE", "target_cls": int(target_cls)})
+        send_json(pi_socket, payload)
 
 # ==============================
 # Main loop
@@ -385,7 +551,7 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
 try:
     while True:
         # Keyboard: toggle Search Mode from laptop
-        key = cv2.waitKey(10) & 0xFF
+        key = cv2.waitKey(1) & 0xFF
         if key == ord('s'):
             search_mode = not search_mode
             send_search_command(search_mode)
@@ -401,7 +567,6 @@ try:
         if pending_scan is not None:
             duration_ms = int(pending_scan.get("duration_ms", 900))
             exclude_ids = pending_scan.get("exclude_cls", [])
-            # Explicitly request ALL classes (classes=None under the hood) if resolved_class_id == -1
             summary = run_scan_window(duration_s=duration_ms / 1000.0,
                                       class_filter=resolved_class_id,
                                       exclude_ids=exclude_ids)
@@ -422,7 +587,8 @@ try:
             target = int(pending_center["target_cls"])
             dur_s = float(pending_center["duration_ms"]) / 1000.0
             eps = int(pending_center["epsilon_px"])
-            print(f"[Laptop] Centering on {get_name(target)} (id {target}) for {dur_s:.2f}s")
+            print(f"[Laptop] Centering on {get_name(target)} (id {target}) for {dur_s:.2f}s "
+                  f"{'(debug on)' if DEBUG_DIAG else '(debug off)'}")
             center_on_class(dur_s, target, eps)
             continue
 
@@ -457,7 +623,6 @@ try:
                 if largest_obj:
                     dx, dy = calculate_servo_movement(largest_obj, (center_x, center_y))
                     if not search_mode:
-                        # Only drive servos in manual/track mode
                         send_servo_command(dx, dy)
 
                     # Simple overlay
