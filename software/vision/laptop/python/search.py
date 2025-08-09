@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from ultralytics import YOLO
 import cv2
 import torch
@@ -8,62 +9,100 @@ import argparse
 import threading
 import statistics
 
+# ==============================
+# Config / CLI
+# ==============================
 DISPLAY_SCALE = 1.5
+SERVO_SPEED = 0.2
+DEADZONE = 30
+MIN_FRAMES_FOR_CLASS = 8   # require at least this many frames in the scan window
 
-COCO_CLASSES = {
-    0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane', 5: 'bus', 6: 'train', 7: 'truck', 8: 'boat',
-    9: 'traffic light', 10: 'fire hydrant', 11: 'stop sign', 12: 'parking meter', 13: 'bench', 14: 'bird', 15: 'cat',
-    16: 'dog', 17: 'horse', 18: 'sheep', 19: 'cow', 20: 'elephant', 21: 'bear', 22: 'zebra', 23: 'giraffe',
-    24: 'backpack', 25: 'umbrella', 26: 'handbag', 27: 'tie', 28: 'suitcase', 29: 'frisbee', 30: 'skis',
-    31: 'snowboard', 32: 'sports ball', 33: 'kite', 34: 'baseball bat', 35: 'baseball glove', 36: 'skateboard',
-    37: 'surfboard', 38: 'tennis racket', 39: 'bottle', 40: 'wine glass', 41: 'cup', 42: 'fork', 43: 'knife',
-    44: 'spoon', 45: 'bowl', 46: 'banana', 47: 'apple', 48: 'sandwich', 49: 'orange', 50: 'broccoli', 51: 'carrot',
-    52: 'hot dog', 53: 'pizza', 54: 'donut', 55: 'cake', 56: 'chair', 57: 'couch', 58: 'potted plant', 59: 'bed',
-    60: 'dining table', 61: 'toilet', 62: 'tv', 63: 'laptop', 64: 'mouse', 65: 'remote', 66: 'keyboard',
-    67: 'cell phone', 68: 'microwave', 69: 'oven', 70: 'toaster', 71: 'sink', 72: 'refrigerator', 73: 'book',
-    74: 'clock', 75: 'vase', 76: 'scissors', 77: 'teddy bear', 78: 'hair drier', 79: 'toothbrush'
-}
-
-parser = argparse.ArgumentParser(description='Object Tracking with YOLO (Laptop client)')
+parser = argparse.ArgumentParser(description='Laptop client for YOLO-driven robotic arm')
 parser.add_argument('--class-id', type=int, default=-1,
-                    help='COCO class ID to track (-1 for all classes)')
+                    help='Numeric class ID to track (-1 for all classes). Interpreted using model.names.')
+parser.add_argument('--class-name', type=str, default=None,
+                    help='Class name to track (e.g., "laptop"). Overrides --class-id if provided.')
 parser.add_argument('--ip', type=str, default='192.168.1.30',
                     help='Raspberry Pi IP address')
 parser.add_argument('--port', type=int, default=65432,
                     help='Port number for socket connection')
+parser.add_argument('--engine', type=str, default='yolo11m-seg.engine',
+                    help='Path to YOLO engine or model')
+parser.add_argument('--camera-index', type=int, default=4,
+                    help='OpenCV camera index')
 args = parser.parse_args()
 
 PI_IP = args.ip
 PI_PORT = args.port
-TARGET_CLASS = args.class_id
-SERVO_SPEED = 0.2
-DEADZONE = 30
 
-if TARGET_CLASS != -1 and TARGET_CLASS not in COCO_CLASSES:
-    print(f"Error: Class ID {TARGET_CLASS} not found.")
-    exit(1)
-
-print(f"Tracking: {'ALL CLASSES' if TARGET_CLASS == -1 else COCO_CLASSES[TARGET_CLASS]} (class ID: {TARGET_CLASS})")
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Using device: {device}")
 
-# Load YOLO engine (adjust path as needed)
-model = YOLO("yolo11m-seg.engine")
+# ==============================
+# Model + Camera
+# ==============================
+model = YOLO(args.engine)
 
-# ----- Camera -----
-cap = cv2.VideoCapture(4, cv2.CAP_V4L2)
+# Names mapping from the loaded model (authoritative)
+NAMES = model.names  # can be dict[int,str] or list[str]
+
+def get_name(cid: int) -> str:
+    try:
+        if isinstance(NAMES, dict):
+            return str(NAMES[int(cid)])
+        else:
+            return str(NAMES[int(cid)])
+    except Exception:
+        return str(cid)
+
+def name_to_id(name: str):
+    if name is None:
+        return None
+    lname = name.strip().lower()
+    try:
+        if isinstance(NAMES, dict):
+            for k, v in NAMES.items():
+                if str(v).lower() == lname:
+                    return int(k)
+        else:
+            for i, v in enumerate(NAMES):
+                if str(v).lower() == lname:
+                    return int(i)
+    except Exception:
+        pass
+    return None
+
+# Resolve target class
+resolved_class_id = -1
+if args.class_name:
+    cid = name_to_id(args.class_name)
+    if cid is None:
+        print(f"[WARN] Class name '{args.class_name}' not found in model.names. Falling back to ALL CLASSES.")
+        resolved_class_id = -1
+    else:
+        resolved_class_id = cid
+else:
+    if args.class_id >= 0:
+        resolved_class_id = int(args.class_id)
+
+print(f"Tracking: {'ALL CLASSES' if resolved_class_id == -1 else f'{get_name(resolved_class_id)} (id {resolved_class_id})'}")
+
+cap = cv2.VideoCapture(args.camera_index, cv2.CAP_V4L2)
 if not cap.isOpened():
     print("Error: Could not open camera")
     exit(1)
 
-ret, frame = cap.read()
-if not ret:
-    print("Error: Could not read frame")
+ok, frame0 = cap.read()
+if not ok:
+    print("Error: Could not read frame from camera")
     exit(1)
-frame_height, frame_width = frame.shape[:2]
-center_x, center_y = frame_width // 2, frame_height // 2
 
-# ----- Socket helpers (line-delimited JSON) -----
+frame_h, frame_w = frame0.shape[:2]
+center_x, center_y = frame_w // 2, frame_h // 2
+
+# ==============================
+# Socket helpers (line-delimited JSON)
+# ==============================
 def connect_to_pi():
     while True:
         try:
@@ -78,28 +117,35 @@ def connect_to_pi():
 
 def send_json(sock, obj):
     msg = json.dumps(obj) + "\n"
-    try:
-        sock.sendall(msg.encode("utf-8"))
-    except (BrokenPipeError, ConnectionResetError):
-        raise
+    sock.sendall(msg.encode("utf-8"))
 
 pi_socket = connect_to_pi()
 
-# ----- Shared flags for search & scan -----
+# ==============================
+# Shared state
+# ==============================
 search_mode = False
-scan_request_lock = threading.Lock()
-scan_request = None  # dict like {"duration_ms": 2000}
 
-# ----- Receiving thread: reacts to YOLO_SCAN -----
+scan_request_lock = threading.Lock()
+scan_request = None  # {"duration_ms": 900, "exclude_cls": [...]}
+
+center_request_lock = threading.Lock()
+center_request = None  # {"target_cls": 63, "duration_ms": 1500, "epsilon_px": 25}
+
+# ==============================
+# Receiver: handle RPi -> Laptop commands
+# ==============================
 def receiver_loop():
-    global search_mode, scan_request, pi_socket
+    global pi_socket, scan_request, center_request
     buf = b""
     while True:
         try:
             data = pi_socket.recv(4096)
             if not data:
-                print("[Laptop] Connection closed by RPi")
-                break
+                print("[Laptop] Connection closed by RPi; reconnecting...")
+                pi_socket = connect_to_pi()
+                buf = b""
+                continue
             buf += data
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
@@ -110,53 +156,78 @@ def receiver_loop():
                 except json.JSONDecodeError:
                     continue
 
-                # Handle commands from RPi
+                # YOLO scan request
                 if msg.get("cmd") == "YOLO_SCAN":
-                    dur = int(msg.get("duration_ms", 2000))
+                    dur = int(msg.get("duration_ms", 900))
+                    excl = msg.get("exclude_cls", [])
                     with scan_request_lock:
-                        scan_request = {"duration_ms": dur}
-                # (We can add more RPi->Laptop commands later as needed)
-        except (ConnectionResetError, OSError):
-            print("[Laptop] Socket error; attempting reconnect...")
+                        scan_request = {"duration_ms": dur, "exclude_cls": excl}
+
+                # Centering request
+                elif msg.get("cmd") == "CENTER_ON":
+                    with center_request_lock:
+                        center_request = {
+                            "target_cls": int(msg.get("target_cls", -1)),
+                            "duration_ms": int(msg.get("duration_ms", 1200)),
+                            "epsilon_px": int(msg.get("epsilon_px", 25)),
+                        }
+
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            print("[Laptop] Socket error; reconnecting...")
             pi_socket = connect_to_pi()
             buf = b""
 
 recv_thread = threading.Thread(target=receiver_loop, daemon=True)
 recv_thread.start()
 
-# ----- Servo control (manual tracking only when not in search) -----
+# ==============================
+# Utility: movement + search toggle + model filter reset
+# ==============================
 def calculate_servo_movement(obj_center, frame_center):
     dx = frame_center[0] - obj_center[0]
     dy = obj_center[1] - frame_center[1]
-    norm_dx = dx / frame_center[0] if abs(dx) > DEADZONE else 0.0
-    norm_dy = dy / frame_center[1] if abs(dy) > DEADZONE else 0.0
-    return norm_dx, norm_dy
+    ndx = dx / frame_center[0] if abs(dx) > DEADZONE else 0.0
+    ndy = dy / frame_center[1] if abs(dy) > DEADZONE else 0.0
+    return ndx, ndy
 
 def send_servo_command(dx, dy):
     global pi_socket
     cmd = {'type': 'move', 'horizontal': dx * SERVO_SPEED, 'vertical': dy * SERVO_SPEED}
     try:
         send_json(pi_socket, cmd)
-    except (BrokenPipeError, ConnectionResetError):
+    except (BrokenPipeError, ConnectionResetError, OSError):
         pi_socket = connect_to_pi()
         send_json(pi_socket, cmd)
 
-def send_search_command(active):
+def send_search_command(active: bool):
     global pi_socket, search_mode
-    cmd = {'type': 'search', 'active': bool(active)}
     search_mode = bool(active)
     try:
-        send_json(pi_socket, cmd)
-    except (BrokenPipeError, ConnectionResetError):
+        send_json(pi_socket, {'type': 'search', 'active': search_mode})
+    except (BrokenPipeError, ConnectionResetError, OSError):
         pi_socket = connect_to_pi()
-        send_json(pi_socket, cmd)
+        send_json(pi_socket, {'type': 'search', 'active': search_mode})
 
-def run_scan_window(duration_s: float, class_filter: int):
+def clear_model_class_filter():
+    """Ensure subsequent calls are NOT class-filtered."""
+    try:
+        if hasattr(model, "predictor") and hasattr(model.predictor, "args"):
+            model.predictor.args.classes = None
+    except Exception:
+        pass
+
+# ==============================
+# SCAN WINDOW: run YOLO ~duration and keep UI alive
+# ==============================
+def run_scan_window(duration_s: float, class_filter: int, exclude_ids=None):
     """
-    Run YOLO for ~duration_s and return a lightweight summary.
-    During the scan window we also update the OpenCV window so the UI stays live.
+    Collect detections for ~duration_s and return per-class aggregates.
+    exclude_ids: set/list of class IDs to ignore when summarizing (still drawn).
     """
-    import statistics
+    if exclude_ids is None:
+        exclude_ids = set()
+    else:
+        exclude_ids = set(int(x) for x in exclude_ids)
 
     t0 = time.time()
     frames = 0
@@ -165,7 +236,6 @@ def run_scan_window(duration_s: float, class_filter: int):
     per_class_cx = {}
     per_class_cy = {}
 
-    # Optional: simple HUD text
     hud_text = f"SCANNING ~{int(duration_s*1000)} ms"
 
     while (time.time() - t0) < duration_s:
@@ -173,16 +243,16 @@ def run_scan_window(duration_s: float, class_filter: int):
         if not ok:
             break
 
-        # Run model (with or without class filter)
+        # Be explicit: ALL classes => classes=None (also clears sticky filter)
         if class_filter == -1:
-            results = model(frame, stream=True)
+            results = model(frame, classes=None, stream=True)
         else:
             results = model(frame, classes=[class_filter], stream=True)
 
         for result in results:
             frames += 1
 
-            # ---- accumulate simple stats (largest box per frame) ----
+            # accumulate stats using largest box per frame
             if len(result.boxes) > 0:
                 largest = None
                 max_area = 0
@@ -190,14 +260,19 @@ def run_scan_window(duration_s: float, class_filter: int):
                 best_conf = None
 
                 for box in result.boxes:
-                    if class_filter != -1 and int(box.cls) != class_filter:
+                    cid = int(box.cls)
+                    # Respect filter and exclude set for summary
+                    if class_filter != -1 and cid != class_filter:
                         continue
+                    if cid in exclude_ids:
+                        continue
+
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     area = (x2 - x1) * (y2 - y1)
                     if area > max_area:
                         max_area = area
                         largest = ((x1 + x2) // 2, (y1 + y2) // 2)
-                        best_cls = int(box.cls) if class_filter == -1 else class_filter
+                        best_cls = cid
                         best_conf = float(box.conf[0])
 
                 if largest is not None and best_cls is not None:
@@ -205,26 +280,28 @@ def run_scan_window(duration_s: float, class_filter: int):
                     per_class_cx.setdefault(best_cls, []).append(largest[0])
                     per_class_cy.setdefault(best_cls, []).append(largest[1])
 
-            # ---- live UI update during scan window ----
-            annotated = result.plot()
-            # add a small "SCANNING" HUD
+            # live UI update (we still draw everything, even excluded classes)
+            annotated = result.plot()  # uses model.names internally
             cv2.putText(annotated, hud_text, (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
             h, w = annotated.shape[:2]
-            resized = cv2.resize(annotated,
-                                 (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
+            resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
             cv2.imshow("YOLO Detection", resized)
-            cv2.waitKey(1)  # critical: lets OpenCV repaint
+            cv2.waitKey(1)
 
-    # Build summary to send back to RPi
+    # Build summary
     objects = []
     for cls_id, confs in per_class_conf.items():
+        if len(confs) < MIN_FRAMES_FOR_CLASS:
+            continue  # NEW: skip weak/hallucinated hits
+
         avg_conf = sum(confs) / len(confs)
         med_cx = statistics.median(per_class_cx[cls_id])
         med_cy = statistics.median(per_class_cy[cls_id])
+        name = get_name(int(cls_id))
         objects.append({
             "cls_id": int(cls_id),
-            "cls": COCO_CLASSES.get(int(cls_id), str(cls_id)),
+            "cls_name": name,
             "avg_conf": float(avg_conf),
             "median_center": [float(med_cx), float(med_cy)],
             "frames": int(len(confs))
@@ -233,44 +310,133 @@ def run_scan_window(duration_s: float, class_filter: int):
 
     return {"frames": int(frames), "objects": objects}
 
-# ----- Main UI / loop -----
+# ==============================
+# CENTERING LOOP: center on a single target class for duration
+# ==============================
+def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
+    """
+    For ~duration_s, run YOLO on target_cls. Send 'move' commands to RPi
+    to reduce pixel error vs image center. Keep the UI updating.
+    """
+    t0 = time.time()
+    label = f"CENTERING {get_name(target_cls)} (id {target_cls})"
+    while (time.time() - t0) < duration_s:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        # Restrict to the target class during centering
+        results = model(frame, classes=[target_cls], stream=True)
+
+        for result in results:
+            annotated = result.plot()
+
+            best = None
+            max_area = 0
+            if len(result.boxes) > 0:
+                for box in result.boxes:
+                    if int(box.cls) != int(target_cls):
+                        continue
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    area = (x2 - x1) * (y2 - y1)
+                    if area > max_area:
+                        max_area = area
+                        best = ((x1 + x2) // 2, (y1 + y2) // 2)
+
+            if best is not None:
+                dx = (center_x - best[0])
+                dy = (best[1] - center_y)
+                if abs(dx) > epsilon_px or abs(dy) > epsilon_px:
+                    ndx = dx / center_x
+                    ndy = dy / center_y
+                    try:
+                        send_json(pi_socket, {'type': 'move',
+                                              'horizontal': ndx * SERVO_SPEED,
+                                              'vertical': ndy * SERVO_SPEED})
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        new_sock = connect_to_pi()
+                        globals()['pi_socket'] = new_sock
+                        send_json(pi_socket, {'type': 'move',
+                                              'horizontal': ndx * SERVO_SPEED,
+                                              'vertical': ndy * SERVO_SPEED})
+
+            # HUD + repaint
+            cv2.putText(annotated, label, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+            h, w = annotated.shape[:2]
+            resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
+            cv2.imshow("YOLO Detection", resized)
+            cv2.waitKey(1)
+
+    # Make sure future scans use ALL classes again (clear sticky class filter)
+    clear_model_class_filter()
+
+    # Notify RPi we’re done centering
+    try:
+        send_json(pi_socket, {"type": "CENTER_DONE", "target_cls": int(target_cls)})
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        new_sock = connect_to_pi()
+        globals()['pi_socket'] = new_sock
+        send_json(pi_socket, {"type": "CENTER_DONE", "target_cls": int(target_cls)})
+
+# ==============================
+# Main loop
+# ==============================
 try:
     while True:
-        # Keyboard: toggle search locally (and tell RPi)
+        # Keyboard: toggle Search Mode from laptop
         key = cv2.waitKey(10) & 0xFF
         if key == ord('s'):
             search_mode = not search_mode
             send_search_command(search_mode)
             print(f"{'Entering' if search_mode else 'Exiting'} search mode")
+        elif key == ord('q'):
+            break
 
-        # If an RPi scan request is pending, service it immediately
+        # Service pending scan request (from RPi)
         with scan_request_lock:
-            pending = scan_request
+            pending_scan = scan_request
             scan_request = None
 
-        if pending is not None:
-            duration_ms = int(pending.get("duration_ms", 200))
-            summary = run_scan_window(duration_s=duration_ms / 1000.0, class_filter=TARGET_CLASS)
-            # Reply with results (RPi currently just waits for this before continuing)
+        if pending_scan is not None:
+            duration_ms = int(pending_scan.get("duration_ms", 900))
+            exclude_ids = pending_scan.get("exclude_cls", [])
+            # Explicitly request ALL classes (classes=None under the hood) if resolved_class_id == -1
+            summary = run_scan_window(duration_s=duration_ms / 1000.0,
+                                      class_filter=resolved_class_id,
+                                      exclude_ids=exclude_ids)
+            # Reply with results to let RPi proceed
             try:
                 send_json(pi_socket, {"type": "YOLO_RESULTS", **summary})
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, OSError):
                 pi_socket = connect_to_pi()
                 send_json(pi_socket, {"type": "YOLO_RESULTS", **summary})
-            # Continue loop (no persistence yet)
             continue
 
-        # Normal live view + (optional) manual centering when NOT in search mode
+        # Service pending centering request (from RPi)
+        with center_request_lock:
+            pending_center = center_request
+            center_request = None
+
+        if pending_center is not None:
+            target = int(pending_center["target_cls"])
+            dur_s = float(pending_center["duration_ms"]) / 1000.0
+            eps = int(pending_center["epsilon_px"])
+            print(f"[Laptop] Centering on {get_name(target)} (id {target}) for {dur_s:.2f}s")
+            center_on_class(dur_s, target, eps)
+            continue
+
+        # Normal live view + optional manual tracking when NOT in search mode
         ok, frame = cap.read()
         if not ok:
             print("Failed to grab frame")
             break
 
-        # Run YOLO for visualization/tracking
-        if TARGET_CLASS == -1:
-            results = model(frame, stream=True)
+        # Run YOLO (filtered or not). Be explicit to avoid sticky class filters.
+        if resolved_class_id == -1:
+            results = model(frame, classes=None, stream=True)  # ALL classes
         else:
-            results = model(frame, classes=[TARGET_CLASS], stream=True)
+            results = model(frame, classes=[resolved_class_id], stream=True)
 
         for result in results:
             largest_obj = None
@@ -279,14 +445,14 @@ try:
 
             if len(result.boxes) > 0:
                 for box in result.boxes:
-                    if TARGET_CLASS != -1 and int(box.cls) != TARGET_CLASS:
+                    if resolved_class_id != -1 and int(box.cls) != resolved_class_id:
                         continue
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     area = (x2 - x1) * (y2 - y1)
                     if area > max_area:
                         max_area = area
                         largest_obj = ((x1 + x2) // 2, (y1 + y2) // 2)
-                        best_class = int(box.cls) if TARGET_CLASS == -1 else TARGET_CLASS
+                        best_class = int(box.cls) if resolved_class_id == -1 else resolved_class_id
 
                 if largest_obj:
                     dx, dy = calculate_servo_movement(largest_obj, (center_x, center_y))
@@ -294,26 +460,18 @@ try:
                         # Only drive servos in manual/track mode
                         send_servo_command(dx, dy)
 
-                    # Visualization
+                    # Simple overlay
                     cv2.circle(frame, largest_obj, 5, (0, 255, 0), -1)
                     cv2.circle(frame, (center_x, center_y), 5, (255, 0, 0), -1)
                     cv2.line(frame, largest_obj, (center_x, center_y), (0, 0, 255), 2)
-                    label = f"Tracking: {COCO_CLASSES[best_class]}" if best_class is not None else "Tracking"
-                    cv2.putText(frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    if best_class is not None:
+                        label = f"Tracking: {get_name(best_class)} (id {best_class})"
+                        cv2.putText(frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-                annotated = result.plot()
-                h, w = annotated.shape[:2]
-                resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
-                cv2.imshow("YOLO Detection", resized)
-                cv2.waitKey(1)  # crucial: lets OpenCV repaint
-
-            annotated = result.plot()
+            annotated = result.plot()  # uses model.names internally
             h, w = annotated.shape[:2]
             resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
             cv2.imshow("YOLO Detection", resized)
-
-        if cv2.waitKey(5) & 0xFF == ord('q'):
-            break
 
 finally:
     try:
