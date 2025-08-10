@@ -1,7 +1,7 @@
 # vizzy/rpi/search.py
 from __future__ import annotations
 import time, select
-from .server import process_messages
+from .dispatch import process_messages
 from typing import Optional, Tuple, List, Dict
 from ..shared.jsonl import send_json, recv_lines
 from ..shared import protocol as P
