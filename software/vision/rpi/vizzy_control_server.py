@@ -36,6 +36,9 @@ SERVO_CENTER = 1500  # us
 current_horizontal = SERVO_CENTER
 current_vertical = SERVO_CENTER
 
+def clamp(v, vmin, vmax):
+    return max(vmin, min(vmax, v))
+
 def setup_servos(pi):
     pi.set_servo_pulsewidth(SERVO_MID, SERVO_CENTER)
     pi.set_servo_pulsewidth(SERVO_BTM, SERVO_CENTER)
@@ -46,12 +49,36 @@ def move_servos(pi, horizontal, vertical):
     global current_horizontal, current_vertical
     horizontal_change = int(horizontal * 200)
     vertical_change   = int(vertical * 200)
-    new_horizontal = max(SERVO_MIN, min(SERVO_MAX, current_horizontal + horizontal_change))
-    new_vertical   = max(SERVO_MIN, min(SERVO_MAX, current_vertical   - vertical_change))
+    new_horizontal = clamp(current_horizontal + horizontal_change, SERVO_MIN, SERVO_MAX)
+    new_vertical   = clamp(current_vertical   - vertical_change, SERVO_MIN, SERVO_MAX)
     pi.set_servo_pulsewidth(SERVO_BTM, new_horizontal)
     pi.set_servo_pulsewidth(SERVO_TOP, new_vertical)
     current_horizontal = new_horizontal
     current_vertical   = new_vertical
+
+def goto_pwms(pi, target_btm, target_top, duration_ms=600, steps=24):
+    """Smoothly slew to target PWMs over duration_ms."""
+    global current_horizontal, current_vertical
+    tb = clamp(int(target_btm), SERVO_MIN, SERVO_MAX)
+    tt = clamp(int(target_top),  SERVO_MIN, SERVO_MAX)
+
+    sb = current_horizontal
+    st = current_vertical
+    if steps <= 1 or duration_ms <= 0:
+        pi.set_servo_pulsewidth(SERVO_BTM, tb)
+        pi.set_servo_pulsewidth(SERVO_TOP, tt)
+        current_horizontal, current_vertical = tb, tt
+        return
+
+    dt = duration_ms / 1000.0 / steps
+    for i in range(1, steps + 1):
+        nb = int(sb + (tb - sb) * (i / steps))
+        nt = int(st + (tt - st) * (i / steps))
+        pi.set_servo_pulsewidth(SERVO_BTM, nb)
+        pi.set_servo_pulsewidth(SERVO_TOP, nt)
+        current_horizontal, current_vertical = nb, nt
+        # let other messages through (e.g., stop) without blocking long
+        time.sleep(dt)
 
 # ==============================
 # Search & centering params
@@ -113,6 +140,7 @@ def process_messages(pi, msgs):
 
     for msg in msgs:
         mtype = msg.get("type")
+        mcmd  = msg.get("cmd")
 
         if mtype == "move":
             if centering_active.is_set() or not search_active.is_set():
@@ -142,6 +170,20 @@ def process_messages(pi, msgs):
 
         elif mtype == "YOLO_RESULTS":
             yolo_results = msg
+
+        # ----- NEW: handle Laptop -> GOTO_PWMS command -----
+        elif mcmd == "GOTO_PWMS":
+            # Only honor when not in search or centering
+            if search_active.is_set() or centering_active.is_set():
+                if DEBUG_DIAG:
+                    print("[RPi] Ignoring GOTO_PWMS during search/centering")
+                continue
+            tb = int(msg.get("pwm_btm", SERVO_CENTER))
+            tt = int(msg.get("pwm_top", SERVO_CENTER))
+            slew = int(msg.get("slew_ms", 600))
+            if DEBUG_DIAG:
+                print(f"[RPi] GOTO_PWMS btm={tb} top={tt} slew_ms={slew}")
+            goto_pwms(pi, tb, tt, duration_ms=slew, steps=24)
 
     return stop, center_done_cls, center_success, center_diag, yolo_results
 
@@ -184,7 +226,7 @@ def run_search_cycle(pi, conn):
                 return None
 
     def center_on_class_and_return(target_cls: int, target_name: str, saved_h: int, saved_v: int):
-        global current_horizontal, current_vertical
+        global current_horizontal, current_vertical  # <-- keep globals up top
         nonlocal buf
         print(f"[RPi] Centering on {target_name} (id {target_cls})...")
         centering_active.set()
@@ -221,7 +263,7 @@ def run_search_cycle(pi, conn):
 
         centering_active.clear()
 
-        # === NEW: if verified, snapshot current PWM pose for laptop memory ===
+        # === If verified, snapshot current PWM pose for laptop memory ===
         if success:
             try:
                 send_json(conn, {
@@ -231,7 +273,7 @@ def run_search_cycle(pi, conn):
                     "pwm_btm": int(current_horizontal),
                     "pwm_top": int(current_vertical),
                     "ts": time.time(),
-                    "diag": diag  # may be None if laptop not in --debug
+                    "diag": diag
                 })
             except Exception:
                 pass
@@ -291,9 +333,9 @@ def run_search_cycle(pi, conn):
                         cls_id = int(o.get("cls_id", -1))
                         if cls_id == -1:
                             continue
-                        if cls_id in centered_this_session:
-                            continue
                         if float(o.get("avg_conf", 0.0)) < CONF_THRESHOLD:
+                            continue
+                        if cls_id in centered_this_session:
                             continue
                         target = (cls_id, str(o.get("cls_name", str(cls_id))))
                         break
@@ -307,8 +349,7 @@ def run_search_cycle(pi, conn):
                     if ok:
                         centered_this_session.add(target_cls)
                         centers_done_at_this_pose += 1
-                        print(f"[RPi] ? Verified centered on {target_name} (id {target_cls}). "
-                              f"Session memory now: {sorted(centered_this_session)}")
+                        print(f"[RPi] ? Verified centered on {target_name} (id {target_cls}).")
                     else:
                         if DEBUG_DIAG:
                             print(f"[RPi] ? Centering verification FAILED for {target_name} (id {target_cls}).")
@@ -320,10 +361,6 @@ def run_search_cycle(pi, conn):
                                           f"pixel<= {thr.get('pixel_epsilon')} px, "
                                           f"move_norm< {thr.get('move_norm_eps')}, "
                                           f"required_good_frames={thr.get('required_good_frames')}")
-                                else:
-                                    print(f"      Thresholds: conf>={thr.get('conf_per_frame')}, "
-                                          f"pixel<= {thr.get('pixel_epsilon')} px, "
-                                          f"move_norm< {thr.get('move_norm_eps')}")
                                 print(f"      Observed: total_frames={obs.get('total_frames')}, "
                                       f"good_frames={obs.get('good_frames')}, "
                                       f"max_conf_seen={obs.get('max_conf_seen')}, "
@@ -335,9 +372,6 @@ def run_search_cycle(pi, conn):
                                       f"frames_conf_ok={obs.get('frames_conf_ok')}, "
                                       f"frames_err_ok={obs.get('frames_err_ok')}, "
                                       f"frames_move_small={obs.get('frames_move_small')}")
-                            else:
-                                print("      (No diagnostics provided)")
-
                     poll_commands_nonblocking()
 
                 poll_commands_nonblocking()

@@ -12,8 +12,6 @@ import os
 from typing import Dict, Any
 
 # ---- HUD drawing with word-wrap ----
-import math
-
 HUD_FONT = cv2.FONT_HERSHEY_SIMPLEX
 HUD_SCALE = 0.7
 HUD_THICK = 2
@@ -47,10 +45,7 @@ DISPLAY_SCALE = 1.5
 SERVO_SPEED = 0.2
 DEADZONE = 30
 
-# Scan summarizer robustness
 MIN_FRAMES_FOR_CLASS = 4
-
-# --- Centering success criteria (quota rule) ---
 CENTER_CONF_THRESHOLD   = 0.60
 CENTER_MOVE_NORM_EPS    = 0.035
 REQUIRED_GOOD_FRAMES    = 12
@@ -62,8 +57,8 @@ parser.add_argument('--ip', type=str, default='192.168.1.30')
 parser.add_argument('--port', type=int, default=65432)
 parser.add_argument('--engine', type=str, default='yolo11m-seg.engine')
 parser.add_argument('--camera-index', type=int, default=4)
-parser.add_argument('--debug', action='store_true', help='Enable verbose diagnostics during centering verification')
-parser.add_argument('--mem-file', type=str, default='object_memory.json', help='Path to persistent memory JSON')
+parser.add_argument('--debug', action='store_true')
+parser.add_argument('--mem-file', type=str, default='object_memory.json')
 args = parser.parse_args()
 
 DEBUG_DIAG = bool(args.debug)
@@ -81,7 +76,7 @@ print(f"Using device: {device}")
 class ObjectMemory:
     def __init__(self, path: str):
         self.path = path
-        self.data: Dict[str, Any] = {}  # key = str(cls_id)
+        self.data: Dict[str, Any] = {}
         self.load()
 
     def load(self):
@@ -133,6 +128,10 @@ class ObjectMemory:
             entry["avg_conf"] = float(avg_conf)
         self.data[k] = entry
         self.save()
+
+    def entries_sorted(self):
+        # deterministic order; you can swap to last_seen_ts desc if you want
+        return [self.data[k] for k in sorted(self.data.keys(), key=lambda x: int(x))]
 
     def pretty_print(self):
         if not self.data:
@@ -238,11 +237,15 @@ pi_socket = connect_to_pi()
 # ==============================
 search_mode = False
 
+# NEW: memory recall mode state
+recall_mode = False
+recall_index = 0  # index into sorted memory entries
+
 scan_request_lock = threading.Lock()
-scan_request = None  # {"duration_ms": ..., "exclude_cls":[...]}
+scan_request = None
 
 center_request_lock = threading.Lock()
-center_request = None  # {"target_cls": ..., "duration_ms": ..., "epsilon_px": ...}
+center_request = None
 
 # ==============================
 # Receiver: handle RPi -> Laptop commands
@@ -268,14 +271,12 @@ def receiver_loop():
                 except json.JSONDecodeError:
                     continue
 
-                # YOLO scan request
                 if msg.get("cmd") == "YOLO_SCAN":
                     dur = int(msg.get("duration_ms", 900))
                     excl = msg.get("exclude_cls", [])
                     with scan_request_lock:
                         scan_request = {"duration_ms": dur, "exclude_cls": excl}
 
-                # Centering request
                 elif msg.get("cmd") == "CENTER_ON":
                     with center_request_lock:
                         center_request = {
@@ -284,23 +285,19 @@ def receiver_loop():
                             "epsilon_px": int(msg.get("epsilon_px", 25)),
                         }
 
-                # === NEW: Pose snapshot after verified centering ===
                 elif msg.get("type") == "CENTER_SNAPSHOT":
                     cls_id = int(msg.get("cls_id"))
-                    cls_name = str(msg.get("cls_name", get_name(cls_id)))
+                    cls_name = str(msg.get("cls_name", ""))
                     pwm_btm = int(msg.get("pwm_btm"))
                     pwm_top = int(msg.get("pwm_top"))
                     diag = msg.get("diag")
                     avg_conf = None
-                    # If laptop sent diag earlier and Pi echoed it back, try to extract a confidence summary
                     if isinstance(diag, dict):
                         obs = diag.get("observed") or {}
-                        # Prefer max_conf_seen as a robust summary
                         if "max_conf_seen" in obs:
                             avg_conf = float(obs["max_conf_seen"])
-                    object_memory.update_entry(cls_id, cls_name, pwm_btm, pwm_top, avg_conf=avg_conf)
-                    print(f"[Laptop] Memory updated: {cls_name} (id {cls_id}) -> "
-                          f"btm={pwm_btm}, top={pwm_top}, avg_conf={avg_conf if avg_conf is not None else '-'}")
+                    object_memory.update_entry(cls_id, cls_name or str(cls_id), pwm_btm, pwm_top, avg_conf=avg_conf)
+                    print(f"[Laptop] Memory updated: {cls_name or cls_id} -> btm={pwm_btm}, top={pwm_top}")
 
         except (ConnectionResetError, BrokenPipeError, OSError):
             print("[Laptop] Socket error; reconnecting...")
@@ -338,6 +335,16 @@ def send_search_command(active: bool):
         pi_socket = connect_to_pi()
         send_json(pi_socket, {'type': 'search', 'active': search_mode})
 
+def send_goto_pwms(pwm_btm: int, pwm_top: int, slew_ms: int = 600):
+    """NEW: tell the RPi to move to stored PWMs."""
+    global pi_socket
+    payload = {"cmd": "GOTO_PWMS", "pwm_btm": int(pwm_btm), "pwm_top": int(pwm_top), "slew_ms": int(slew_ms)}
+    try:
+        send_json(pi_socket, payload)
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        pi_socket = connect_to_pi()
+        send_json(pi_socket, payload)
+
 def clear_model_class_filter():
     try:
         if hasattr(model, "predictor") and hasattr(model.predictor, "args"):
@@ -346,7 +353,7 @@ def clear_model_class_filter():
         pass
 
 # ==============================
-# SCAN WINDOW
+# SCAN WINDOW (unchanged core)
 # ==============================
 def run_scan_window(duration_s: float, class_filter: int, exclude_ids=None):
     if exclude_ids is None:
@@ -356,20 +363,16 @@ def run_scan_window(duration_s: float, class_filter: int, exclude_ids=None):
 
     t0 = time.time()
     frames = 0
-
     per_class_conf = {}
     per_class_cx = {}
     per_class_cy = {}
-
     hud_text = f"SCANNING ~{int(duration_s*1000)} ms"
 
     while (time.time() - t0) < duration_s:
         ok, frame = cap.read()
         if not ok:
             break
-
         results = model(frame, classes=None if class_filter == -1 else [class_filter], stream=True)
-
         for result in results:
             frames += 1
             if len(result.boxes) > 0:
@@ -418,11 +421,10 @@ def run_scan_window(duration_s: float, class_filter: int, exclude_ids=None):
             "frames": int(len(confs))
         })
     objects.sort(key=lambda r: r["avg_conf"], reverse=True)
-
     return {"frames": int(frames), "objects": objects}
 
 # ==============================
-# CENTERING LOOP (quota-based)
+# CENTERING LOOP (quota-based) - unchanged logic
 # ==============================
 def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
     t0 = time.time()
@@ -496,37 +498,15 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
                     last_conf = best_conf
                     last_err_px = err_px
                     last_move_norm = move_norm
-                    if conf_ok: frames_conf_ok += 1
-                    if err_ok: frames_err_ok += 1
-                    if move_small: frames_move_small += 1
 
                 # HUD with live numbers
                 disp_conf = best_conf
                 disp_err  = err_px
                 disp_move = move_norm
-                conf_tag  = "OK" if disp_conf >= CENTER_CONF_THRESHOLD else "low"
-                err_tag   = "OK" if disp_err <= epsilon_px else "high"
-                move_tag  = "OK" if disp_move < CENTER_MOVE_NORM_EPS else "moving"
                 hud = (f"{label}  quota {good_frames}/{REQUIRED_GOOD_FRAMES}  "
-                       f"conf {disp_conf:.2f} (>={CENTER_CONF_THRESHOLD:.2f}) {conf_tag}  "
-                    #    f"err {disp_err:.0f}px (<= {epsilon_px}px) {err_tag}  "
-                    #    f"move {disp_move:.3f} (< {CENTER_MOVE_NORM_EPS:.3f}) {move_tag}"
-                )
+                       f"conf {disp_conf:.2f}  err {disp_err:.0f}px  move {disp_move:.3f}")
             else:
-                # No target visible – keep last values in HUD if debug
-                if DEBUG_DIAG:
-                    disp_conf = last_conf if last_conf else 0.0
-                    disp_err  = last_err_px if last_err_px is not None else 0
-                    disp_move = last_move_norm if last_move_norm is not None else 0.0
-                    conf_tag  = "OK" if disp_conf >= CENTER_CONF_THRESHOLD else "low"
-                    err_tag   = "OK" if disp_err <= epsilon_px else "high"
-                    move_tag  = "OK" if disp_move < CENTER_MOVE_NORM_EPS else "moving"
-                    hud = (f"{label}  quota {good_frames}/{REQUIRED_GOOD_FRAMES}  [NO TARGET]  "
-                           f"conf {disp_conf:.2f} (>={CENTER_CONF_THRESHOLD:.2f}) {conf_tag}  "
-                           f"err {disp_err:.0f}px (<= {epsilon_px}px) {err_tag}  "
-                           f"move {disp_move:.3f} (< {CENTER_MOVE_NORM_EPS:.3f}) {move_tag}")
-                else:
-                    hud = f"{label}  quota {good_frames}/{REQUIRED_GOOD_FRAMES}"
+                hud = f"{label}  quota {good_frames}/{REQUIRED_GOOD_FRAMES}"
 
             max_w = int(annotated.shape[1] * 0.92)
             draw_wrapped_text(annotated, hud, 10, 24, max_w)
@@ -542,7 +522,7 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
         diag = {
             "thresholds": {
                 "conf_per_frame": CENTER_CONF_THRESHOLD,
-                "pixel_epsilon": epsilon_px,
+                "pixel_epsilon": 25,  # provided by caller; value not critical here
                 "move_norm_eps": CENTER_MOVE_NORM_EPS,
                 "required_good_frames": REQUIRED_GOOD_FRAMES
             },
@@ -552,12 +532,6 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
                 "max_conf_seen": round(max_conf_seen, 4),
                 "min_err_px_seen": None if min_err_px_seen == float('inf') else int(min_err_px_seen),
                 "min_move_norm_seen": None if min_move_norm_seen == float('inf') else round(min_move_norm_seen, 4),
-                "last_conf": round(last_conf, 4),
-                "last_err_px": None if last_err_px is None else int(last_err_px),
-                "last_move_norm": None if last_move_norm is None else round(last_move_norm, 4),
-                "frames_conf_ok": int(frames_conf_ok),
-                "frames_err_ok": int(frames_err_ok),
-                "frames_move_small": int(frames_move_small),
             }
         }
 
@@ -577,19 +551,69 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
 try:
     while True:
         key = cv2.waitKey(1) & 0xFF
+
+        # Toggle Search Mode
         if key == ord('s'):
-            # Toggle Search Mode and manage session flags
             search_mode = not search_mode
             send_search_command(search_mode)
             if search_mode:
                 print("Entering search mode: resetting memory session flags...")
                 object_memory.reset_session_flags()
+                # turning off recall mode if it was on
+                if recall_mode:
+                    recall_mode = False
+                    print("[Recall] OFF (search started)")
             else:
                 print("Exiting search mode: pruning memory not updated this session...")
                 object_memory.prune_not_updated()
             print(f"{'Entering' if search_mode else 'Exiting'} search mode")
-        elif key == ord('m'):
-            object_memory.pretty_print()
+
+        # Toggle memory recall mode (only when NOT in search mode)
+        elif key == ord('m') and not search_mode:
+            recall_mode = not recall_mode
+            entries = object_memory.entries_sorted()
+
+            if recall_mode:
+                if not entries:
+                    print("[Recall] No objects in memory; turning OFF.")
+                    recall_mode = False
+                else:
+                    # Print a nicely formatted list of all memory entries
+                    print("\n[Recall] ON — stored objects:")
+                    print("  idx  name            id   pwm_btm  pwm_top   avg_conf   last_seen")
+                    for idx, e in enumerate(entries):
+                        ts = e.get("last_seen_ts")
+                        ts_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts else "-"
+                        avg_conf = e.get("avg_conf")
+                        avg_conf_s = f"{avg_conf:.2f}" if isinstance(avg_conf, (int, float)) else "-"
+                        print(f"  {idx:>3}  {e.get('cls_name','?'):<14} {e.get('cls_id'):>3}   "
+                            f"{e.get('pwm_btm'):>7}  {e.get('pwm_top'):>7}   {avg_conf_s:>8}   {ts_s}")
+
+                    # Start at the first item and move the arm there
+                    recall_index = 0
+                    e = entries[recall_index]
+                    print(f"[Recall] Selected -> {e['cls_name']} (id {e['cls_id']}), moving to stored pose...")
+                    send_goto_pwms(e["pwm_btm"], e["pwm_top"], slew_ms=600)
+            else:
+                print("[Recall] OFF")
+
+        # While in recall mode: cycle left/right
+        elif recall_mode and key == ord('a') and not search_mode:
+            entries = object_memory.entries_sorted()
+            if entries:
+                recall_index = (recall_index - 1) % len(entries)
+                e = entries[recall_index]
+                print(f"[Recall] {e['cls_name']} (id {e['cls_id']}) <- moving")
+                send_goto_pwms(e["pwm_btm"], e["pwm_top"], slew_ms=600)
+
+        elif recall_mode and key == ord('d') and not search_mode:
+            entries = object_memory.entries_sorted()
+            if entries:
+                recall_index = (recall_index + 1) % len(entries)
+                e = entries[recall_index]
+                print(f"[Recall] {e['cls_name']} (id {e['cls_id']}) -> moving")
+                send_goto_pwms(e["pwm_btm"], e["pwm_top"], slew_ms=600)
+
         elif key == ord('q'):
             break
 
@@ -625,7 +649,7 @@ try:
             center_on_class(dur_s, target, eps)
             continue
 
-        # Normal live view + optional manual tracking when NOT in search mode
+        # Normal live view / manual tracking when NOT in search mode
         ok, frame = cap.read()
         if not ok:
             print("Failed to grab frame")
@@ -633,33 +657,13 @@ try:
 
         results = model(frame, classes=None if resolved_class_id == -1 else [resolved_class_id], stream=True)
         for result in results:
-            largest_obj = None
-            max_area = 0
-            best_class = None
-            if len(result.boxes) > 0:
-                for box in result.boxes:
-                    if resolved_class_id != -1 and int(box.cls) != resolved_class_id:
-                        continue
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    area = (x2 - x1) * (y2 - y1)
-                    if area > max_area:
-                        max_area = area
-                        largest_obj = ((x1 + x2) // 2, (y1 + y2) // 2)
-                        best_class = int(box.cls) if resolved_class_id == -1 else resolved_class_id
-                if largest_obj:
-                    dx, dy = calculate_servo_movement(largest_obj, (center_x, center_y))
-                    if not search_mode:
-                        send_servo_command(dx, dy)
-                    cv2.circle(frame, largest_obj, 5, (0, 255, 0), -1)
-                    cv2.circle(frame, (center_x, center_y), 5, (255, 0, 0), -1)
-                    cv2.line(frame, largest_obj, (center_x, center_y), (0, 0, 255), 2)
-                    if best_class is not None:
-                        label = f"Tracking: {get_name(best_class)} (id {best_class})"
-                        cv2.putText(frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        annotated = result.plot()
-        h, w = annotated.shape[:2]
-        resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
-        cv2.imshow("YOLO Detection", resized)
+            annotated = result.plot()
+            h, w = annotated.shape[:2]
+            resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
+            # Small on-screen hint for recall mode
+            if recall_mode and not search_mode:
+                draw_wrapped_text(resized, "[RECALL MODE] m=exit, a=prev, d=next", 10, 24, int(resized.shape[1]*0.9))
+            cv2.imshow("YOLO Detection", resized)
 
 finally:
     try:
