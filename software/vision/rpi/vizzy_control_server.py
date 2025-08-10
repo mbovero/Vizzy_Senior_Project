@@ -184,6 +184,7 @@ def run_search_cycle(pi, conn):
                 return None
 
     def center_on_class_and_return(target_cls: int, target_name: str, saved_h: int, saved_v: int):
+        global current_horizontal, current_vertical
         nonlocal buf
         print(f"[RPi] Centering on {target_name} (id {target_cls})...")
         centering_active.set()
@@ -220,10 +221,24 @@ def run_search_cycle(pi, conn):
 
         centering_active.clear()
 
+        # === NEW: if verified, snapshot current PWM pose for laptop memory ===
+        if success:
+            try:
+                send_json(conn, {
+                    "type": "CENTER_SNAPSHOT",
+                    "cls_id": int(target_cls),
+                    "cls_name": target_name,
+                    "pwm_btm": int(current_horizontal),
+                    "pwm_top": int(current_vertical),
+                    "ts": time.time(),
+                    "diag": diag  # may be None if laptop not in --debug
+                })
+            except Exception:
+                pass
+
         # Return to saved pose
         pi.set_servo_pulsewidth(SERVO_BTM, saved_h)
         pi.set_servo_pulsewidth(SERVO_TOP, saved_v)
-        global current_horizontal, current_vertical
         current_horizontal, current_vertical = saved_h, saved_v
         time.sleep(POSE_SETTLE_S * 0.8)
 
@@ -300,7 +315,6 @@ def run_search_cycle(pi, conn):
                             if isinstance(diag, dict):
                                 thr = diag.get("thresholds", {})
                                 obs = diag.get("observed", {})
-                                # Handle quota-style thresholds
                                 if "required_good_frames" in thr:
                                     print(f"      Thresholds: conf>={thr.get('conf_per_frame')}, "
                                           f"pixel<= {thr.get('pixel_epsilon')} px, "
@@ -333,10 +347,6 @@ def run_search_cycle(pi, conn):
 
         fwd = not fwd  # zig-zag
 
-    if centered_this_session:
-        print(f"[RPi] Session complete. Centered classes (ids): {sorted(centered_this_session)}")
-    else:
-        print("[RPi] Session complete. No classes centered.")
     print("[RPi] Search stopped")
 
 # ==============================

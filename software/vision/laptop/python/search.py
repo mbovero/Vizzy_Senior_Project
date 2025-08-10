@@ -8,43 +8,36 @@ import time
 import argparse
 import threading
 import statistics
+import os
+from typing import Dict, Any
 
 # ---- HUD drawing with word-wrap ----
 import math
 
 HUD_FONT = cv2.FONT_HERSHEY_SIMPLEX
-HUD_SCALE = 0.7            # ↓ smaller than before
+HUD_SCALE = 0.7
 HUD_THICK = 2
-HUD_LINE_GAP = 6           # px between lines
+HUD_LINE_GAP = 6
 
 def draw_wrapped_text(img, text, x, y, max_width, scale=HUD_SCALE, color=(0,0,255), thick=HUD_THICK):
-    """
-    Draw 'text' wrapped to fit max_width (pixels), starting at (x,y).
-    Returns bottom y coordinate after drawing.
-    """
     words = text.split()
     if not words:
         return y
-
     line = ""
     ascent = cv2.getTextSize("Ag", HUD_FONT, scale, thick)[0][1]
     line_h = int(ascent + HUD_LINE_GAP)
-
     for w in words:
         test = (w if not line else (line + " " + w))
         (tw, _), _ = cv2.getTextSize(test, HUD_FONT, scale, thick)
         if tw <= max_width:
             line = test
         else:
-            # draw current line and wrap
             cv2.putText(img, line, (x, y), HUD_FONT, scale, color, thick, cv2.LINE_AA)
             y += line_h
             line = w
-
     if line:
         cv2.putText(img, line, (x, y), HUD_FONT, scale, color, thick, cv2.LINE_AA)
         y += line_h
-
     return y
 
 # ==============================
@@ -55,31 +48,26 @@ SERVO_SPEED = 0.2
 DEADZONE = 30
 
 # Scan summarizer robustness
-MIN_FRAMES_FOR_CLASS = 4  # ignore classes that appear in too few frames in a scan window
+MIN_FRAMES_FOR_CLASS = 4
 
-# --- Centering success criteria (tune here) ---
-CENTER_CONF_THRESHOLD   = 0.60   # min per-frame conf during centering
-CENTER_MOVE_NORM_EPS    = 0.035  # |ndx| and |ndy| must both be below this to be "stable"
-REQUIRED_GOOD_FRAMES    = 12     # total (not necessarily consecutive) frames meeting all criteria
+# --- Centering success criteria (quota rule) ---
+CENTER_CONF_THRESHOLD   = 0.60
+CENTER_MOVE_NORM_EPS    = 0.035
+REQUIRED_GOOD_FRAMES    = 12
 
 parser = argparse.ArgumentParser(description='Laptop client for YOLO-driven robotic arm')
-parser.add_argument('--class-id', type=int, default=-1,
-                    help='Numeric class ID to track (-1 for all classes). Interpreted using model.names.')
-parser.add_argument('--class-name', type=str, default=None,
-                    help='Class name to track (e.g., "laptop"). Overrides --class-id if provided.')
-parser.add_argument('--ip', type=str, default='192.168.1.30',
-                    help='Raspberry Pi IP address')
-parser.add_argument('--port', type=int, default=65432,
-                    help='Port number for socket connection')
-parser.add_argument('--engine', type=str, default='yolo11m-seg.engine',
-                    help='Path to YOLO engine or model')
-parser.add_argument('--camera-index', type=int, default=4,
-                    help='OpenCV camera index')
-parser.add_argument('--debug', action='store_true',
-                    help='Enable verbose diagnostics during centering verification')
+parser.add_argument('--class-id', type=int, default=-1)
+parser.add_argument('--class-name', type=str, default=None)
+parser.add_argument('--ip', type=str, default='192.168.1.30')
+parser.add_argument('--port', type=int, default=65432)
+parser.add_argument('--engine', type=str, default='yolo11m-seg.engine')
+parser.add_argument('--camera-index', type=int, default=4)
+parser.add_argument('--debug', action='store_true', help='Enable verbose diagnostics during centering verification')
+parser.add_argument('--mem-file', type=str, default='object_memory.json', help='Path to persistent memory JSON')
 args = parser.parse_args()
 
 DEBUG_DIAG = bool(args.debug)
+MEM_FILE = args.mem_file
 
 PI_IP = args.ip
 PI_PORT = args.port
@@ -88,12 +76,88 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Using device: {device}")
 
 # ==============================
+# Object Memory (persistent)
+# ==============================
+class ObjectMemory:
+    def __init__(self, path: str):
+        self.path = path
+        self.data: Dict[str, Any] = {}  # key = str(cls_id)
+        self.load()
+
+    def load(self):
+        try:
+            if os.path.exists(self.path):
+                with open(self.path, "r") as f:
+                    self.data = json.load(f)
+            else:
+                self.data = {}
+        except Exception as e:
+            print(f"[Memory] Failed to load {self.path}: {e}")
+            self.data = {}
+
+    def save(self):
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(self.data, f, indent=2, sort_keys=True)
+            os.replace(tmp, self.path)
+        except Exception as e:
+            print(f"[Memory] Failed to save {self.path}: {e}")
+
+    def reset_session_flags(self):
+        for k, v in self.data.items():
+            v["updated_this_session"] = 0
+        self.save()
+
+    def prune_not_updated(self):
+        before = len(self.data)
+        self.data = {k: v for k, v in self.data.items() if int(v.get("updated_this_session", 0)) == 1}
+        after = len(self.data)
+        if before != after:
+            print(f"[Memory] Pruned {before - after} stale entries")
+        self.save()
+
+    def update_entry(self, cls_id: int, cls_name: str, pwm_btm: int, pwm_top: int, avg_conf: float = None):
+        k = str(int(cls_id))
+        now = time.time()
+        entry = self.data.get(k, {})
+        entry.update({
+            "cls_id": int(cls_id),
+            "cls_name": cls_name,
+            "pwm_btm": int(pwm_btm),
+            "pwm_top": int(pwm_top),
+            "last_seen_ts": now,
+            "updated_this_session": 1
+        })
+        if avg_conf is not None:
+            entry["avg_conf"] = float(avg_conf)
+        self.data[k] = entry
+        self.save()
+
+    def pretty_print(self):
+        if not self.data:
+            print("[Memory] (empty)")
+            return
+        print("\n[Memory]")
+        for k in sorted(self.data.keys(), key=lambda x: int(x)):
+            v = self.data[k]
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(v.get("last_seen_ts", 0)))
+            print(f"  id {v.get('cls_id'):>3}  {v.get('cls_name','?'):<15} "
+                  f"btm={v.get('pwm_btm')}  top={v.get('pwm_top')}  "
+                  f"avg_conf={v.get('avg_conf','-')}  updated={v.get('updated_this_session')}  "
+                  f"seen={ts}")
+        print()
+
+object_memory = ObjectMemory(MEM_FILE)
+
+# ==============================
 # Model + Camera
 # ==============================
 model = YOLO(args.engine)
+NAMES = model.names
 
-# Names mapping from the loaded model (authoritative)
-NAMES = model.names  # dict[int,str] or list[str]
+if not DEBUG_DIAG:
+    model.overrides['verbose'] = False
 
 def get_name(cid: int) -> str:
     try:
@@ -121,7 +185,6 @@ def name_to_id(name: str):
         pass
     return None
 
-# Resolve target class
 resolved_class_id = -1
 if args.class_name:
     cid = name_to_id(args.class_name)
@@ -140,12 +203,10 @@ cap = cv2.VideoCapture(args.camera_index, cv2.CAP_V4L2)
 if not cap.isOpened():
     print("Error: Could not open camera")
     exit(1)
-
 ok, frame0 = cap.read()
 if not ok:
     print("Error: Could not read frame from camera")
     exit(1)
-
 frame_h, frame_w = frame0.shape[:2]
 center_x, center_y = frame_w // 2, frame_h // 2
 
@@ -168,6 +229,8 @@ def send_json(sock, obj):
     msg = json.dumps(obj) + "\n"
     sock.sendall(msg.encode("utf-8"))
 
+PI_IP = args.ip
+PI_PORT = args.port
 pi_socket = connect_to_pi()
 
 # ==============================
@@ -176,10 +239,10 @@ pi_socket = connect_to_pi()
 search_mode = False
 
 scan_request_lock = threading.Lock()
-scan_request = None  # {"duration_ms": 900, "exclude_cls": [...]}
+scan_request = None  # {"duration_ms": ..., "exclude_cls":[...]}
 
 center_request_lock = threading.Lock()
-center_request = None  # {"target_cls": 63, "duration_ms": 1500, "epsilon_px": 25}
+center_request = None  # {"target_cls": ..., "duration_ms": ..., "epsilon_px": ...}
 
 # ==============================
 # Receiver: handle RPi -> Laptop commands
@@ -221,6 +284,24 @@ def receiver_loop():
                             "epsilon_px": int(msg.get("epsilon_px", 25)),
                         }
 
+                # === NEW: Pose snapshot after verified centering ===
+                elif msg.get("type") == "CENTER_SNAPSHOT":
+                    cls_id = int(msg.get("cls_id"))
+                    cls_name = str(msg.get("cls_name", get_name(cls_id)))
+                    pwm_btm = int(msg.get("pwm_btm"))
+                    pwm_top = int(msg.get("pwm_top"))
+                    diag = msg.get("diag")
+                    avg_conf = None
+                    # If laptop sent diag earlier and Pi echoed it back, try to extract a confidence summary
+                    if isinstance(diag, dict):
+                        obs = diag.get("observed") or {}
+                        # Prefer max_conf_seen as a robust summary
+                        if "max_conf_seen" in obs:
+                            avg_conf = float(obs["max_conf_seen"])
+                    object_memory.update_entry(cls_id, cls_name, pwm_btm, pwm_top, avg_conf=avg_conf)
+                    print(f"[Laptop] Memory updated: {cls_name} (id {cls_id}) -> "
+                          f"btm={pwm_btm}, top={pwm_top}, avg_conf={avg_conf if avg_conf is not None else '-'}")
+
         except (ConnectionResetError, BrokenPipeError, OSError):
             print("[Laptop] Socket error; reconnecting...")
             pi_socket = connect_to_pi()
@@ -230,7 +311,7 @@ recv_thread = threading.Thread(target=receiver_loop, daemon=True)
 recv_thread.start()
 
 # ==============================
-# Utility: movement + search toggle + model filter reset
+# Utilities
 # ==============================
 def calculate_servo_movement(obj_center, frame_center):
     dx = frame_center[0] - obj_center[0]
@@ -258,7 +339,6 @@ def send_search_command(active: bool):
         send_json(pi_socket, {'type': 'search', 'active': search_mode})
 
 def clear_model_class_filter():
-    """Ensure subsequent calls are NOT class-filtered."""
     try:
         if hasattr(model, "predictor") and hasattr(model.predictor, "args"):
             model.predictor.args.classes = None
@@ -266,13 +346,9 @@ def clear_model_class_filter():
         pass
 
 # ==============================
-# SCAN WINDOW: run YOLO ~duration and keep UI alive
+# SCAN WINDOW
 # ==============================
 def run_scan_window(duration_s: float, class_filter: int, exclude_ids=None):
-    """
-    Collect detections for ~duration_s and return per-class aggregates.
-    exclude_ids: set/list of class IDs to ignore when summarizing (still drawn).
-    """
     if exclude_ids is None:
         exclude_ids = set()
     else:
@@ -292,30 +368,21 @@ def run_scan_window(duration_s: float, class_filter: int, exclude_ids=None):
         if not ok:
             break
 
-        # ALL classes => classes=None (clears sticky filter)
-        if class_filter == -1:
-            results = model(frame, classes=None, stream=True)
-        else:
-            results = model(frame, classes=[class_filter], stream=True)
+        results = model(frame, classes=None if class_filter == -1 else [class_filter], stream=True)
 
         for result in results:
             frames += 1
-
-            # accumulate stats using largest box per frame
             if len(result.boxes) > 0:
                 largest = None
                 max_area = 0
                 best_cls = None
                 best_conf = None
-
                 for box in result.boxes:
                     cid = int(box.cls)
-                    # Respect filter and exclude set for summary
                     if class_filter != -1 and cid != class_filter:
                         continue
                     if cid in exclude_ids:
                         continue
-
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     area = (x2 - x1) * (y2 - y1)
                     if area > max_area:
@@ -323,22 +390,18 @@ def run_scan_window(duration_s: float, class_filter: int, exclude_ids=None):
                         largest = ((x1 + x2) // 2, (y1 + y2) // 2)
                         best_cls = cid
                         best_conf = float(box.conf[0])
-
                 if largest is not None and best_cls is not None:
                     per_class_conf.setdefault(best_cls, []).append(best_conf)
                     per_class_cx.setdefault(best_cls, []).append(largest[0])
                     per_class_cy.setdefault(best_cls, []).append(largest[1])
 
-            # live UI update (we still draw everything, even excluded classes)
-            annotated = result.plot()  # uses model.names internally
-            cv2.putText(annotated, hud_text, (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+            annotated = result.plot()
+            draw_wrapped_text(annotated, hud_text, 10, 24, int(annotated.shape[1] * 0.92))
             h, w = annotated.shape[:2]
             resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
             cv2.imshow("YOLO Detection", resized)
             cv2.waitKey(1)
 
-    # Build summary (apply min-frames gate)
     objects = []
     for cls_id, confs in per_class_conf.items():
         if len(confs) < MIN_FRAMES_FOR_CLASS:
@@ -359,37 +422,19 @@ def run_scan_window(duration_s: float, class_filter: int, exclude_ids=None):
     return {"frames": int(frames), "objects": objects}
 
 # ==============================
-# CENTERING LOOP: quota-based verification + optional diagnostics
+# CENTERING LOOP (quota-based)
 # ==============================
 def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
-    """
-    Try to center on target_cls for ~duration_s.
-
-    Success requires a QUOTA of frames (REQUIRED_GOOD_FRAMES) where ALL are true:
-      - conf >= CENTER_CONF_THRESHOLD
-      - pixel error <= epsilon_px
-      - |ndx| and |ndy| < CENTER_MOVE_NORM_EPS
-
-    Sends CENTER_DONE with:
-      - 'success': bool
-      - 'diag': {...} only if --debug is enabled
-    """
     t0 = time.time()
     label = f"CENTERING {get_name(target_cls)} (id {target_cls})"
-
     good_frames = 0
     success = False
 
-    # Diagnostics (populated only if DEBUG_DIAG)
     total_frames = 0
-    frames_conf_ok = 0
-    frames_err_ok = 0
-    frames_move_small = 0
-
+    frames_conf_ok = frames_err_ok = frames_move_small = 0
     max_conf_seen = 0.0
     min_err_px_seen = float('inf')
     min_move_norm_seen = float('inf')
-
     last_conf = 0.0
     last_err_px = None
     last_move_norm = None
@@ -398,17 +443,13 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
         ok, frame = cap.read()
         if not ok:
             break
-
         results = model(frame, classes=[target_cls], stream=True)
-
         for result in results:
             total_frames += 1
             annotated = result.plot()
-
             best = None
             best_conf = 0.0
             max_area = 0
-
             if len(result.boxes) > 0:
                 for box in result.boxes:
                     if int(box.cls) != int(target_cls):
@@ -419,10 +460,6 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
                         max_area = area
                         best = ((x1 + x2) // 2, (y1 + y2) // 2)
                         best_conf = float(box.conf[0])
-
-            conf_ok = False
-            err_ok = False
-            move_small = False
 
             if best is not None:
                 dx = (center_x - best[0])
@@ -436,7 +473,6 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
                 err_ok = (abs(dx) <= epsilon_px and abs(dy) <= epsilon_px)
                 move_small = (abs(ndx) < CENTER_MOVE_NORM_EPS and abs(ndy) < CENTER_MOVE_NORM_EPS)
 
-                # Drive servos if not yet inside the stability box
                 if not (err_ok and move_small):
                     try:
                         send_json(pi_socket, {'type': 'move',
@@ -448,12 +484,11 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
                         send_json(pi_socket, {'type': 'move',
                                               'horizontal': ndx * SERVO_SPEED,
                                               'vertical':   ndy * SERVO_SPEED})
-
-                # Update counters
                 if conf_ok and err_ok and move_small:
                     good_frames += 1
                     if good_frames >= REQUIRED_GOOD_FRAMES:
-                        success = True  # latch; we still run until duration (or break early if you want)
+                        success = True
+
                 if DEBUG_DIAG:
                     max_conf_seen = max(max_conf_seen, best_conf)
                     min_err_px_seen = min(min_err_px_seen, err_px)
@@ -465,39 +500,33 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
                     if err_ok: frames_err_ok += 1
                     if move_small: frames_move_small += 1
 
-            if DEBUG_DIAG:
-                # Live numbers (fall back to last seen when target is missing)
-                disp_conf = best_conf if best is not None else (last_conf if last_conf else 0.0)
-                disp_err  = err_px    if best is not None else (last_err_px if last_err_px is not None else 0)
-                disp_move = move_norm if best is not None else (last_move_norm if last_move_norm is not None else 0.0)
-
-                # Per-criterion indicators
+                # HUD with live numbers
+                disp_conf = best_conf
+                disp_err  = err_px
+                disp_move = move_norm
                 conf_tag  = "OK" if disp_conf >= CENTER_CONF_THRESHOLD else "low"
                 err_tag   = "OK" if disp_err <= epsilon_px else "high"
                 move_tag  = "OK" if disp_move < CENTER_MOVE_NORM_EPS else "moving"
-
-                if best is None:
-                    hud = (
-                        f"{label}  "
-                        f"quota {good_frames}/{REQUIRED_GOOD_FRAMES}  "
-                        f"[NO TARGET IN FRAME]  "
-                        f"conf {disp_conf:.2f} (>={CENTER_CONF_THRESHOLD:.2f}) {conf_tag}  "
-                        f"err {disp_err:.0f}px (<={epsilon_px}px) {err_tag}  "
-                        f"move {disp_move:.3f} (<{CENTER_MOVE_NORM_EPS:.3f}) {move_tag}"
-                    )
-                else:
-                    hud = (
-                        f"{label}  "
-                        f"quota {good_frames}/{REQUIRED_GOOD_FRAMES}  "
-                        f"conf {disp_conf:.2f} (>={CENTER_CONF_THRESHOLD:.2f}) {conf_tag}  "
-                        f"err {disp_err:.0f}px (<={epsilon_px}px) {err_tag}  "
-                        f"move {disp_move:.3f} (<{CENTER_MOVE_NORM_EPS:.3f}) {move_tag}"
-                    )
-            else:
-                hud = (
-                    f"{label}  "
-                    f"quota {good_frames}/{REQUIRED_GOOD_FRAMES}  "
+                hud = (f"{label}  quota {good_frames}/{REQUIRED_GOOD_FRAMES}  "
+                       f"conf {disp_conf:.2f} (>={CENTER_CONF_THRESHOLD:.2f}) {conf_tag}  "
+                    #    f"err {disp_err:.0f}px (<= {epsilon_px}px) {err_tag}  "
+                    #    f"move {disp_move:.3f} (< {CENTER_MOVE_NORM_EPS:.3f}) {move_tag}"
                 )
+            else:
+                # No target visible – keep last values in HUD if debug
+                if DEBUG_DIAG:
+                    disp_conf = last_conf if last_conf else 0.0
+                    disp_err  = last_err_px if last_err_px is not None else 0
+                    disp_move = last_move_norm if last_move_norm is not None else 0.0
+                    conf_tag  = "OK" if disp_conf >= CENTER_CONF_THRESHOLD else "low"
+                    err_tag   = "OK" if disp_err <= epsilon_px else "high"
+                    move_tag  = "OK" if disp_move < CENTER_MOVE_NORM_EPS else "moving"
+                    hud = (f"{label}  quota {good_frames}/{REQUIRED_GOOD_FRAMES}  [NO TARGET]  "
+                           f"conf {disp_conf:.2f} (>={CENTER_CONF_THRESHOLD:.2f}) {conf_tag}  "
+                           f"err {disp_err:.0f}px (<= {epsilon_px}px) {err_tag}  "
+                           f"move {disp_move:.3f} (< {CENTER_MOVE_NORM_EPS:.3f}) {move_tag}")
+                else:
+                    hud = f"{label}  quota {good_frames}/{REQUIRED_GOOD_FRAMES}"
 
             max_w = int(annotated.shape[1] * 0.92)
             draw_wrapped_text(annotated, hud, 10, 24, max_w)
@@ -506,10 +535,8 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
             cv2.imshow("YOLO Detection", resized)
             cv2.waitKey(1)
 
-    # Make sure future scans use ALL classes again (clear sticky class filter)
     clear_model_class_filter()
 
-    # Build diagnostics (only if debugging)
     diag = None
     if DEBUG_DIAG:
         diag = {
@@ -534,7 +561,6 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
             }
         }
 
-    # Notify RPi we’re done centering, include success + diagnostics (if any)
     payload = {"type": "CENTER_DONE", "target_cls": int(target_cls), "success": bool(success)}
     if diag is not None:
         payload["diag"] = diag
@@ -550,12 +576,20 @@ def center_on_class(duration_s: float, target_cls: int, epsilon_px: int):
 # ==============================
 try:
     while True:
-        # Keyboard: toggle Search Mode from laptop
         key = cv2.waitKey(1) & 0xFF
         if key == ord('s'):
+            # Toggle Search Mode and manage session flags
             search_mode = not search_mode
             send_search_command(search_mode)
+            if search_mode:
+                print("Entering search mode: resetting memory session flags...")
+                object_memory.reset_session_flags()
+            else:
+                print("Exiting search mode: pruning memory not updated this session...")
+                object_memory.prune_not_updated()
             print(f"{'Entering' if search_mode else 'Exiting'} search mode")
+        elif key == ord('m'):
+            object_memory.pretty_print()
         elif key == ord('q'):
             break
 
@@ -570,7 +604,6 @@ try:
             summary = run_scan_window(duration_s=duration_ms / 1000.0,
                                       class_filter=resolved_class_id,
                                       exclude_ids=exclude_ids)
-            # Reply with results to let RPi proceed
             try:
                 send_json(pi_socket, {"type": "YOLO_RESULTS", **summary})
             except (BrokenPipeError, ConnectionResetError, OSError):
@@ -598,17 +631,11 @@ try:
             print("Failed to grab frame")
             break
 
-        # Run YOLO (filtered or not). Be explicit to avoid sticky class filters.
-        if resolved_class_id == -1:
-            results = model(frame, classes=None, stream=True)  # ALL classes
-        else:
-            results = model(frame, classes=[resolved_class_id], stream=True)
-
+        results = model(frame, classes=None if resolved_class_id == -1 else [resolved_class_id], stream=True)
         for result in results:
             largest_obj = None
             max_area = 0
             best_class = None
-
             if len(result.boxes) > 0:
                 for box in result.boxes:
                     if resolved_class_id != -1 and int(box.cls) != resolved_class_id:
@@ -619,24 +646,20 @@ try:
                         max_area = area
                         largest_obj = ((x1 + x2) // 2, (y1 + y2) // 2)
                         best_class = int(box.cls) if resolved_class_id == -1 else resolved_class_id
-
                 if largest_obj:
                     dx, dy = calculate_servo_movement(largest_obj, (center_x, center_y))
                     if not search_mode:
                         send_servo_command(dx, dy)
-
-                    # Simple overlay
                     cv2.circle(frame, largest_obj, 5, (0, 255, 0), -1)
                     cv2.circle(frame, (center_x, center_y), 5, (255, 0, 0), -1)
                     cv2.line(frame, largest_obj, (center_x, center_y), (0, 0, 255), 2)
                     if best_class is not None:
                         label = f"Tracking: {get_name(best_class)} (id {best_class})"
                         cv2.putText(frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-            annotated = result.plot()  # uses model.names internally
-            h, w = annotated.shape[:2]
-            resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
-            cv2.imshow("YOLO Detection", resized)
+        annotated = result.plot()
+        h, w = annotated.shape[:2]
+        resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
+        cv2.imshow("YOLO Detection", resized)
 
 finally:
     try:
