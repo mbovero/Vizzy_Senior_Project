@@ -1,6 +1,7 @@
 # vizzy/rpi/search.py
 from __future__ import annotations
 import time, select
+from .server import process_messages
 from typing import Optional, Tuple, List, Dict
 from ..shared.jsonl import send_json, recv_lines
 from ..shared import protocol as P
@@ -40,7 +41,6 @@ def process_scan_results(objects: List[dict], excluded: set, conf_threshold: flo
     return None
 
 def request_scan_and_wait(pi, conn, centered_this_session: set, debug: bool) -> Optional[dict]:
-    """Ask laptop to run a scan window; wait for YOLO_RESULTS or aborts."""
     send_json(conn, {
         "cmd": P.CMD_YOLO_SCAN,
         "duration_ms": SCAN_DURATION_MS,
@@ -55,30 +55,21 @@ def request_scan_and_wait(pi, conn, centered_this_session: set, debug: bool) -> 
             if closed:
                 print("[RPi] Connection closed while waiting for scan")
                 return None
-            # Scan for control and yolo messages
-            for msg in msgs:
-                mtype = msg.get("type")
-                if mtype == P.TYPE_YOLO_RESULTS:
-                    return msg
-                if mtype == P.TYPE_SEARCH and not msg.get("active", True):
-                    state.search_active.clear()
-                    return None
-                if mtype == P.TYPE_STOP:
-                    state.search_active.clear()
-                    return None
+            stop, _, _, _, yolo = process_messages(pi, msgs, debug=debug)
+            if stop:
+                return None
+            if yolo is not None:
+                return yolo
+
         if not state.search_active.is_set():
             return None
         if time.time() - t0 > 8.0:
             print("[RPi] Scan wait timeout; continuing")
             return None
 
+
 def center_on_class_and_return(pi, conn, target_cls: int, target_name: str,
-                               saved_h: int, saved_v: int, debug: bool
-                               ) -> Tuple[bool, Optional[dict]]:
-    """
-    Ask laptop to center on a class, wait for completion, then return to scan pose.
-    If verified success, send CENTER_SNAPSHOT with current PWM pose.
-    """
+                               saved_h: int, saved_v: int, debug: bool):
     print(f"[RPi] Centering on {target_name} (id {target_cls})...")
     state.centering_active.set()
 
@@ -93,7 +84,7 @@ def center_on_class_and_return(pi, conn, target_cls: int, target_name: str,
     buf = b""
     t0 = time.time()
     success = False
-    diag: Optional[dict] = None
+    diag = None
 
     while True:
         readable, _, _ = select.select([conn], [], [], 0.02)
@@ -102,28 +93,25 @@ def center_on_class_and_return(pi, conn, target_cls: int, target_name: str,
             if closed:
                 print("[RPi] Connection closed during centering")
                 break
-            for msg in msgs:
-                mtype = msg.get("type")
-                if mtype == P.TYPE_STOP:
-                    state.search_active.clear()
-                    break
-                if mtype == P.TYPE_CENTER_DONE:
-                    try:
-                        done_cls = int(msg.get("target_cls", -1))
-                    except Exception:
-                        done_cls = -1
-                    if done_cls == int(target_cls):
-                        success = bool(msg.get("success", False))
-                        diag = msg.get("diag", None)
-                        break
+
+            # IMPORTANT: process all messages, so TYPE_MOVE actually drives servos
+            stop, done_cls, done_ok, done_diag, _ = process_messages(pi, msgs, debug=debug)
+            if stop:
+                state.search_active.clear()
+                break
+            if done_cls is not None and int(done_cls) == int(target_cls):
+                success = bool(done_ok)
+                diag = done_diag
+                break
+
         if not state.search_active.is_set():
             break
         if time.time() - t0 > 12.0:
             print("[RPi] Centering timeout; continuing")
             break
+
     state.centering_active.clear()
 
-    # Snapshot current PWM pose if verified
     if success:
         try:
             send_json(conn, {
