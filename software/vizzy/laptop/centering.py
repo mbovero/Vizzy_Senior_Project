@@ -1,11 +1,44 @@
+# -----------------------------------------------------------------------------
 # vizzy/laptop/centering.py
+#
+# Purpose:
+#   Runs a closed-loop centering routine for a single object class.
+#   This is typically called while the robotic arm is stationary at a given
+#   search position, to align the camera’s view so that the target object
+#   is centered in frame before verification and memory update.
+#
+# Operation:
+#   • Runs YOLO inference on live camera frames for a specified duration.
+#   • Filters detections to only the target class (class ID).
+#   • Picks the *largest visible instance* of the target as the primary target.
+#   • Measures pixel error between target center and frame center.
+#   • Normalizes error to [-1, 1] range for servo commands.
+#   • Sends movement commands until:
+#       - Object is within pixel epsilon (positional accuracy threshold)
+#       - Movement magnitude is under the normalized epsilon (stable)
+#       - Confidence exceeds the per-frame threshold
+#       - These conditions hold for the required quota of frames
+#   • Stops early if quota is met before time runs out.
+#
+# Quota-based verification:
+#   Instead of requiring stability for an entire continuous period, the
+#   verification succeeds when a certain number of frames (“good frames”)
+#   meet the thresholds, even if they are non-consecutive.
+#
+# Debug mode:
+#   When debug=True, collects diagnostic statistics (max confidence seen,
+#   min pixel error seen, min normalized move seen) and returns them
+#   alongside the success flag.
+# -----------------------------------------------------------------------------
+
 from __future__ import annotations
 import time, cv2
 from typing import Callable, Optional, Dict, Any
 from .hud import draw_wrapped_text
 from .yolo_runner import infer_all, clear_class_filter
 
-def center_on_class(cap, model,
+def center_on_class(cap,
+                    model,
                     duration_s: float,
                     target_cls: int,
                     epsilon_px: int,
@@ -16,34 +49,58 @@ def center_on_class(cap, model,
                     label: str,
                     debug: bool) -> tuple[bool, Optional[Dict[str, Any]]]:
     """
-    Closed-loop centering with quota-based verification.
-    thresholds keys: conf, move_norm_eps, required_frames
-    Returns (success, diag?)  diag included only if debug=True
+    Run closed-loop centering on a specific class for up to `duration_s` seconds.
+
+    Args:
+        cap: OpenCV VideoCapture providing frames.
+        model: YOLO model instance (from yolo_runner.py).
+        duration_s: Max time to attempt centering.
+        target_cls: Class ID to track.
+        epsilon_px: Max allowed pixel error (both x and y) for stability.
+        center_x, center_y: Pixel coordinates of frame center.
+        thresholds: Dict with keys:
+            - "conf" : per-frame confidence minimum (float)
+            - "move_norm_eps" : normalized motion epsilon (float)
+            - "required_frames" : quota of frames meeting all thresholds (int)
+        send_move: Callback taking normalized (dx, dy) to request servo movement.
+        display_scale: Factor to scale display window for annotation.
+        label: Text prefix for HUD overlay.
+        debug: If True, collect diagnostics to return.
+
+    Returns:
+        (success, diag) where:
+            success: True if quota reached within duration_s, else False.
+            diag: Diagnostic dict if debug=True, else None.
     """
+    # Extract thresholds
     CONF = float(thresholds["conf"])
     MOVE_EPS = float(thresholds["move_norm_eps"])
     REQUIRED = int(thresholds["required_frames"])
 
+    # Initialize timing and counters
     t0 = time.time()
     good_frames = 0
     success = False
 
-    # Diagnostics
+    # Diagnostic variables (only meaningful if debug=True)
     total_frames = 0
     max_conf_seen = 0.0
     min_err_px_seen = float('inf')
     min_move_norm_seen = float('inf')
 
+    # Main loop — runs until time limit is reached
     while (time.time() - t0) < duration_s:
         ok, frame = cap.read()
         if not ok:
             break
 
+        # Run YOLO inference restricted to the target class
         results = infer_all(model, frame, [int(target_cls)])
         for result in results:
             total_frames += 1
             annotated = result.plot()
 
+            # Select the largest instance of the target class in view
             best = None
             best_conf = 0.0
             max_area = 0
@@ -55,42 +112,50 @@ def center_on_class(cap, model,
                     area = (x2 - x1) * (y2 - y1)
                     if area > max_area:
                         max_area = area
-                        best = ((x1 + x2) // 2, (y1 + y2) // 2)
+                        best = ((x1 + x2) // 2, (y1 + y2) // 2)  # object center (px)
                         best_conf = float(box.conf[0])
 
             if best is not None:
-                dx = (center_x - best[0])
-                dy = (best[1] - center_y)
+                # Pixel error from frame center
+                dx = (center_x - best[0])  # >0 → object is left of center
+                dy = (best[1] - center_y)  # >0 → object is below center
                 err_px = max(abs(dx), abs(dy))
+
+                # Normalize error to [-1, 1] range
                 ndx = dx / center_x
                 ndy = dy / center_y
                 move_norm = max(abs(ndx), abs(ndy))
 
+                # Threshold checks
                 conf_ok = (best_conf >= CONF)
                 err_ok  = (abs(dx) <= epsilon_px and abs(dy) <= epsilon_px)
                 move_ok = (abs(ndx) < MOVE_EPS and abs(ndy) < MOVE_EPS)
 
-                # Drive servos if not stable
+                # If not stable, command movement toward center
                 if not (err_ok and move_ok):
                     send_move(ndx, ndy)
 
+                # Count good frames toward quota
                 if conf_ok and err_ok and move_ok:
                     good_frames += 1
                     if good_frames >= REQUIRED:
                         success = True
 
-                # HUD with live numbers
+                # Build HUD overlay text with live metrics
                 hud = (f"{label}  quota {good_frames}/{REQUIRED}  "
                        f"conf {best_conf:.2f}  err {err_px:.0f}px  move {move_norm:.3f}")
             else:
+                # No detection this frame
                 hud = f"{label}  quota {good_frames}/{REQUIRED}"
 
+            # Track diagnostic extremes if debug enabled
             if debug:
                 max_conf_seen = max(max_conf_seen, best_conf if best is not None else 0.0)
                 if best is not None:
                     min_err_px_seen = min(min_err_px_seen, err_px)
                     min_move_norm_seen = min(min_move_norm_seen, move_norm)
 
+            # Draw HUD and show frame
             max_w = int(annotated.shape[1] * 0.92)
             draw_wrapped_text(annotated, hud, 10, 24, max_w)
             h, w = annotated.shape[:2]
@@ -98,8 +163,10 @@ def center_on_class(cap, model,
             cv2.imshow("YOLO Detection", resized)
             cv2.waitKey(1)
 
+    # Clear any class filter set during this centering attempt
     clear_class_filter(model)
 
+    # Prepare diagnostic output if requested
     diag = None
     if debug:
         diag = {
@@ -117,4 +184,5 @@ def center_on_class(cap, model,
                 "min_move_norm_seen": None if min_move_norm_seen == float('inf') else round(min_move_norm_seen, 4),
             }
         }
+
     return success, diag

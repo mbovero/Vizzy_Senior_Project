@@ -1,37 +1,94 @@
+# -----------------------------------------------------------------------------
 # vizzy/laptop/scanning.py
+#
+# Purpose
+#   Implements a short "scan window" using YOLO object detection to identify
+#   objects in the camera feed while the robotic arm is held still at a
+#   specific position in its search path.
+#
+# Why this exists
+#   - The RPi instructs the laptop to scan at each pose in the search grid.
+#   - The laptop runs YOLO on camera frames for a fixed period (`duration_s`)
+#     without moving the servos, so detections remain stable for averaging.
+#   - The scan collects confidence and location statistics for any objects
+#     seen at this pose, then reports the best candidates back to the RPi.
+#
+# How it fits into the project
+#   - The robotic arm systematically sweeps through a set of poses.
+#   - At each pose, this function runs for `duration_s` to detect visible
+#     objects and estimate their median positions and average confidences.
+#   - The RPi uses this summarized data to decide which object to center on.
+#
+# Key points for understanding:
+#   - The arm is stationary during each scan; no motion tracking is performed.
+#   - YOLO runs on every frame captured during the scan window.
+#   - For each object class, only the largest box per frame is considered.
+#   - Confidence scores are averaged, and box centers are median-filtered
+#     to reduce jitter from frame to frame.
+#   - Classes that appear in too few frames are ignored.
+# -----------------------------------------------------------------------------
+
 from __future__ import annotations
 import time, statistics, cv2
 from typing import Dict, List, Tuple, Iterable, Optional, Set
 from .hud import draw_wrapped_text
 from .yolo_runner import infer_all
 
-def run_scan_window(cap, model, duration_s: float, class_filter: int,
-                    exclude_ids: Optional[Iterable[int]],
-                    display_scale: float,
-                    get_name, min_frames_for_class: int = 4) -> dict:
+def run_scan_window(
+    cap,
+    model,
+    duration_s: float,
+    class_filter: int,
+    exclude_ids: Optional[Iterable[int]],
+    display_scale: float,
+    get_name,
+    min_frames_for_class: int = 4
+) -> dict:
     """
-    Run YOLO for ~duration_s. Aggregate per-class avg_conf and median center (largest box per frame).
-    Returns {"frames":int, "objects":[...sorted by avg_conf desc...]}.
+    Perform a short, stationary scan at the current arm position and
+    summarize object detections from YOLO.
+
+    Args:
+        cap                : OpenCV VideoCapture object for reading frames.
+        model              : YOLO model instance.
+        duration_s         : How long to scan (seconds) while stationary.
+        class_filter       : Restrict detection to one class (-1 for all).
+        exclude_ids        : Iterable of class IDs to ignore.
+        display_scale      : Scaling factor for display window size.
+        get_name           : Function mapping class ID → human-readable name.
+        min_frames_for_class: Minimum appearances before keeping a class.
+
+    Returns:
+        Dictionary containing:
+          - "frames": total frames processed
+          - "objects": list of objects sorted by avg_conf desc, each with:
+              cls_id, cls_name, avg_conf, median_center[x,y], frames
     """
+    # Convert exclusion list to set for faster lookups
     exclude: Set[int] = set(int(x) for x in (exclude_ids or []))
     t0 = time.time()
     frames = 0
+
+    # Per-class tracking of confidences and center positions
     per_class_conf: Dict[int, List[float]] = {}
     per_class_cx:   Dict[int, List[int]]   = {}
     per_class_cy:   Dict[int, List[int]]   = {}
 
     hud_text = f"SCANNING ~{int(duration_s*1000)} ms"
 
+    # Loop until scan window duration is reached
     while (time.time() - t0) < duration_s:
         ok, frame = cap.read()
         if not ok:
-            break
+            break  # End scan if camera feed fails
 
+        # Run YOLO inference (filter to single class if requested)
         results = infer_all(model, frame, None if class_filter == -1 else [class_filter])
+
         for result in results:
             frames += 1
 
-            # Accumulate largest box per frame per class (respecting exclude)
+            # Track only the largest detected box per class in this frame
             if len(result.boxes) > 0:
                 largest = None
                 max_area = 0
@@ -47,26 +104,35 @@ def run_scan_window(cap, model, duration_s: float, class_filter: int,
                     area = (x2 - x1) * (y2 - y1)
                     if area > max_area:
                         max_area = area
-                        largest = ((x1 + x2) // 2, (y1 + y2) // 2)
+                        largest = ((x1 + x2) // 2, (y1 + y2) // 2)  # box center
                         best_cls = cid
                         best_conf = float(box.conf[0])
 
+                # Save the best detection for this class in this frame
                 if largest is not None and best_cls is not None:
                     per_class_conf.setdefault(best_cls, []).append(best_conf)
                     per_class_cx.setdefault(best_cls, []).append(largest[0])
                     per_class_cy.setdefault(best_cls, []).append(largest[1])
 
+            # Draw text overlay and display the annotated frame
             annotated = result.plot()
-            draw_wrapped_text(annotated, hud_text, 10, 24, int(annotated.shape[1] * 0.92))
+            draw_wrapped_text(
+                annotated,
+                hud_text,
+                10,
+                24,
+                int(annotated.shape[1] * 0.92)
+            )
             h, w = annotated.shape[:2]
             resized = cv2.resize(annotated, (int(w * display_scale), int(h * display_scale)))
             cv2.imshow("YOLO Detection", resized)
-            cv2.waitKey(1)
+            cv2.waitKey(1)  # Keep OpenCV's window responsive
 
+    # Build output list of detected objects
     objects = []
     for cls_id, confs in per_class_conf.items():
         if len(confs) < min_frames_for_class:
-            continue
+            continue  # Ignore objects that appeared too few times
         avg_conf = sum(confs) / len(confs)
         med_cx = statistics.median(per_class_cx[cls_id])
         med_cy = statistics.median(per_class_cy[cls_id])
@@ -78,5 +144,8 @@ def run_scan_window(cap, model, duration_s: float, class_filter: int,
             "median_center": [float(med_cx), float(med_cy)],
             "frames": int(len(confs))
         })
+
+    # Sort by confidence (highest first)
     objects.sort(key=lambda r: r["avg_conf"], reverse=True)
+
     return {"frames": int(frames), "objects": objects}
