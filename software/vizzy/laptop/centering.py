@@ -38,7 +38,38 @@ from .hud import draw_wrapped_text
 from .yolo_runner import infer_all, clear_class_filter
 import numpy as np
 
+def _contour_center(mask_u8: np.ndarray) -> Optional[Tuple[int, int]]:
+    """Return (cx, cy) using contour moments of the largest blob in a binary mask."""
+    # mask_u8 must be 0/255 uint8
+    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    largest = max(contours, key=cv2.contourArea)
+    M = cv2.moments(largest)
+    if M["m00"] <= 0:
+        return None
+    cx = int(M["m10"] / M["m00"])
+    cy = int(M["m01"] / M["m00"])
+    return (cx, cy)
 
+def instance_center(box_xyxy, mask_tensor, frame_w: int, frame_h: int) -> Tuple[int, int]:
+    """
+    Return (cx, cy) for a single detection:
+      - If a mask is provided, compute segmentation center (contour moments).
+      - Else, return box center.
+    """
+    if mask_tensor is not None:
+        # mask tensor is (Hmask, Wmask) float/bool; resize to frame dims, make binary u8
+        mask_np = mask_tensor.detach().cpu().numpy().astype(np.uint8)
+        mask_np = cv2.resize(mask_np, (frame_w, frame_h), interpolation=cv2.INTER_NEAREST)
+        mask_u8 = (mask_np * 255).astype(np.uint8)
+        c = _contour_center(mask_u8)
+        if c is not None:
+            return c
+
+    # fallback: box center
+    x1, y1, x2, y2 = map(int, box_xyxy)
+    return (int((x1 + x2) / 2), int((y1 + y2) / 2))
 
 def center_on_class(cap,
                     model,
@@ -104,32 +135,39 @@ def center_on_class(cap,
             annotated = result.plot()
 
             # Select the highest-confidence instance of the target class in view
-            best = None                 # (cx, cy) center in pixels
+            best = None                 # (cx, cy)
             best_conf = 0.0
-            best_area = 0               # tie-breaker: prefer larger area if conf ties
+            best_area = 0
 
             if len(result.boxes) > 0:
-                for box in result.boxes:
-                    if int(box.cls) != int(target_cls):
+                masks = getattr(result, "masks", None)
+                mask_list = list(masks.data) if (masks is not None and masks.data is not None) else None
+
+                n = len(result.boxes)
+                for i in range(n):
+                    cid = int(result.boxes.cls[i].item())
+                    if cid != int(target_cls):
                         continue
 
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cx = (x1 + x2) // 2
-                    cy = (y1 + y2) // 2
-                    conf = float(box.conf[0])
+                    box_xyxy = result.boxes.xyxy[i].detach().cpu().numpy()
+                    conf     = float(result.boxes.conf[i].item())
+                    x1, y1, x2, y2 = map(int, box_xyxy)
                     area = (x2 - x1) * (y2 - y1)
 
-                    # Primary criterion: highest confidence
-                    # Secondary tie-breaker: larger area
+                    mask_tensor = mask_list[i] if mask_list is not None and i < len(mask_list) else None
+                    cx, cy = instance_center(box_xyxy, mask_tensor, annotated.shape[1], annotated.shape[0])
+
                     if (conf > best_conf) or (conf == best_conf and area > best_area):
                         best_conf = conf
                         best_area = area
                         best = (cx, cy)
 
             if best is not None:
+                bx, by = int(best[0]), int(best[1])
+
                 # Pixel error from frame center
-                dx = (center_x - best[0])  # >0 → object is left of center
-                dy = (best[1] - center_y)  # >0 → object is below center
+                dx = (center_x - bx)   # >0 → object is left of center
+                dy = (by - center_y)   # >0 → object is below center
                 err_px = max(abs(dx), abs(dy))
 
                 # Normalize error to [-1, 1] range
@@ -152,11 +190,24 @@ def center_on_class(cap,
                     if good_frames >= REQUIRED:
                         success = True
 
-                # Build HUD overlay text with live metrics
-                hud = (f"{label}  quota {good_frames}/{REQUIRED}  "
-                       f"conf {best_conf:.2f}  err {err_px:.0f}px  move {move_norm:.3f}")
+                # --- NEW: draw object center, camera center, and connecting line ---
+                # Object center (red)
+                cv2.circle(annotated, (bx, by), 6, (0, 0, 255), -1)
+                # Camera/frame center (blue)
+                cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
+                # Line between them (green)
+                cv2.line(annotated, (bx, by), (center_x, center_y), (0, 255, 0), 2)
+
+                # Build HUD overlay text with live metrics and centers
+                hud = (
+                    f"{label}  quota {good_frames}/{REQUIRED}  "
+                    f"conf {best_conf:.2f}  err {err_px:.0f}px  move {move_norm:.3f}  "
+                    f"obj ({bx},{by})  cam ({center_x},{center_y})"
+                )
+
             else:
-                # No detection this frame
+                # No detection this frame — still draw camera center as a reference
+                cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
                 hud = f"{label}  quota {good_frames}/{REQUIRED}"
 
             # Track diagnostic extremes if debug enabled

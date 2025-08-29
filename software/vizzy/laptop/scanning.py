@@ -33,6 +33,7 @@ import time, statistics, cv2
 from typing import Dict, List, Tuple, Iterable, Optional, Set
 from .hud import draw_wrapped_text
 from .yolo_runner import infer_all
+from .centering import instance_center
 
 def run_scan_window(
     cap,
@@ -81,6 +82,9 @@ def run_scan_window(
         ok, frame = cap.read()
         if not ok:
             break  # End scan if camera feed fails
+        
+        # Image dimensions for mask resizing / center calc
+        h, w = frame.shape[:2]
 
         # Run YOLO inference (filter to single class if requested)
         results = infer_all(model, frame, None if class_filter == -1 else [class_filter])
@@ -88,32 +92,41 @@ def run_scan_window(
         for result in results:
             frames += 1
 
-            # Pick best (highest-confidence) detection per class this frame 
-            # best_per_class[cid] = (conf, cx, cy)
-            best_per_class: Dict[int, Tuple[float, int, int]] = {}
+            # --- Most-confident-per-class selection for this frame (uses mask centers if available) ---
+            best_for_class = {}  # cls_id -> (conf, area, cx, cy)
 
             if len(result.boxes) > 0:
-                for box in result.boxes:
-                    cid = int(box.cls)
+                # Prepare parallel access to masks (may be None)
+                masks = getattr(result, "masks", None)
+                mask_list = list(masks.data) if (masks is not None and masks.data is not None) else None
 
-                    # Respect filter and exclusion list
+                # Iterate by index so we can align boxes <-> masks reliably
+                n = len(result.boxes)
+                for i in range(n):
+                    box_xyxy = result.boxes.xyxy[i].detach().cpu().numpy()
+                    cid      = int(result.boxes.cls[i].item())
+                    conf     = float(result.boxes.conf[i].item())
+
                     if class_filter != -1 and cid != class_filter:
                         continue
                     if cid in exclude:
                         continue
 
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cx = (x1 + x2) // 2
-                    cy = (y1 + y2) // 2
-                    conf = float(box.conf[0])
+                    x1, y1, x2, y2 = map(int, box_xyxy)
+                    area = (x2 - x1) * (y2 - y1)
 
-                    prev = best_per_class.get(cid)
-                    # Keep the highest-confidence detection for THIS CLASS in THIS FRAME
-                    if (prev is None) or (conf > prev[0]):
-                        best_per_class[cid] = (conf, cx, cy)
+                    # Compute center via segmentation if available, else box center
+                    mask_tensor = mask_list[i] if mask_list is not None and i < len(mask_list) else None
+                    cx, cy = instance_center(box_xyxy, mask_tensor, w, h)
 
-            # Accumulate per-class stats using the per-class bests for this frame
-            for cid, (conf, cx, cy) in best_per_class.items():
+                    # Keep the most confident detection per class for this frame.
+                    # Tie-breaker: larger area wins when conf ties.
+                    prev = best_for_class.get(cid)
+                    if (prev is None) or (conf > prev[0]) or (conf == prev[0] and area > prev[1]):
+                        best_for_class[cid] = (conf, area, cx, cy)
+
+            # Commit the per-class selections to our per_class_* aggregators
+            for cid, (conf, _area, cx, cy) in best_for_class.items():
                 per_class_conf.setdefault(cid, []).append(conf)
                 per_class_cx.setdefault(cid, []).append(cx)
                 per_class_cy.setdefault(cid, []).append(cy)
