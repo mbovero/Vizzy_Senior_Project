@@ -80,6 +80,14 @@ MAX_CENTERS_PER_POSE= 1      # Max number of centering attempts before moving on
 # -----------------------------------------
 CONF_THRESHOLD      = 0.65   # Minimum average detection confidence to target
 
+# -----------------------------------------
+# Per-pose retry limit
+# -----------------------------------------
+# if a class fails to verify this many times at a single
+# scan pose, ignore it until the arm moves to the next pose.
+MAX_FAILS_PER_POSE   = 3
+
+
 # ----------------------
 # Networking parameters
 # ----------------------

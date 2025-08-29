@@ -46,7 +46,7 @@ from .config import (
     SEARCH_MIN_OFFSET, SEARCH_MAX_OFFSET,
     SEARCH_H_STEP, SEARCH_V_STEP,
     POSE_SETTLE_S, SCAN_DURATION_MS, CENTER_DURATION_MS, CENTER_EPSILON_PX,
-    MAX_CENTERS_PER_POSE, CONF_THRESHOLD
+    MAX_CENTERS_PER_POSE, CONF_THRESHOLD, MAX_FAILS_PER_POSE
 )
 
 # Define absolute servo limits for scanning (slightly inside mechanical extremes)
@@ -56,7 +56,11 @@ SEARCH_MAX = SERVO_MAX - SEARCH_MAX_OFFSET
 # -----------------------------------------------------------------------------
 # Object selection logic
 # -----------------------------------------------------------------------------
-def process_scan_results(objects: List[dict], excluded: set, conf_threshold: float
+def process_scan_results(objects: List[dict],
+                         excluded: set,
+                         conf_threshold: float,
+                         fail_count_this_pose: dict[int, int],   
+                         max_fails_per_pose: int                  
                          ) -> Optional[Tuple[int, str]]:
     """
     Given a list of detected objects from the laptop's YOLO scan, pick the best one.
@@ -65,6 +69,8 @@ def process_scan_results(objects: List[dict], excluded: set, conf_threshold: flo
         objects: List of dictionaries, each describing an object (cls_id, cls_name, avg_conf, etc.)
         excluded: Set of class IDs already centered on during this search session.
         conf_threshold: Minimum confidence required to consider an object.
+        fail_count_this_pose: Per-class failure counts at the current scan pose (reset each pose).
+        max_fails_per_pose: If a class has failed this many times at the current pose, skip it.
 
     Returns:
         (class_id, class_name) tuple for the chosen target, or None if nothing qualifies.
@@ -80,6 +86,9 @@ def process_scan_results(objects: List[dict], excluded: set, conf_threshold: flo
             continue  # skip if already centered on this class in this session
         if float(o.get("avg_conf", 0.0)) < conf_threshold:
             continue  # skip if confidence too low
+        # Skip if this class has already failed too many times at this pose
+        if fail_count_this_pose.get(cid, 0) >= max_fails_per_pose:
+            continue
         name = str(o.get("cls_name", str(cid)))
         return cid, name
 
@@ -256,6 +265,9 @@ def run_search_cycle(pi, conn, debug: bool) -> None:
                 state.current_vertical = v
                 time.sleep(POSE_SETTLE_S)  # allow arm to stabilize
 
+                # Per-pose failure counts (reset at each (h,v) pose)
+                fail_count_this_pose: dict[int, int] = {}   
+
                 centers_done_at_this_pose = 0
                 while state.search_active.is_set() and centers_done_at_this_pose < MAX_CENTERS_PER_POSE:
                     scan = request_scan_and_wait(pi, conn, centered_this_session, debug)
@@ -263,7 +275,15 @@ def run_search_cycle(pi, conn, debug: bool) -> None:
                         break
 
                     objects = list(scan.get("objects", []))
-                    target = process_scan_results(objects, centered_this_session, CONF_THRESHOLD)
+
+                    # Pass per-pose fail counters + limit to target selector
+                    target = process_scan_results(
+                        objects,
+                        centered_this_session,
+                        CONF_THRESHOLD,
+                        fail_count_this_pose,     
+                        MAX_FAILS_PER_POSE,       
+                    )
                     if target is None:
                         break
 
@@ -275,29 +295,38 @@ def run_search_cycle(pi, conn, debug: bool) -> None:
                         centers_done_at_this_pose += 1
                         print(f"[RPi] ✅ Verified centered on {target_name} (id {target_cls}).")
                     else:
+                        # Increment per-pose failure count for this class
+                        attempts = fail_count_this_pose.get(target_cls, 0) + 1
+                        fail_count_this_pose[target_cls] = attempts
                         if debug:
-                            print(f"[RPi] ❌ Centering verification FAILED for {target_name} (id {target_cls}).")
+                            print(f"[RPi] ❌ Centering verification FAILED for {target_name} (id {target_cls}). "
+                                f"Fails this pose: {attempts}/{MAX_FAILS_PER_POSE}")
                             if isinstance(diag, dict):
                                 thr = diag.get("thresholds", {})
                                 obs = diag.get("observed", {})
                                 if "required_good_frames" in thr:
                                     print(f"      Thresholds: conf>={thr.get('conf_per_frame')}, "
-                                          f"pixel<= {thr.get('pixel_epsilon')} px, "
-                                          f"move_norm< {thr.get('move_norm_eps')}, "
-                                          f"required_good_frames={thr.get('required_good_frames')}")
+                                        f"pixel<= {thr.get('pixel_epsilon')} px, "
+                                        f"move_norm< {thr.get('move_norm_eps')}, "
+                                        f"required_good_frames={thr.get('required_good_frames')}")
                                 print(f"      Observed: total_frames={obs.get('total_frames')}, "
-                                      f"good_frames={obs.get('good_frames')}, "
-                                      f"max_conf_seen={obs.get('max_conf_seen')}, "
-                                      f"min_err_px_seen={obs.get('min_err_px_seen')}, "
-                                      f"min_move_norm_seen={obs.get('min_move_norm_seen')}")
+                                    f"good_frames={obs.get('good_frames')}, "
+                                    f"max_conf_seen={obs.get('max_conf_seen')}, "
+                                    f"min_err_px_seen={obs.get('min_err_px_seen')}, "
+                                    f"min_move_norm_seen={obs.get('min_move_norm_seen')}")
+                        # If limit reached, we'll auto-skip this class for the rest of the pose
+                        if attempts >= MAX_FAILS_PER_POSE and debug:
+                            print(f"[RPi] ↪️  Reached per-pose fail limit — will ignore '{target_name}' "
+                                f"(id {target_cls}) until next search position.")
+
                 # Let control messages (like stop) be processed between poses
                 _poll_commands_nonblocking(pi, conn)
 
             if not state.search_active.is_set():
                 break
-        fwd = not fwd  # reverse sweep direction
+            fwd = not fwd  # reverse sweep direction
 
-    print("[RPi] Search stopped")
+            print("[RPi] Search stopped")
 
 # -----------------------------------------------------------------------------
 # Non-blocking control message poll
