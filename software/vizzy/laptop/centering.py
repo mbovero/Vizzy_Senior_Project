@@ -33,9 +33,12 @@
 
 from __future__ import annotations
 import time, cv2
-from typing import Callable, Optional, Dict, Any
+from typing import Callable, Optional, Dict, Any, Tuple
 from .hud import draw_wrapped_text
 from .yolo_runner import infer_all, clear_class_filter
+import numpy as np
+
+
 
 def center_on_class(cap,
                     model,
@@ -100,20 +103,28 @@ def center_on_class(cap,
             total_frames += 1
             annotated = result.plot()
 
-            # Select the largest instance of the target class in view
-            best = None
+            # Select the highest-confidence instance of the target class in view
+            best = None                 # (cx, cy) center in pixels
             best_conf = 0.0
-            max_area = 0
+            best_area = 0               # tie-breaker: prefer larger area if conf ties
+
             if len(result.boxes) > 0:
                 for box in result.boxes:
                     if int(box.cls) != int(target_cls):
                         continue
+
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    cx = (x1 + x2) // 2
+                    cy = (y1 + y2) // 2
+                    conf = float(box.conf[0])
                     area = (x2 - x1) * (y2 - y1)
-                    if area > max_area:
-                        max_area = area
-                        best = ((x1 + x2) // 2, (y1 + y2) // 2)  # object center (px)
-                        best_conf = float(box.conf[0])
+
+                    # Primary criterion: highest confidence
+                    # Secondary tie-breaker: larger area
+                    if (conf > best_conf) or (conf == best_conf and area > best_area):
+                        best_conf = conf
+                        best_area = area
+                        best = (cx, cy)
 
             if best is not None:
                 # Pixel error from frame center

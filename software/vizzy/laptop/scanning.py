@@ -88,32 +88,36 @@ def run_scan_window(
         for result in results:
             frames += 1
 
-            # Track only the largest detected box per class in this frame
+            # Pick best (highest-confidence) detection per class this frame 
+            # best_per_class[cid] = (conf, cx, cy)
+            best_per_class: Dict[int, Tuple[float, int, int]] = {}
+
             if len(result.boxes) > 0:
-                largest = None
-                max_area = 0
-                best_cls = None
-                best_conf = None
                 for box in result.boxes:
                     cid = int(box.cls)
+
+                    # Respect filter and exclusion list
                     if class_filter != -1 and cid != class_filter:
                         continue
                     if cid in exclude:
                         continue
+
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    area = (x2 - x1) * (y2 - y1)
-                    if area > max_area:
-                        max_area = area
-                        largest = ((x1 + x2) // 2, (y1 + y2) // 2)  # box center
-                        best_cls = cid
-                        best_conf = float(box.conf[0])
+                    cx = (x1 + x2) // 2
+                    cy = (y1 + y2) // 2
+                    conf = float(box.conf[0])
 
-                # Save the best detection for this class in this frame
-                if largest is not None and best_cls is not None:
-                    per_class_conf.setdefault(best_cls, []).append(best_conf)
-                    per_class_cx.setdefault(best_cls, []).append(largest[0])
-                    per_class_cy.setdefault(best_cls, []).append(largest[1])
+                    prev = best_per_class.get(cid)
+                    # Keep the highest-confidence detection for THIS CLASS in THIS FRAME
+                    if (prev is None) or (conf > prev[0]):
+                        best_per_class[cid] = (conf, cx, cy)
 
+            # Accumulate per-class stats using the per-class bests for this frame
+            for cid, (conf, cx, cy) in best_per_class.items():
+                per_class_conf.setdefault(cid, []).append(conf)
+                per_class_cx.setdefault(cid, []).append(cx)
+                per_class_cy.setdefault(cid, []).append(cy)
+                
             # Draw text overlay and display the annotated frame
             annotated = result.plot()
             draw_wrapped_text(
