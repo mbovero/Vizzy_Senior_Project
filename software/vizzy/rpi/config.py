@@ -70,7 +70,7 @@ SEARCH_V_STEP       = 100   # Step size (µs) for vertical servo in search
 # Timing settings for scanning/centering
 # ---------------------------------------
 POSE_SETTLE_S       = 0.35   # Pause after moving to let arm settle before scan
-SCAN_DURATION_MS    = 1500   # How long YOLO scan runs at each grid point
+SCAN_DURATION_MS    = 1750   # How long YOLO scan runs at each grid point
 CENTER_DURATION_MS  = 3000   # How long to allow laptop to center object
 CENTER_EPSILON_PX   = 25     # Pixel error tolerance for centering success
 MAX_CENTERS_PER_POSE= 1      # Max number of centering attempts before moving on

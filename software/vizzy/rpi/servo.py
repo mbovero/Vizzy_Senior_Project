@@ -79,8 +79,8 @@ def move_servos(pi, horizontal: float, vertical: float) -> None:
         - Updates both the hardware (via pigpio) and the `state` variables.
     """
     # Convert normalized input to PWM pulse width change
-    h_change = int(horizontal * 200)
-    v_change = int(vertical   * 200)
+    h_change = int(horizontal * 300)
+    v_change = int(vertical   * 300)
 
     # Calculate new pulse widths with clamping
     new_h = clamp(state.current_horizontal + h_change, SERVO_MIN, SERVO_MAX)

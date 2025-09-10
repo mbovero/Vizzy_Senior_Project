@@ -369,9 +369,19 @@ def main():
                     "required_frames": 12      # number of “good” frames (not necessarily consecutive)
                 }
 
-                # Callback that the centering loop uses to request relative servo moves.
+                # --- Adaptive move gain: bigger steps when farther from center ---
+                # Tunables:
+                SPEED_MIN = 1.50   # base speed near center
+                SPEED_MAX = 3.00   # clamp to avoid wild jumps
+                GAIN_K    = 1.75   # how quickly speed grows with error
+                GAMMA     = 1.8    # nonlinearity (>1 = smoother near center, faster far away)
+
                 def move_cb(ndx, ndy):
-                    send_servo_command(ndx, ndy)
+                    # nd* are normalized errors in [-1, 1]
+                    err_mag = max(abs(ndx), abs(ndy))
+                    # nonlinear ramp; keep it bounded
+                    gain = min(SPEED_MAX, SPEED_MIN + GAIN_K * (err_mag ** GAMMA))
+                    send_servo_command(ndx * gain, ndy * gain)
 
                 # Run the centering attempt; this keeps the UI responsive and
                 # sends TYPE_MOVE messages to the RPi while tracking.

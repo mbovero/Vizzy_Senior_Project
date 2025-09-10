@@ -190,7 +190,7 @@ def center_on_class(cap,
                     if good_frames >= REQUIRED:
                         success = True
 
-                # --- NEW: draw object center, camera center, and connecting line ---
+                # Draw object center, camera center, and connecting line ---
                 # Object center (red)
                 cv2.circle(annotated, (bx, by), 6, (0, 0, 255), -1)
                 # Camera/frame center (blue)
