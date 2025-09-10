@@ -55,7 +55,7 @@ def make_arg_parser() -> argparse.ArgumentParser:
     p.add_argument('--camera-index', type=int, default=4)
     p.add_argument('--debug', action='store_true')
     p.add_argument('--mem-file', type=str, default='object_memory.json')
-    p.add_argument('--display-scale', type=float, default=1.5)
+    p.add_argument('--display-scale', type=float, default=1.3)
     return p
 
 def resolve_class_id_from_name(

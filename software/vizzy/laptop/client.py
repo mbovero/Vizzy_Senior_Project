@@ -47,7 +47,7 @@ def connect_to_pi(ip: str, port: int):
     Persistent connect helper:
       - Tries to connect to the RPi TCP server.
       - If it fails, waits 2s and retries forever.
-      - Disables Nagle’s algorithm (TCP_NODELAY) for low-latency small packets.
+      - Disables Nagles algorithm (TCP_NODELAY) for low-latency small packets.
     Returns:
       A connected socket object.
     """
@@ -90,6 +90,12 @@ def main():
     # Open the video device (uses V4L2 backend on Linux). Immediately test
     # a frame so we can report failures early.
     cap = cv2.VideoCapture(args.camera_index, cv2.CAP_V4L2)
+    # Request MJPG (smaller USB payload than raw YUYV)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  int(800))
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(600))
+    cap.set(cv2.CAP_PROP_FPS,          float(30.0))
+
     if not cap.isOpened():
         print("Error: Could not open camera")
         return
@@ -98,6 +104,7 @@ def main():
         print("Error: Could not read frame from camera")
         return
     frame_h, frame_w = frame0.shape[:2]
+    print(f"video width: {frame_w}, video height: {frame_h}")
     center_x, center_y = frame_w // 2, frame_h // 2  # frame center in pixels
 
     # ------------------------------ Networking -------------------------------
@@ -369,19 +376,9 @@ def main():
                     "required_frames": 12      # number of “good” frames (not necessarily consecutive)
                 }
 
-                # --- Adaptive move gain: bigger steps when farther from center ---
-                # Tunables:
-                SPEED_MIN = 1.50   # base speed near center
-                SPEED_MAX = 3.00   # clamp to avoid wild jumps
-                GAIN_K    = 1.75   # how quickly speed grows with error
-                GAMMA     = 1.8    # nonlinearity (>1 = smoother near center, faster far away)
-
+                # Callback that the centering loop uses to request relative servo moves.
                 def move_cb(ndx, ndy):
-                    # nd* are normalized errors in [-1, 1]
-                    err_mag = max(abs(ndx), abs(ndy))
-                    # nonlinear ramp; keep it bounded
-                    gain = min(SPEED_MAX, SPEED_MIN + GAIN_K * (err_mag ** GAMMA))
-                    send_servo_command(ndx * gain, ndy * gain)
+                    send_servo_command(ndx, ndy)
 
                 # Run the centering attempt; this keeps the UI responsive and
                 # sends TYPE_MOVE messages to the RPi while tracking.
