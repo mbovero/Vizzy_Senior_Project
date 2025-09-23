@@ -3,3 +3,4 @@
 *.onnx
 *.json
 __pycache__
+*.env
