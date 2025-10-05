@@ -91,7 +91,7 @@ def main():
     # other modes will include idle (waiting for user input), and task execution
     # UI / mode flags:
     search_mode = False         # true when the RPi is sweeping the grid
-    recall_mode = False         # true when user is navigating stored objects
+    recall_mode = False         # true when user is navigating stored objects TODO: remove this and following line
     recall_index = 0            # index into the memory table when recalling
 
     # Initialize memory of objects in the arm's workspace
@@ -225,3 +225,194 @@ def main():
         except (BrokenPipeError, ConnectionResetError, OSError):
             pi_socket = connect_to_pi(config.PI_IP, config.PI_PORT)
             send_json(pi_socket, payload)
+
+
+
+
+
+
+
+
+
+
+
+    # ------------------------------ Main UI loop ------------------------------
+    try:
+        # TODO: remove all keyboard controls and replace with automated state machine (idle -> search -> execute)
+        while True:
+            # Poll for keyboard input at ~1kHz via OpenCV’s event loop.
+            key = cv2.waitKey(1) & 0xFF
+
+            # ---- Toggle Search Mode (s) ----
+            if key == ord('s'):
+                # Flip search flag and notify RPi
+                send_search_command(not search_mode)
+
+                if search_mode:
+                    # We just turned ON search mode on the RPi.
+                    # Reset session flags so freshly centered objects are marked updated.
+                    print("Entering search mode: resetting memory session flags...")
+                    object_memory.reset_session_flags()
+
+                    # If user was in Recall Mode, switch it off (search takes over).
+                    if recall_mode:
+                        recall_mode = False
+                        print("[Recall] OFF (search started)")
+                # TODO: We probably won't have a manually togglable search mode; so let's have 
+                # the rpi send a command indicating that the scan cycle completed
+                else: 
+                    # We just turned OFF search mode; prune memory entries that
+                    # were never updated during the session.
+                    print("Exiting search mode: pruning memory not updated this session...")
+                    object_memory.prune_not_updated()
+
+                print(f"{'Entering' if search_mode else 'Exiting'} search mode")
+
+            # TODO: i think this can be removed entirely; eventually task execution will take its place
+            # ---- Toggle Recall Mode (m) – only when NOT in search mode ----
+            elif key == ord('m') and not search_mode:
+                recall_mode = not recall_mode
+                entries = object_memory.entries_sorted()
+
+                if recall_mode:
+                    if not entries:
+                        # No saved objects → nothing to recall; turn mode back off.
+                        print("[Recall] No objects in memory; turning OFF.")
+                        recall_mode = False
+                    else:
+                        # Print a table of stored objects for context
+                        object_memory.print_table()
+
+                        # Select first entry and ask RPi to move there
+                        recall_index = 0
+                        e = entries[recall_index]
+                        print(f"[Recall] Selected -> {e['cls_name']} (id {e['cls_id']}), moving to stored pose...")
+                        send_goto_pwms(e["pwm_btm"], e["pwm_top"], slew_ms=600)
+                else:
+                    print("[Recall] OFF")
+
+            # ---- Recall Mode: cycle left (a) ----
+            elif recall_mode and key == ord('a') and not search_mode:
+                entries = object_memory.entries_sorted()
+                if entries:
+                    recall_index = (recall_index - 1) % len(entries)
+                    e = entries[recall_index]
+                    print(f"[Recall] {e['cls_name']} (id {e['cls_id']}) <- moving")
+                    send_goto_pwms(e["pwm_btm"], e["pwm_top"], slew_ms=600)
+
+            # ---- Recall Mode: cycle right (d) ----
+            elif recall_mode and key == ord('d') and not search_mode:
+                entries = object_memory.entries_sorted()
+                if entries:
+                    recall_index = (recall_index + 1) % len(entries)
+                    e = entries[recall_index]
+                    print(f"[Recall] {e['cls_name']} (id {e['cls_id']}) -> moving")
+                    send_goto_pwms(e["pwm_btm"], e["pwm_top"], slew_ms=600)
+
+            # ---- Quit (q) ----
+            elif key == ord('q'):
+                break
+
+            # ------------------- Service pending scan request -------------------
+            # TODO: should NOT send back results; rpi does not need to be aware of YOLO data
+
+            # If the RPi asked us (via receiver thread) to scan at the current
+            # stationary pose, process it now and send back summarized results.
+            with scan_request_lock:
+                pending_scan = scan_request
+                scan_request = None
+
+            if pending_scan is not None:
+                duration_ms = int(pending_scan.get("duration_ms", 900)) # TODO: I don't think this needs to be sent from the RPi, just have it be a config var
+                exclude_ids = pending_scan.get("exclude_cls", [])       # TODO: this should not be sent from RPI, keep this on laptop side
+
+                summary = run_scan_window(
+                    cap, model, duration_s=duration_ms / 1000.0,
+                    class_filter=resolved_class_id,
+                    exclude_ids=exclude_ids,
+                    display_scale=DISPLAY_SCALE,
+                    get_name=get_name,
+                )
+
+                try:
+                    send_json(pi_socket, { "type": P.TYPE_YOLO_RESULTS, **summary })
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pi_socket = connect_to_pi(PI_IP, PI_PORT)
+                    send_json(pi_socket, { "type": P.TYPE_YOLO_RESULTS, **summary })
+                continue  # Go back to top of loop after handling request
+
+            # ----------------- Service pending centering request ----------------
+            # If the RPi asked us to center on a class, run the centering loop
+            # (which drives servos via move_cb → TYPE_MOVE messages) and then
+            # report whether verification succeeded.
+            with center_request_lock:
+                pending_center = center_request
+                center_request = None
+
+            if pending_center is not None:
+                target = int(pending_center["target_cls"])
+                dur_s = float(pending_center["duration_ms"]) / 1000.0
+                eps   = int(pending_center["epsilon_px"])
+                label = f"CENTERING {get_name(target)} (id {target})"
+                if DEBUG:
+                    print(f"[Laptop] Centering on {get_name(target)} (id {target}) for {dur_s:.2f}s (debug on)")
+
+                # Thresholds used by centering verification (quota-based).
+                thresholds = {
+                    "conf": 0.60,              # per-frame minimum confidence
+                    "move_norm_eps": 0.035,    # normalized motion stability
+                    "required_frames": 12      # number of “good” frames (not necessarily consecutive)
+                }
+
+                # Callback that the centering loop uses to request relative servo moves.
+                def move_cb(ndx, ndy):
+                    send_servo_command(ndx, ndy)
+
+                # Run the centering attempt; this keeps the UI responsive and
+                # sends TYPE_MOVE messages to the RPi while tracking.
+                success, diag = center_on_class(
+                    cap, model, dur_s, target, eps, center_x, center_y,
+                    thresholds, move_cb, DISPLAY_SCALE, label, DEBUG
+                )
+
+                # Report completion to the RPi; include diagnostics only if DEBUG.
+                payload = {"type": P.TYPE_CENTER_DONE, "target_cls": int(target), "success": bool(success)}
+                if DEBUG and diag is not None:
+                    payload["diag"] = diag
+                try:
+                    send_json(pi_socket, payload)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pi_socket = connect_to_pi(PI_IP, PI_PORT)
+                    send_json(pi_socket, payload)
+                continue  # Done servicing centering; return to event loop
+
+            # ----------------------- Idle: live annotated view -------------------
+            # No pending requests → keep the UI responsive by running YOLO on
+            # live frames (optionally filtered to a single class).
+            ok, frame = cap.read()
+            if not ok:
+                print("Failed to grab frame")
+                break
+
+            results = infer_all(model, frame, None if resolved_class_id == -1 else [resolved_class_id])
+            for result in results:
+                annotated = result.plot()
+                h, w = annotated.shape[:2]
+                resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
+                # Show a small hint when recall mode is active
+                if recall_mode and not search_mode:
+                    draw_wrapped_text(resized, "[RECALL MODE] m=exit, a=prev, d=next", 10, 24, int(resized.shape[1]*0.9))
+                cv2.imshow("YOLO Detection", resized)
+
+    finally:
+        # On exit, try to tell the RPi we’re stopping; then clean up resources.
+        try:
+            send_json(pi_socket, {'type': P.TYPE_STOP})
+        except Exception:
+            pass
+        try:
+            pi_socket.close()
+        except Exception:
+            pass
+        cap.release()
+        cv2.destroyAllWindows()
