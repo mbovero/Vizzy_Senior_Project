@@ -16,6 +16,19 @@ from . import state
 
 # pigpio.pi() instance is passed in by caller (server/dispatch/search)
 
+# --- add near top, after imports and state import ---
+def init_servos(pi) -> None:
+    """
+    Initialize servo outputs at SERVO_CENTER so they are powered and not limp.
+    Safe to call multiple times.
+    """
+    tb = int(C.SERVO_CENTER)
+    tt = int(C.SERVO_CENTER)
+    pi.set_servo_pulsewidth(C.SERVO_BTM, tb)
+    pi.set_servo_pulsewidth(C.SERVO_TOP, tt)
+    state.current_horizontal = tb
+    state.current_vertical = tt
+
 
 def _clamp(v: int, vmin: int, vmax: int) -> int:
     """Clamp integer v to [vmin, vmax]."""

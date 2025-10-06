@@ -20,7 +20,7 @@ from ..shared.jsonl import recv_lines, send_json
 from . import state
 from . import dispatch
 from .search import run_search_sweep
-
+from .servo import init_servos
 
 def _make_server_socket() -> socket.socket:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -48,6 +48,9 @@ def serve_forever(debug: bool = False) -> None:
     if not pi.connected:
         raise RuntimeError("[RPi] pigpio daemon not running or not reachable.")
 
+    init_servos(pi)
+    print("[RPi] Servos initialized to center.")
+
     server_sock = _make_server_socket()
 
     try:
@@ -59,6 +62,8 @@ def serve_forever(debug: bool = False) -> None:
             # Reset state on new connection
             state.search_active.clear()
             state.centering_active.clear()
+
+            init_servos(pi)
 
             # Per-connection buffers and worker handle
             buf = b""
