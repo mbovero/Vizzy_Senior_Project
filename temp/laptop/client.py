@@ -1,279 +1,291 @@
-from ..shared import config
-import socket, time, cv2, threading
-from queue import Queue
-from ultralytics import YOLO
-import torch
+from __future__ import annotations
+
+import socket
+import time
+import cv2
+import threading
+from queue import Queue, Empty
 from typing import Optional, Dict, Any
-from .memory import ObjectMemory
-from ..shared.jsonl import recv_lines, send_json
+
+import torch
+from ultralytics import YOLO
+
+from ..shared import config as C
 from ..shared import protocol as P
+from ..shared.jsonl import recv_lines, send_json
+
+from .memory import ObjectMemory
 from .scanning import run_scan_window
 from .centering import center_on_class
 from .hud import draw_wrapped_text
 
 
+# --------------------------------------------------------------------------------------
+# Networking helpers
+# --------------------------------------------------------------------------------------
 def connect_to_pi(ip: str, port: int):
-    """
-    Persistent connect helper:
-      - Tries to connect to the RPi TCP server.
-      - If it fails, waits 2s and retries forever.
-      - Disables Nagles algorithm (TCP_NODELAY) for low-latency small packets.
-    Returns:
-      A connected socket object.
-    """
-    while True:
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((ip, port))
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            print("Connected to Raspberry Pi")
-            return sock
-        except (ConnectionRefusedError, OSError) as e:
-            print(f"Connection failed, retrying... Error: {e}")
-            time.sleep(2)
+    """Connect to the RPi and return a blocking TCP socket."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    s.connect((ip, port))
+    print(f"[Laptop] Connected to RPi at {ip}:{port}")
+    return s
 
 
-
-
+# --------------------------------------------------------------------------------------
+# Main client
+# --------------------------------------------------------------------------------------
 def main():
     # ----------------------------- YOLO model initialization -----------------------------
-    # Choose GPU (cuda) if available, otherwise use CPU
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # Load the specified YOLO model
-    model = YOLO(config.YOLO_MODEL)
+    model = YOLO(C.YOLO_MODEL)
 
     NAMES = model.names  # class ID --> name mapping from the model
+
     def get_name(cid: int) -> str:
-        """Return human-readable label for a class ID using model.names."""
         try:
             if isinstance(NAMES, dict):
                 return str(NAMES[int(cid)])
             else:
+                # Some exports store names as a list
                 return str(NAMES[int(cid)])
         except Exception:
             return str(cid)
 
+    # ----------------------------- Camera ----------------------------------------------
+    cap = cv2.VideoCapture(C.CAM_INDEX)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open camera index {C.CAM_INDEX}")
 
-    # ------------------------------- Camera setup ----------------------------------
-    # Open camera using V4L2 backend on Linux
-    cap = cv2.VideoCapture(config.CAM_INDEX, cv2.CAP_V4L2)
-
-    # Configure image type, resolution, and FPS
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  int(800))
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(600))
     cap.set(cv2.CAP_PROP_FPS,          float(30.0))
 
-    # Ensure camera connection and interfacing is successful
-    if not cap.isOpened():
-        print("Error: Could not open camera")
-        return
+    # Grab one frame to compute frame center and set a nice window size
     ok, frame0 = cap.read()
     if not ok:
-        print("Error: Could not read frame from camera")
-        return
-    
-    # Print frame dimensions to console
-    frame_h, frame_w = frame0.shape[:2]
-    print(f"image width: {frame_w}, image height: {frame_h}")
-    # -------------------------------
+        cap.release()
+        raise RuntimeError("Failed to read a frame from the camera on startup.")
+    h0, w0 = frame0.shape[:2]
+    center_x, center_y = w0 // 2, h0 // 2
 
-    # Store image frame center for object centering later on
-    center_x, center_y = frame_w // 2, frame_h // 2     # pixels
+    # ----------------------------- State / Memory --------------------------------------
+    object_memory = ObjectMemory(C.MEM_FILE)
 
+    # UI state
+    search_mode = False
+    recall_mode = False
+    recall_index = 0
 
-    # ------------------------------ Networking -------------------------------
-    # Connect to the RPi server and store the socket
-    pi_socket = connect_to_pi(config.PI_IP, config.PI_PORT)
+    # ----------------------------- Networking ------------------------------------------
+    pi_socket = connect_to_pi(C.PI_IP, C.PI_PORT)
+    buf = b""
 
+    # Minimal “mailboxes”
+    pose_ready_q: "Queue[int]" = Queue(maxsize=8)  # pose_id queue
+    pwms_event = threading.Event()
+    pwms_payload: Dict[str, int] = {}  # {"pwm_btm": int, "pwm_top": int}
+    sweep_completed_flag = threading.Event()
 
-    # ------------------------------ Shared state -----------------------------
-    # TODO: we need to abstract the whole search mode to its own thread/function; 
-    # other modes will include idle (waiting for user input), and task execution
-    # UI / mode flags:
-    search_mode = False         # true when the RPi is sweeping the grid
-    recall_mode = False         # true when user is navigating stored objects TODO: remove this and following line
-    recall_index = 0            # index into the memory table when recalling
-
-    # Initialize memory of objects in the arm's workspace
-    object_memory = ObjectMemory(config.MEM_FILE)
-
-    # Small, thread-safe one-slot "inboxes" for requests received from the RPi:
-    scan_request_lock = threading.Lock()
-    scan_request: Optional[dict] = None
-
-    center_request_lock = threading.Lock()
-    center_request: Optional[dict] = None
-
-
-    # ----------------------------- Receiver thread ---------------------------
-    def receiver_loop():
-        """
-        Background loop that:
-          - Reads newline-delimited JSON from the RPi socket.
-          - For command messages, writes into the “mailboxes” protected by locks:
-              • scan_request: asks us to run a scan window now.
-              • center_request: asks us to center on a class now.
-          - For snapshot messages, updates local object memory.
-        If the socket closes/errors, it reconnects and continues.
-        """
-        nonlocal pi_socket, scan_request, center_request
-        buf = b""
-        while True:
-            try:
-                # Track any full JSON messages parsed from buffer
-                msgs, buf, closed = recv_lines(pi_socket, buf)
-                # If disconnected, attempt reconnection
-                if closed:
-                    print("[Laptop] Connection closed by RPi; reconnecting...")
-                    pi_socket = connect_to_pi(config.PI_IP, config.PI_PORT)
-                    buf = b""
-                    continue
-
-                # Process each discrete JSON message
-                # TODO: this command should stay, but might need modification; it should trigger a full 
-                # scan of the current search path position - including object centering
-                for msg in msgs:
-                    # RPi --> Laptop: request to run a YOLO scan window
-                    if msg.get("cmd") == P.CMD_YOLO_SCAN:
-                        with scan_request_lock:
-                            scan_request = {
-                                "exclude_cls": msg.get("exclude_cls", []),
-                            }
-
-                    # RPi --> Laptop: request to center on a given class
-                    # TODO: not sure why RPi has control over this; laptop should have all tools necessary 
-                    # to do this on its own. Can hopefully remove this entirely
-                    elif msg.get("cmd") == P.CMD_CENTER_ON:
-                        with center_request_lock:
-                            center_request = {
-                                "target_cls": int(msg.get("target_cls", -1)),
-                                "target_name": msg.get("target_name", ""),
-                            }
-
-                    # RPi --> Laptop: snapshot of verified centering (store in memory)
-                    # TODO: this should be changed to store XYZ position of the identified object; should 
-                    # probably also trigger a calculation for grasping angle
-                    elif msg.get("type") == P.TYPE_CENTER_SNAPSHOT:
-                        cls_id  = int(msg.get("cls_id"))
-                        cls_name= str(msg.get("cls_name", ""))
-                        pwm_btm = int(msg.get("pwm_btm"))
-                        pwm_top = int(msg.get("pwm_top"))
-
-                        # Try to capture a representative confidence to save with the entry
-                        #TODO keep this, but eventually change pwm to pos + orientation
-                        object_memory.update_entry(
-                            cls_id, cls_name or str(cls_id), pwm_btm, pwm_top
-                        )
-                        print(f"[Laptop] Memory updated: {cls_name or cls_id} -> btm={pwm_btm}, top={pwm_top}")
-
-            # Attempt reconnecting when errors occur
-            except (ConnectionResetError, BrokenPipeError, OSError):
-                print("[Laptop] Socket error; reconnecting...")
-                pi_socket = connect_to_pi(config.PI_IP, config.PI_PORT)
-
-    # Start the receiver thread (as daemon so it won’t block exit)
-    threading.Thread(target=receiver_loop, daemon=True).start()
-
-
-    # ------------------------------ Command Helpers ----------------------------------
-    # TODO: this should be swapped out for a generic relative move command that requires the 
-    # arm to keep the camera parallel to the ground while moving left/right/forward/back
-    def send_servo_command(dx, dy):
-        """
-        Send a relative move command to the RPi.
-        """
-        nonlocal pi_socket  # declare before use so Python knows it’s outer-scope
-        cmd = {"type": P.TYPE_MOVE, "horizontal": dx * config.SERVO_SPEED, "vertical": dy * config.SERVO_SPEED} # TODO move SERVO+SPEED to RPi side of things
+    # ----------------------------- Sender helpers --------------------------------------
+    def send_scan_move(ndx: float, ndy: float):
+        """Laptop → RPi: SCAN_MOVE with normalized deltas in [-1, 1]."""
+        nonlocal pi_socket
+        # Clamp to [-1, 1]
+        dx = max(-1.0, min(1.0, float(ndx)))
+        dy = max(-1.0, min(1.0, float(ndy)))
+        payload = {"type": P.TYPE_SCAN_MOVE, "horizontal": dx, "vertical": dy}
         try:
-            send_json(pi_socket, cmd)
+            send_json(pi_socket, payload)
         except (BrokenPipeError, ConnectionResetError, OSError):
-            pi_socket = connect_to_pi(config.PI_IP, config.PI_PORT)
-            send_json(pi_socket, cmd)
+            pi_socket = connect_to_pi(C.PI_IP, C.PI_PORT)
+            send_json(pi_socket, payload)
 
-    def send_search_command(active: bool):
-        """
-        Toggle Search Mode on the RPi. We mirror the state locally for UI.
-        """
-        nonlocal search_mode, pi_socket
+    def send_search(active: bool):
+        """Laptop → RPi: toggle search mode."""
+        nonlocal pi_socket, search_mode
         search_mode = bool(active)
+        payload = {"type": P.TYPE_SEARCH, "active": search_mode}
         try:
-            send_json(pi_socket, {'type': P.TYPE_SEARCH, 'active': search_mode})
+            send_json(pi_socket, payload)
         except (BrokenPipeError, ConnectionResetError, OSError):
-            pi_socket = connect_to_pi(config.PI_IP, config.PI_PORT)
-            send_json(pi_socket, {'type': P.TYPE_SEARCH, 'active': search_mode})
+            pi_socket = connect_to_pi(C.PI_IP, C.PI_PORT)
+            send_json(pi_socket, payload)
 
-    # TODO: This isn't needed for searching; something similar will be used by the LLM later tho
     def send_goto_pwms(pwm_btm: int, pwm_top: int, slew_ms: int = 600):
-        """
-        Ask the RPi to slew both servos to absolute PWM values smoothly.
-        Used by Recall Mode to move to stored object poses.
-        """
+        """Laptop → RPi: absolute move for recall mode."""
         nonlocal pi_socket
         payload = {"cmd": P.CMD_GOTO_PWMS, "pwm_btm": int(pwm_btm), "pwm_top": int(pwm_top), "slew_ms": int(slew_ms)}
         try:
             send_json(pi_socket, payload)
         except (BrokenPipeError, ConnectionResetError, OSError):
-            pi_socket = connect_to_pi(config.PI_IP, config.PI_PORT)
+            pi_socket = connect_to_pi(C.PI_IP, C.PI_PORT)
             send_json(pi_socket, payload)
 
+    def request_pwms(timeout_s: float = 0.3) -> Optional[Dict[str, int]]:
+        """Laptop → RPi: ask for current PWMs and wait briefly for TYPE_PWMS."""
+        nonlocal pi_socket, pwms_payload
+        pwms_event.clear()
+        try:
+            send_json(pi_socket, {"cmd": P.CMD_GET_PWMS})
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pi_socket = connect_to_pi(C.PI_IP, C.PI_PORT)
+            send_json(pi_socket, {"cmd": P.CMD_GET_PWMS})
+        ok = pwms_event.wait(timeout_s)
+        return dict(pwms_payload) if ok else None
 
-
-
-
-
-
-
-
-
-
-    # ------------------------------ Main UI loop ------------------------------
-    try:
-        # TODO: remove all keyboard controls and replace with automated state machine (idle -> search -> execute)
+    # ----------------------------- Receiver thread -------------------------------------
+    def receiver_loop():
+        nonlocal pi_socket, buf, pwms_payload
         while True:
-            # Poll for keyboard input at ~1kHz via OpenCV’s event loop.
+            try:
+                msgs, buf, closed = recv_lines(pi_socket, buf)
+                if closed:
+                    print("[Laptop] RPi closed connection; reconnecting...")
+                    pi_socket = connect_to_pi(C.PI_IP, C.PI_PORT)
+                    buf = b""
+                    continue
+
+                for msg in msgs:
+                    mtype = msg.get("type")
+                    mcmd = msg.get("cmd")
+
+                    # RPi → Laptop: sweep has reached a new pose and is settled
+                    if mtype == P.TYPE_POSE_READY:
+                        pid = int(msg.get("pose_id", 0))
+                        try:
+                            pose_ready_q.put_nowait(pid)
+                        except Exception:
+                            # If queue is full, drop oldest to keep things moving
+                            _ = None
+                            try:
+                                pose_ready_q.get_nowait()
+                            except Empty:
+                                pass
+                            pose_ready_q.put_nowait(pid)
+
+                    # RPi → Laptop: sweep completed by default stop
+                    elif mtype == P.TYPE_SEARCH and (msg.get("active") is False):
+                        sweep_completed_flag.set()
+
+                    # RPi → Laptop: current PWMs response
+                    elif mtype == P.TYPE_PWMS:
+                        try:
+                            pwms_payload.clear()
+                            pwms_payload.update({"pwm_btm": int(msg["pwm_btm"]), "pwm_top": int(msg["pwm_top"])})
+                            pwms_event.set()
+                        except Exception:
+                            # Ignore malformed
+                            pass
+
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                print("[Laptop] Socket error; reconnecting...")
+                pi_socket = connect_to_pi(C.PI_IP, C.PI_PORT)
+                buf = b""
+
+    threading.Thread(target=receiver_loop, daemon=True).start()
+
+    # ----------------------------- Pose processing helper ------------------------------
+    def process_pose(pose_id: int):
+        """Run scan → choose → center → (if success) GET_PWMS → update memory → POSE_DONE."""
+        # Exclude classes already updated this session
+        exclude_ids = [int(e["cls_id"]) for e in object_memory.entries_sorted() if e.get("updated_this_session") == 1]
+
+        summary = run_scan_window(
+            cap=cap,
+            model=model,
+            exclude_ids=exclude_ids,
+            get_name=get_name,
+            min_frames_for_class=C.SCAN_MIN_FRAMES,
+        )
+
+        # Pick best candidate by avg_conf, then frames; enforce scan gates
+        objs = summary.get("objects", [])
+        target = None
+        for o in objs:
+            if o.get("avg_conf", 0.0) >= C.SCAN_MIN_CONF and int(o.get("frames", 0)) >= int(C.SCAN_MIN_FRAMES):
+                target = o
+                break
+
+        if target is None:
+            # Nothing worth centering at this pose
+            try:
+                send_json(pi_socket, {"type": P.TYPE_POSE_DONE, "pose_id": int(pose_id), "status": "SKIP"})
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                # try reconnect & resend once
+                s = connect_to_pi(C.PI_IP, C.PI_PORT)
+                send_json(s, {"type": P.TYPE_POSE_DONE, "pose_id": int(pose_id), "status": "SKIP"})
+            return
+
+        cls_id = int(target["cls_id"])
+        label = f"CENTER {target.get('cls_name', get_name(cls_id))} (id {cls_id})"
+
+        # Centering loop (drives SCAN_MOVE bursts)
+        success_tuple = center_on_class(
+            cap=cap,
+            model=model,
+            target_cls=cls_id,
+            center_x=center_x,
+            center_y=center_y,
+            send_move=send_scan_move,
+            display_scale=C.DISPLAY_SCALE,
+            label=label,
+        )
+        # center_on_class may return (bool) or (bool, diag)
+        success = success_tuple if isinstance(success_tuple, bool) else bool(success_tuple[0])
+
+        if success:
+            # While still centered, query current PWMs from RPi, then update memory locally
+            pwms = request_pwms(timeout_s=0.3)
+            if pwms is not None and "pwm_btm" in pwms and "pwm_top" in pwms:
+                object_memory.update_entry(
+                    cls_id=cls_id,
+                    cls_name=target.get("cls_name", get_name(cls_id)),
+                    pwm_btm=int(pwms["pwm_btm"]),
+                    pwm_top=int(pwms["pwm_top"]),
+                )
+                print(f"[Memory] Updated: {get_name(cls_id)} -> btm={pwms['pwm_btm']}, top={pwms['pwm_top']}")
+            else:
+                print("[Memory] Warning: did not receive PWMS in time; not updating pose for this object.")
+
+            # Tell RPi we’re done with this pose
+            try:
+                send_json(pi_socket, {"type": P.TYPE_POSE_DONE, "pose_id": int(pose_id), "status": "SUCCESS"})
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                s = connect_to_pi(C.PI_IP, C.PI_PORT)
+                send_json(s, {"type": P.TYPE_POSE_DONE, "pose_id": int(pose_id), "status": "SUCCESS"})
+        else:
+            try:
+                send_json(pi_socket, {"type": P.TYPE_POSE_DONE, "pose_id": int(pose_id), "status": "FAIL"})
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                s = connect_to_pi(C.PI_IP, C.PI_PORT)
+                send_json(s, {"type": P.TYPE_POSE_DONE, "pose_id": int(pose_id), "status": "FAIL"})
+
+    # ----------------------------- UI / Main loop --------------------------------------
+    try:
+        while True:
+            # Keyboard controls
             key = cv2.waitKey(1) & 0xFF
 
-            # ---- Toggle Search Mode (s) ----
-            if key == ord('s'):
-                # Flip search flag and notify RPi
-                send_search_command(not search_mode)
-
+            # Toggle search mode (s)
+            if key == ord("s"):
+                search_mode = not search_mode
                 if search_mode:
-                    # We just turned ON search mode on the RPi.
-                    # Reset session flags so freshly centered objects are marked updated.
-                    print("Entering search mode: resetting memory session flags...")
+                    print("[Search] ON")
                     object_memory.reset_session_flags()
+                else:
+                    print("[Search] OFF (interrupt)")
+                send_search(search_mode)
 
-                    # If user was in Recall Mode, switch it off (search takes over).
-                    if recall_mode:
-                        recall_mode = False
-                        print("[Recall] OFF (search started)")
-                # TODO: We probably won't have a manually togglable search mode; so let's have 
-                # the rpi send a command indicating that the scan cycle completed
-                else: 
-                    # We just turned OFF search mode; prune memory entries that
-                    # were never updated during the session.
-                    print("Exiting search mode: pruning memory not updated this session...")
-                    object_memory.prune_not_updated()
-
-                print(f"{'Entering' if search_mode else 'Exiting'} search mode")
-
-            # TODO: i think this can be removed entirely; eventually task execution will take its place
-            # ---- Toggle Recall Mode (m) – only when NOT in search mode ----
-            elif key == ord('m') and not search_mode:
+            # Toggle recall mode (m)
+            elif key == ord("m") and not search_mode:
                 recall_mode = not recall_mode
-                entries = object_memory.entries_sorted()
-
                 if recall_mode:
-                    if not entries:
-                        # No saved objects → nothing to recall; turn mode back off.
-                        print("[Recall] No objects in memory; turning OFF.")
-                        recall_mode = False
-                    else:
-                        # Select first entry and ask RPi to move there
+                    entries = object_memory.entries_sorted()
+                    if entries:
                         recall_index = 0
                         e = entries[recall_index]
                         print(f"[Recall] Selected -> {e['cls_name']} (id {e['cls_id']}), moving to stored pose...")
@@ -281,8 +293,8 @@ def main():
                 else:
                     print("[Recall] OFF")
 
-            # ---- Recall Mode: cycle left (a) ----
-            elif recall_mode and key == ord('a') and not search_mode:
+            # Recall left (a)
+            elif recall_mode and key == ord("a") and not search_mode:
                 entries = object_memory.entries_sorted()
                 if entries:
                     recall_index = (recall_index - 1) % len(entries)
@@ -290,8 +302,8 @@ def main():
                     print(f"[Recall] {e['cls_name']} (id {e['cls_id']}) <- moving")
                     send_goto_pwms(e["pwm_btm"], e["pwm_top"], slew_ms=600)
 
-            # ---- Recall Mode: cycle right (d) ----
-            elif recall_mode and key == ord('d') and not search_mode:
+            # Recall right (d)
+            elif recall_mode and key == ord("d") and not search_mode:
                 entries = object_memory.entries_sorted()
                 if entries:
                     recall_index = (recall_index + 1) % len(entries)
@@ -299,92 +311,44 @@ def main():
                     print(f"[Recall] {e['cls_name']} (id {e['cls_id']}) -> moving")
                     send_goto_pwms(e["pwm_btm"], e["pwm_top"], slew_ms=600)
 
-            # ---- Quit (q) ----
-            elif key == ord('q'):
+            # Quit (q)
+            elif key == ord("q"):
                 break
 
-            # ------------------- Service pending scan request -------------------
-            # TODO: should NOT send back results; rpi does not need to be aware of YOLO data
+            # If RPi reports sweep completion, prune memory and clear flag
+            if sweep_completed_flag.is_set():
+                object_memory.prune_not_updated()
+                sweep_completed_flag.clear()
+                print("[Search] Completed (pruned memory entries not updated this session)")
 
-            # If the RPi asked (via receiver thread) to scan at the current
-            # stationary pose, process it now and send back summarized results.
-            with scan_request_lock:
-                pending_scan = scan_request
-                scan_request = None
+            # Process any ready poses
+            try:
+                pose_id = pose_ready_q.get_nowait()
+            except Empty:
+                pose_id = None
 
-            if pending_scan is not None:
-                exclude_ids = pending_scan.get("exclude_cls", [])       # TODO: this should not be sent from RPI, keep this on laptop side
+            if pose_id is not None:
+                process_pose(int(pose_id))
+                continue  # Next UI tick
 
-                summary = run_scan_window(
-                    cap, model,
-                    exclude_ids=exclude_ids,
-                    get_name=get_name,
-                )
-
-                try:
-                    send_json(pi_socket, { "type": P.TYPE_YOLO_RESULTS, **summary })
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    pi_socket = connect_to_pi(config.PI_IP, config.PI_PORT)
-                    send_json(pi_socket, { "type": P.TYPE_YOLO_RESULTS, **summary })
-                continue  # Go back to top of loop after handling request
-
-            # ----------------- Service pending centering request ----------------
-            #TODO: this should be integrated with scan cycle
-
-            # If the RPi asked to center on a class, run the centering loop
-            # (which drives servos via move_cb → TYPE_MOVE messages) and then
-            # report whether verification succeeded.
-            with center_request_lock:
-                pending_center = center_request
-                center_request = None
-
-            if pending_center is not None:
-                target = int(pending_center["target_cls"])
-                label = f"CENTERING {get_name(target)} (id {target})"
-
-                # Callback that the centering loop uses to request relative servo moves.
-                def move_cb(ndx, ndy):
-                    send_servo_command(ndx, ndy)
-
-                # Run the centering attempt; this keeps the UI responsive and
-                # sends TYPE_MOVE messages to the RPi while tracking.
-                success = center_on_class(
-                    cap, model, target, center_x, center_y,
-                    move_cb, config.DISPLAY_SCALE, label
-                )
-
-                # Report completion to the RPi
-                payload = {"type": P.TYPE_CENTER_DONE, "target_cls": int(target), "success": bool(success)}
-                try:
-                    send_json(pi_socket, payload)
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    pi_socket = connect_to_pi(config.PI_IP, config.PI_PORT)
-                    send_json(pi_socket, payload)
-                continue  # Done servicing centering; return to event loop
-
-            # ----------------------- Idle: live annotated view -------------------
-            # No pending requests → keep the UI responsive by running YOLO on
-            # live frames.
+            # Live preview when idle
             ok, frame = cap.read()
             if not ok:
                 print("Failed to grab frame")
                 break
-
             results = model(frame)
             for result in results:
                 annotated = result.plot()
                 h, w = annotated.shape[:2]
-                resized = cv2.resize(annotated, (int(w * config.DISPLAY_SCALE), int(h * config.DISPLAY_SCALE)))
-                # TODO: remove recall mode
-                # Show a small hint when recall mode is active
+                resized = cv2.resize(annotated, (int(w * C.DISPLAY_SCALE), int(h * C.DISPLAY_SCALE)))
                 if recall_mode and not search_mode:
-                    draw_wrapped_text(resized, "[RECALL MODE] m=exit, a=prev, d=next", 10, 24, int(resized.shape[1]*0.9))
+                    draw_wrapped_text(resized, "RECALL MODE", (12, 12))
                 cv2.imshow("YOLO Detection", resized)
 
     finally:
-        # On exit, try to tell the RPi we’re stopping; then clean up resources.
+        # Try to stop gracefully
         try:
-            send_json(pi_socket, {'type': P.TYPE_STOP})
+            send_json(pi_socket, {"type": P.TYPE_STOP})
         except Exception:
             pass
         try:

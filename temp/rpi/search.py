@@ -1,0 +1,125 @@
+# vizzy/rpi/server.py
+# -----------------------------------------------------------------------------
+# Single-client JSONL TCP server for Vizzy RPi side (new protocol)
+# -----------------------------------------------------------------------------
+
+from __future__ import annotations
+
+import socket
+import threading
+import time
+from typing import Optional
+
+import pigpio
+
+from ..shared import config as C
+from ..shared.jsonl import recv_lines
+from . import state
+from . import dispatch
+from . import search
+
+
+def _make_server_socket() -> socket.socket:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((C.LISTEN_HOST, int(C.LISTEN_PORT)))
+    s.listen(1)
+    print(f"[RPi] Listening on {C.LISTEN_HOST}:{C.LISTEN_PORT}")
+    return s
+
+
+def _start_sweep_thread(pi: pigpio.pi, conn: socket.socket, debug: bool = False) -> threading.Thread:
+    t = threading.Thread(
+        target=search.run_search_sweep,
+        args=(pi, conn),
+        kwargs={"debug": debug},
+        daemon=True,
+    )
+    t.start()
+    return t
+
+
+def serve_forever(debug: bool = False) -> None:
+    pi = pigpio.pi()
+    if not pi.connected:
+        raise RuntimeError("[RPi] pigpio daemon not running or not reachable.")
+
+    server_sock = _make_server_socket()
+
+    try:
+        while True:
+            print("[RPi] Waiting for laptop client...")
+            conn, addr = server_sock.accept()
+            print(f"[RPi] Client connected from {addr[0]}:{addr[1]}")
+
+            # Reset state on new connection
+            state.search_active.clear()
+            state.centering_active.clear()
+
+            buf = b""
+            sweep_thread: Optional[threading.Thread] = None
+
+            try:
+                while True:
+                    # Read any available messages
+                    try:
+                        msgs, buf, closed = recv_lines(conn, buf)
+                    except ConnectionResetError:
+                        print("[RPi] Connection reset by peer.")
+                        closed = True
+                        msgs = []
+
+                    if closed:
+                        print("[RPi] Client disconnected.")
+                        state.search_active.clear()
+                        state.centering_active.clear()
+                        break
+
+                    if msgs:
+                        stop = dispatch.process_messages(pi, conn, msgs, debug=debug)
+                        if stop:
+                            print("[RPi] STOP requested; closing connection.")
+                            try:
+                                conn.shutdown(socket.SHUT_RDWR)
+                            except Exception:
+                                pass
+                            conn.close()
+                            return  # exit server
+
+                    # Start sweep worker if search turned ON
+                    if state.search_active.is_set():
+                        if sweep_thread is None or not sweep_thread.is_alive():
+                            if debug:
+                                print("[RPi] Starting search sweep worker...")
+                            sweep_thread = _start_sweep_thread(pi, conn, debug=debug)
+
+                    time.sleep(0.01)
+
+            except Exception as e:
+                print(f"[RPi] Error in client loop: {e}")
+                try:
+                    conn.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                state.search_active.clear()
+                state.centering_active.clear()
+                continue
+
+            # Connection closed cleanly; loop back to accept()
+            state.search_active.clear()
+            state.centering_active.clear()
+
+    finally:
+        try:
+            server_sock.close()
+        except Exception:
+            pass
+        try:
+            pi.stop()
+        except Exception:
+            pass
+        print("[RPi] Server shut down.")

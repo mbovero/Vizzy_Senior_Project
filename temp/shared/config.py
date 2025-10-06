@@ -1,23 +1,73 @@
-# Computer Vision parameters
-YOLO_MODEL = 'yolo11m-seg.engine'
+# vizzy/shared/config.py
+# -----------------------------------------------------------------------------
+# Single source of truth for both Laptop and RPi configuration.
+# Keep protocol identifiers in shared/protocol.py.
+# All code should import from this module instead of module-local configs.
+# -----------------------------------------------------------------------------
+
+# -----------------------------
+# Vision / Camera (Laptop)
+# -----------------------------
+YOLO_MODEL = "yolo11m-seg.engine"
 CAM_INDEX = 4
-
-# Raspberry Pi connections parameters
-PI_IP = '192.168.1.30'
-PI_PORT = 65432
-
-MEM_FILE = 'object_memory.json'
-
 DISPLAY_SCALE = 1.3
 
-# Object centering parameters
-CENTER_DEADZONE = 30
-SERVO_SPEED = 0.2 # TODO: this should be baked into motor/servo control API; remove later on
-CENTER_CONF = 0.60          # per-frame minimum confidence
-CENTER_MOVE_NORM = 0.035    # normalized motion stability
-CENTER_FRAMES = 12          # number of “good” frames (not necessarily consecutive)
-CENTER_EPSILON_PX   = 25     # Pixel error tolerance for centering success
+# Duration knobs (ms)
+SCAN_DURATION_MS   = 1750   # Per-pose scan window
+CENTER_DURATION_MS = 3000   # Max time to attempt centering
 
+# Explicit scan gates (selection before attempting to center)
+# (Use these to filter scan results; centering thresholds remain separate.)
+SCAN_MIN_CONF   = 0.60
+SCAN_MIN_FRAMES = 4
 
-SCAN_DURATION_MS    = 1750   # How long YOLO scan runs at each grid point
-CENTER_DURATION_MS  = 3000   # How long to allow laptop to center object
+# Centering verification thresholds (used during closed-loop centering)
+CENTER_CONF        = 0.60     # Per-frame minimum confidence
+CENTER_EPSILON_PX  = 25       # Pixel error tolerance for success
+CENTER_MOVE_NORM   = 0.035    # Normalized motion stability
+CENTER_FRAMES      = 12       # Number of “good” frames (not necessarily consecutive)
+CENTER_DEADZONE    = 30       # HUD/visual deadzone (px); also helps avoid micro-hunting
+
+# Retry / safety
+MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a single pose
+
+# Object memory
+MEM_FILE = "object_memory.json"
+
+# -----------------------------
+# Networking
+# -----------------------------
+# Laptop connects to the Pi at this host/port.
+PI_IP   = "192.168.1.30"
+PI_PORT = 65432
+
+# RPi server bind (RPi will ignore PI_IP and bind to LISTEN_HOST:LISTEN_PORT)
+LISTEN_HOST = "0.0.0.0"
+LISTEN_PORT = 65432
+
+# -----------------------------
+# Servos & Sweep (RPi)
+# -----------------------------
+# Servo GPIO pins (BCM numbering for pigpio)
+# Adjust to match your wiring.
+SERVO_BTM = 18
+SERVO_TOP = 19
+
+# Pulse width bounds (µs)
+SERVO_MIN    = 500
+SERVO_MAX    = 2500
+SERVO_CENTER = 1500
+
+# Normalized scan moves (Laptop -> RPi) scaling to pulse width (µs)
+# The laptop sends SCAN_MOVE with values in [-1, 1]; the RPi multiplies by this scale.
+MOVE_SCALE_US = 300
+
+# Search grid definition (computed on RPi)
+# Range is reduced by MIN/MAX offsets to avoid hard mechanical limits.
+SEARCH_MIN_OFFSET = 100  # µs trimmed from the low end
+SEARCH_MAX_OFFSET = 100  # µs trimmed from the high end
+SEARCH_H_STEP     = 150  # µs horizontal step between poses
+SEARCH_V_STEP     = 150  # µs vertical step between rows
+
+# Time to allow the arm to settle mechanically at each pose before scanning
+POSE_SETTLE_S = 0.30

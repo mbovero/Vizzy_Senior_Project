@@ -1,25 +1,19 @@
 from __future__ import annotations
 
-# TODO this needs a complete redo; laptop should handle all YOLO related tasks instead 
-# of the weird back and forth between the laptop and rpi
+# -----------------------------------------------------------------------------
+# Vizzy Protocol (shared/protocol.py)
+# Minimal, laptop-centric handshake
+# -----------------------------------------------------------------------------
+# All TYPE/CMD identifiers are UPPERCASE. Payload keys are lowercase and minimal.
+#
+# Message "type" constants (events/push)
+TYPE_SCAN_MOVE   = "SCAN_MOVE"   # (Laptop -> RPi) Fine corrections during centering; values in [-1, 1].
+TYPE_SEARCH      = "SEARCH"      # (Both ways) Toggle search mode ON/OFF. { "active": true|false }
+TYPE_STOP        = "STOP"        # (Laptop -> RPi) Stop all motion/operations cleanly.
+TYPE_POSE_READY  = "POSE_READY"  # (RPi -> Laptop) Arm is settled at next grid pose. { "pose_id": int }
+TYPE_POSE_DONE   = "POSE_DONE"   # (Laptop -> RPi) Pose finished. { "pose_id": int, "status": "SUCCESS"|"SKIP"|"FAIL" }
+TYPE_PWMS        = "PWMS"        # (RPi -> Laptop) Current servo positions. { "pwm_btm": int, "pwm_top": int }
 
-# -----------------------------
-# Message "type" constants
-# -----------------------------
-# These usually indicate **what kind of data/event** the message represents.
-
-TYPE_MOVE            = "move"              # (Laptop -> RPi) Move servos by offset or absolute target.
-TYPE_SEARCH          = "search"            # (Laptop -> RPi) Toggle search mode ON/OFF.
-TYPE_STOP            = "stop"              # (Laptop -> RPi) Stop all motion/operations cleanly.
-TYPE_YOLO_RESULTS    = "YOLO_RESULTS"      # (Laptop -> RPi) Send YOLO detections and confidences.
-TYPE_CENTER_DONE     = "CENTER_DONE"       # (RPi -> Laptop) Report result of centering attempt.
-TYPE_CENTER_SNAPSHOT = "CENTER_SNAPSHOT"   # (RPi -> Laptop) Send PWM pose + class info for memory.
-
-# -----------------------------
-# Message "cmd" constants
-# -----------------------------
-# These are **requests** to perform a specific action.
-
-CMD_YOLO_SCAN        = "YOLO_SCAN"         # Ask laptop to run YOLO inference for N milliseconds.
-CMD_CENTER_ON        = "CENTER_ON"         # Ask RPi to center on a given object class.
-CMD_GOTO_PWMS        = "GOTO_PWMS"         # Ask RPi to move servos to specific PWM positions.
+# Message "cmd" constants (requests)
+CMD_GOTO_PWMS    = "GOTO_PWMS"   # (Laptop -> RPi) Move servos to absolute PWM positions.
+CMD_GET_PWMS     = "GET_PWMS"    # (Laptop -> RPi) Request current servo PWMs.
