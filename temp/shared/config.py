@@ -60,7 +60,7 @@ SERVO_CENTER = 1500
 
 # Normalized scan moves (Laptop -> RPi) scaling to pulse width (µs)
 # The laptop sends SCAN_MOVE with values in [-1, 1]; the RPi multiplies by this scale.
-MOVE_SCALE_US = 300
+MOVE_SCALE_US = 100
 
 # Search grid definition (computed on RPi)
 # Range is reduced by MIN/MAX offsets to avoid hard mechanical limits.

@@ -65,6 +65,7 @@ def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False)
                     move_servos(pi, dx, dy, scale_us=C.MOVE_SCALE_US)
                     if debug:
                         print(f"[RPi] SCAN_MOVE dx={dx:.3f} dy={dy:.3f}")
+                        print(f"btm={state.current_horizontal} top={state.current_vertical}")
                 else:
                     if debug:
                         print("[RPi] SCAN_MOVE ignored (not in centering window)")

@@ -137,6 +137,7 @@ def serve_forever(debug: bool = False) -> None:
         except Exception:
             pass
         try:
+            init_servos(pi)
             pi.stop()
         except Exception:
             pass
