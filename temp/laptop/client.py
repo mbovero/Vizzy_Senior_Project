@@ -149,7 +149,6 @@ def main():
                         with center_request_lock:
                             center_request = {
                                 "target_cls": int(msg.get("target_cls", -1)),
-                                "epsilon_px": int(msg.get("epsilon_px", 25)),
                                 "target_name": msg.get("target_name", ""),
                             }
 
@@ -342,7 +341,6 @@ def main():
 
             if pending_center is not None:
                 target = int(pending_center["target_cls"])
-                eps   = int(pending_center["epsilon_px"])
                 label = f"CENTERING {get_name(target)} (id {target})"
 
                 # TODO: change to config vars
@@ -353,7 +351,7 @@ def main():
                 # Run the centering attempt; this keeps the UI responsive and
                 # sends TYPE_MOVE messages to the RPi while tracking.
                 success = center_on_class(
-                    cap, model, target, eps, center_x, center_y,
+                    cap, model, target, center_x, center_y,
                     move_cb, config.DISPLAY_SCALE, label
                 )
 

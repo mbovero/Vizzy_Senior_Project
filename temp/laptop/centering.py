@@ -43,7 +43,6 @@ def instance_center(box_xyxy, mask_tensor, frame_w: int, frame_h: int) -> Tuple[
 def center_on_class(cap,
                     model,
                     target_cls: int,
-                    epsilon_px: int,
                     center_x: int, center_y: int,
                     send_move: Callable[[float, float], None],
                     display_scale: float,
@@ -55,7 +54,6 @@ def center_on_class(cap,
         cap: OpenCV VideoCapture providing frames.
         model: YOLO model instance (from yolo_runner.py).
         target_cls: Class ID to track.
-        epsilon_px: Max allowed pixel error (both x and y) for stability.
         center_x, center_y: Pixel coordinates of frame center.
         send_move: Callback taking normalized (dx, dy) to request servo movement.
         display_scale: Factor to scale display window for annotation.
@@ -121,7 +119,7 @@ def center_on_class(cap,
 
                 # Threshold checks
                 conf_ok = (best_conf >= config.CENTER_CONF)
-                err_ok  = (abs(dx) <= epsilon_px and abs(dy) <= epsilon_px)
+                err_ok  = (abs(dx) <= config.CENTER_EPSILON_PX and abs(dy) <= config.CENTER_EPSILON_PX)
                 move_ok = (abs(ndx) < config.CENTER_MOVE_NORM and abs(ndy) < config.CENTER_MOVE_NORM)
 
                 # If not stable, command movement toward center

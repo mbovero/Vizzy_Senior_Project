@@ -16,6 +16,7 @@ SERVO_SPEED = 0.2 # TODO: this should be baked into motor/servo control API; rem
 CENTER_CONF = 0.60          # per-frame minimum confidence
 CENTER_MOVE_NORM = 0.035    # normalized motion stability
 CENTER_FRAMES = 12          # number of “good” frames (not necessarily consecutive)
+CENTER_EPSILON_PX   = 25     # Pixel error tolerance for centering success
 
 
 SCAN_DURATION_MS    = 1750   # How long YOLO scan runs at each grid point
