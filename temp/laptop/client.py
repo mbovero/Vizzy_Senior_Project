@@ -1,9 +1,10 @@
 from ..shared import config
 import socket, time, cv2, threading
+from queue import Queue
 from ultralytics import YOLO
 import torch
+from typing import Optional, Dict, Any
 from .memory import ObjectMemory
-from typing import Optional
 from ..shared.jsonl import recv_lines, send_json
 from ..shared import protocol as P
 from .scanning import run_scan_window
@@ -316,9 +317,7 @@ def main():
 
                 summary = run_scan_window(
                     cap, model,
-                    class_filter=-1,
                     exclude_ids=exclude_ids,
-                    display_scale=config.DISPLAY_SCALE,
                     get_name=get_name,
                 )
 
@@ -343,7 +342,6 @@ def main():
                 target = int(pending_center["target_cls"])
                 label = f"CENTERING {get_name(target)} (id {target})"
 
-                # TODO: change to config vars
                 # Callback that the centering loop uses to request relative servo moves.
                 def move_cb(ndx, ndy):
                     send_servo_command(ndx, ndy)

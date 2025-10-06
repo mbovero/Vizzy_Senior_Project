@@ -10,9 +10,7 @@ from ..shared import config
 def run_scan_window(
     cap,
     model,
-    class_filter: int,
     exclude_ids: Optional[Iterable[int]],
-    display_scale: float,
     get_name,
     min_frames_for_class: int = 4
 ) -> dict:
@@ -23,9 +21,7 @@ def run_scan_window(
     Args:
         cap                : OpenCV VideoCapture object for reading frames.
         model              : YOLO model instance.
-        class_filter       : Restrict detection to one class (-1 for all).
         exclude_ids        : Iterable of class IDs to ignore.
-        display_scale      : Scaling factor for display window size.
         get_name           : Function mapping class ID → human-readable name.
         min_frames_for_class: Minimum appearances before keeping a class.
 
@@ -77,8 +73,6 @@ def run_scan_window(
                     cid      = int(result.boxes.cls[i].item())
                     conf     = float(result.boxes.conf[i].item())
 
-                    if class_filter != -1 and cid != class_filter:
-                        continue
                     if cid in exclude:
                         continue
 
@@ -111,7 +105,7 @@ def run_scan_window(
                 int(annotated.shape[1] * 0.92)
             )
             h, w = annotated.shape[:2]
-            resized = cv2.resize(annotated, (int(w * display_scale), int(h * display_scale))) # TODO hardcode display scale config var
+            resized = cv2.resize(annotated, (int(w * config.DISPLAY_SCALE), int(h * config.DISPLAY_SCALE))) # TODO hardcode display scale config var
             cv2.imshow("YOLO Detection", resized)
             cv2.waitKey(1)  # Keep OpenCV's window responsive TODO: remove this because we no longer have keyboard input?
 
