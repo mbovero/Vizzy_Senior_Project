@@ -56,7 +56,7 @@ def move_servos(pi, dx: float, dy: float, *, scale_us: int | float = None) -> Tu
 
     # Clamp deltas to [-1, 1]
     dx = max(-1.0, min(1.0, float(dx)))
-    dy = max(-1.0, min(1.0, float(dy)))
+    dy = -max(-1.0, min(1.0, float(dy)))
 
     # Convert to microseconds and compute new targets
     delta_btm = int(round(dx * float(scale_us)))
