@@ -11,3 +11,5 @@ CENTER_DEADZONE = 30
 SERVO_SPEED = 0.2 # TODO: this should be baked into motor/servo control API; remove later on
 
 MEM_FILE = 'object_memory.json'
+
+DISPLAY_SCALE = 1.3

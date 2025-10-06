@@ -6,6 +6,9 @@ from .memory import ObjectMemory
 from typing import Optional
 from ..shared.jsonl import recv_lines, send_json
 from ..shared import protocol as P
+from .scanning import run_scan_window
+from .centering import center_on_class
+from .hud import draw_wrapped_text
 
 
 # TODO move this?
@@ -316,7 +319,7 @@ def main():
             # ------------------- Service pending scan request -------------------
             # TODO: should NOT send back results; rpi does not need to be aware of YOLO data
 
-            # If the RPi asked us (via receiver thread) to scan at the current
+            # If the RPi asked (via receiver thread) to scan at the current
             # stationary pose, process it now and send back summarized results.
             with scan_request_lock:
                 pending_scan = scan_request
@@ -328,21 +331,23 @@ def main():
 
                 summary = run_scan_window(
                     cap, model, duration_s=duration_ms / 1000.0,
-                    class_filter=resolved_class_id,
+                    class_filter=-1,
                     exclude_ids=exclude_ids,
-                    display_scale=DISPLAY_SCALE,
+                    display_scale=config.DISPLAY_SCALE,
                     get_name=get_name,
                 )
 
                 try:
                     send_json(pi_socket, { "type": P.TYPE_YOLO_RESULTS, **summary })
                 except (BrokenPipeError, ConnectionResetError, OSError):
-                    pi_socket = connect_to_pi(PI_IP, PI_PORT)
+                    pi_socket = connect_to_pi(config.PI_IP, config.PI_PORT)
                     send_json(pi_socket, { "type": P.TYPE_YOLO_RESULTS, **summary })
                 continue  # Go back to top of loop after handling request
 
             # ----------------- Service pending centering request ----------------
-            # If the RPi asked us to center on a class, run the centering loop
+            #TODO: this should be integrated with scan cycle
+
+            # If the RPi asked to center on a class, run the centering loop
             # (which drives servos via move_cb → TYPE_MOVE messages) and then
             # report whether verification succeeded.
             with center_request_lock:
@@ -354,9 +359,8 @@ def main():
                 dur_s = float(pending_center["duration_ms"]) / 1000.0
                 eps   = int(pending_center["epsilon_px"])
                 label = f"CENTERING {get_name(target)} (id {target})"
-                if DEBUG:
-                    print(f"[Laptop] Centering on {get_name(target)} (id {target}) for {dur_s:.2f}s (debug on)")
 
+                # TODO: change to config vars
                 # Thresholds used by centering verification (quota-based).
                 thresholds = {
                     "conf": 0.60,              # per-frame minimum confidence
@@ -372,33 +376,32 @@ def main():
                 # sends TYPE_MOVE messages to the RPi while tracking.
                 success, diag = center_on_class(
                     cap, model, dur_s, target, eps, center_x, center_y,
-                    thresholds, move_cb, DISPLAY_SCALE, label, DEBUG
+                    thresholds, move_cb, config.DISPLAY_SCALE, label, 0
                 )
 
-                # Report completion to the RPi; include diagnostics only if DEBUG.
+                # Report completion to the RPi
                 payload = {"type": P.TYPE_CENTER_DONE, "target_cls": int(target), "success": bool(success)}
-                if DEBUG and diag is not None:
-                    payload["diag"] = diag
                 try:
                     send_json(pi_socket, payload)
                 except (BrokenPipeError, ConnectionResetError, OSError):
-                    pi_socket = connect_to_pi(PI_IP, PI_PORT)
+                    pi_socket = connect_to_pi(config.PI_IP, config.PI_PORT)
                     send_json(pi_socket, payload)
                 continue  # Done servicing centering; return to event loop
 
             # ----------------------- Idle: live annotated view -------------------
             # No pending requests → keep the UI responsive by running YOLO on
-            # live frames (optionally filtered to a single class).
+            # live frames.
             ok, frame = cap.read()
             if not ok:
                 print("Failed to grab frame")
                 break
 
-            results = infer_all(model, frame, None if resolved_class_id == -1 else [resolved_class_id])
+            results = model(frame)
             for result in results:
                 annotated = result.plot()
                 h, w = annotated.shape[:2]
-                resized = cv2.resize(annotated, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
+                resized = cv2.resize(annotated, (int(w * config.DISPLAY_SCALE), int(h * config.DISPLAY_SCALE)))
+                # TODO: remove recall mode
                 # Show a small hint when recall mode is active
                 if recall_mode and not search_mode:
                     draw_wrapped_text(resized, "[RECALL MODE] m=exit, a=prev, d=next", 10, 24, int(resized.shape[1]*0.9))
