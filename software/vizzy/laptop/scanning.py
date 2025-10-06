@@ -1,47 +1,16 @@
-# -----------------------------------------------------------------------------
-# vizzy/laptop/scanning.py
-#
-# Purpose
-#   Implements a short "scan window" using YOLO object detection to identify
-#   objects in the camera feed while the robotic arm is held still at a
-#   specific position in its search path.
-#
-# Why this exists
-#   - The RPi instructs the laptop to scan at each pose in the search grid.
-#   - The laptop runs YOLO on camera frames for a fixed period (`duration_s`)
-#     without moving the servos, so detections remain stable for averaging.
-#   - The scan collects confidence and location statistics for any objects
-#     seen at this pose, then reports the best candidates back to the RPi.
-#
-# How it fits into the project
-#   - The robotic arm systematically sweeps through a set of poses.
-#   - At each pose, this function runs for `duration_s` to detect visible
-#     objects and estimate their median positions and average confidences.
-#   - The RPi uses this summarized data to decide which object to center on.
-#
-# Key points for understanding:
-#   - The arm is stationary during each scan; no motion tracking is performed.
-#   - YOLO runs on every frame captured during the scan window.
-#   - For each object class, only the largest box per frame is considered.
-#   - Confidence scores are averaged, and box centers are median-filtered
-#     to reduce jitter from frame to frame.
-#   - Classes that appear in too few frames are ignored.
-# -----------------------------------------------------------------------------
-
 from __future__ import annotations
 import time, statistics, cv2
-from typing import Dict, List, Tuple, Iterable, Optional, Set
+from typing import Dict, List, Iterable, Optional, Set
 from .hud import draw_wrapped_text
-from .yolo_runner import infer_all
 from .centering import instance_center
+from ..shared import config
 
+# TODO: duration should be static; remove class filter; have laptop track excluded ids; hard code display scale and min frames
+# TODO: lots of config variables to make here
 def run_scan_window(
     cap,
     model,
-    duration_s: float,
-    class_filter: int,
     exclude_ids: Optional[Iterable[int]],
-    display_scale: float,
     get_name,
     min_frames_for_class: int = 4
 ) -> dict:
@@ -52,10 +21,7 @@ def run_scan_window(
     Args:
         cap                : OpenCV VideoCapture object for reading frames.
         model              : YOLO model instance.
-        duration_s         : How long to scan (seconds) while stationary.
-        class_filter       : Restrict detection to one class (-1 for all).
         exclude_ids        : Iterable of class IDs to ignore.
-        display_scale      : Scaling factor for display window size.
         get_name           : Function mapping class ID → human-readable name.
         min_frames_for_class: Minimum appearances before keeping a class.
 
@@ -75,10 +41,10 @@ def run_scan_window(
     per_class_cx:   Dict[int, List[int]]   = {}
     per_class_cy:   Dict[int, List[int]]   = {}
 
-    hud_text = f"SCANNING ~{int(duration_s*1000)} ms"
+    hud_text = f"SCANNING ~{int(config.SCAN_DURATION_MS)} ms"
 
     # Loop until scan window duration is reached
-    while (time.time() - t0) < duration_s:
+    while (time.time() - t0) < (config.SCAN_DURATION_MS / 1000):
         ok, frame = cap.read()
         if not ok:
             break  # End scan if camera feed fails
@@ -86,13 +52,13 @@ def run_scan_window(
         # Image dimensions for mask resizing / center calc
         h, w = frame.shape[:2]
 
-        # Run YOLO inference (filter to single class if requested)
-        results = infer_all(model, frame, None if class_filter == -1 else [class_filter])
+        # Run YOLO inference
+        results = model(frame)
 
         for result in results:
             frames += 1
 
-            # --- Most-confident-per-class selection for this frame (uses mask centers if available) ---
+            # --- Most-confident-per-class selection for this frame (use mask centers if available) ---
             best_for_class = {}  # cls_id -> (conf, area, cx, cy)
 
             if len(result.boxes) > 0:
@@ -107,8 +73,6 @@ def run_scan_window(
                     cid      = int(result.boxes.cls[i].item())
                     conf     = float(result.boxes.conf[i].item())
 
-                    if class_filter != -1 and cid != class_filter:
-                        continue
                     if cid in exclude:
                         continue
 
@@ -131,7 +95,7 @@ def run_scan_window(
                 per_class_cx.setdefault(cid, []).append(cx)
                 per_class_cy.setdefault(cid, []).append(cy)
                 
-            # Draw text overlay and display the annotated frame
+            # Draw text overlay and display the annotated frame (HUD)
             annotated = result.plot()
             draw_wrapped_text(
                 annotated,
@@ -141,9 +105,9 @@ def run_scan_window(
                 int(annotated.shape[1] * 0.92)
             )
             h, w = annotated.shape[:2]
-            resized = cv2.resize(annotated, (int(w * display_scale), int(h * display_scale)))
+            resized = cv2.resize(annotated, (int(w * config.DISPLAY_SCALE), int(h * config.DISPLAY_SCALE))) # TODO hardcode display scale config var
             cv2.imshow("YOLO Detection", resized)
-            cv2.waitKey(1)  # Keep OpenCV's window responsive
+            cv2.waitKey(1)  # Keep OpenCV's window responsive TODO: remove this because we no longer have keyboard input?
 
     # Build output list of detected objects
     objects = []
@@ -165,4 +129,6 @@ def run_scan_window(
     # Sort by confidence (highest first)
     objects.sort(key=lambda r: r["avg_conf"], reverse=True)
 
+    # TODO: this should not return; laptop should decide here which object it should center on, execute 
+    # centering, then repeat scanning at this search path position until no new objects are identified
     return {"frames": int(frames), "objects": objects}

@@ -1,129 +1,141 @@
 # vizzy/rpi/dispatch.py
 # -----------------------------------------------------------------------------
-# Purpose
-#   This module defines the **central message dispatcher** for the Raspberry Pi
-#   side of the Vizzy robotic arm project.
-#
-# Why this exists
-#   - All messages from the laptop (received over the TCP socket) come through
-#     here for interpretation and action.
-#   - This function decides what each message means and which part of the Pi's
-#     code should handle it.
-#
-# How it fits into the project
-#   - The Pi's server receives raw JSON messages from the laptop (via jsonl.py).
-#   - These messages are passed here to `process_messages`, which:
-#       * Updates global state flags (search/centering)
-#       * Moves servos directly when appropriate
-#       * Handles centering completion notifications
-#       * Saves YOLO scan results
-#       * Processes "go to position" commands
-#   - This is the main **control switchboard** for the Pi.
-#
-# Key points for understanding:
-#   - Messages can either be "type" messages (P.TYPE_...) or "command" messages
-#     (P.CMD_...).
-#   - Some commands are ignored when the Pi is busy searching or centering.
-#   - The function returns a tuple of information so the caller can act on it:
-#       (stop_requested, center_done_cls, center_success, center_diag, yolo_results)
+# Central message dispatcher for Raspberry Pi side (new laptop-centric protocol)
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
-from typing import Tuple, Optional
+
+from typing import Iterable, Optional
+import threading
+
 from ..shared import protocol as P
+from ..shared import config as C
+from ..shared.jsonl import send_json
+
 from . import state
 from .servo import move_servos, goto_pwms
 
-def process_messages(pi, msgs, debug: bool
-                     ) -> Tuple[bool, Optional[int], Optional[bool], Optional[dict], Optional[dict]]:
-    """
-    Process a list of incoming messages from the laptop.
 
-    Args:
-        pi: pigpio instance controlling the servos.
-        msgs: List of decoded JSON messages from the socket.
-        debug: If True, print extra details about actions taken.
+# Internal latches used by the search FSM to know when a pose is done.
+_last_pose_done_id: Optional[int] = None
+_last_pose_done_status: Optional[str] = None
+_pose_done_lock = threading.Lock()
+
+
+def _set_pose_done(pid: int, status: str) -> None:
+    global _last_pose_done_id, _last_pose_done_status
+    with _pose_done_lock:
+        _last_pose_done_id = int(pid)
+        _last_pose_done_status = str(status).upper()
+
+
+def take_pose_done() -> tuple[Optional[int], Optional[str]]:
+    """Called by search loop to fetch (and clear) the most recent POSE_DONE."""
+    global _last_pose_done_id, _last_pose_done_status
+    with _pose_done_lock:
+        pid, st = _last_pose_done_id, _last_pose_done_status
+        _last_pose_done_id = None
+        _last_pose_done_status = None
+        return pid, st
+
+
+def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False) -> bool:
+    """
+    Dispatch a batch of messages from the laptop.
 
     Returns:
-        A tuple of:
-          stop (bool)               - True if a stop command was received.
-          center_done_cls (int|None)- Class ID of object just centered on, if any.
-          center_success (bool|None)- True if centering was verified as successful.
-          center_diag (dict|None)   - Optional diagnostic data from centering.
-          yolo_results (dict|None)  - Latest YOLO scan results, if any.
+        stop (bool): True if the server should stop and exit.
     """
-    stop = False  # flag: should the search loop stop?
-    center_done_cls: Optional[int] = None
-    center_success: Optional[bool] = None
-    center_diag: Optional[dict] = None
-    yolo_results: Optional[dict] = None
+    stop = False
 
-    # Loop through each message in the batch
-    for msg in msgs:
-        mtype = msg.get("type")  # event type (e.g., TYPE_MOVE)
-        mcmd  = msg.get("cmd")   # request command (e.g., CMD_GOTO_PWMS)
+    for msg in messages:
+        mtype = msg.get("type")
+        mcmd  = msg.get("cmd")
 
-        # -------------------------------------------------
-        # TYPE_MOVE: joystick-like incremental servo control
-        # -------------------------------------------------
-        if mtype == P.TYPE_MOVE:
-            # Only allow servo motion if we're centering OR not searching
-            if state.centering_active.is_set() or not state.search_active.is_set():
-                move_servos(pi,
-                            msg.get("horizontal", 0.0),  # horizontal move amount (-1..1)
-                            msg.get("vertical", 0.0))    # vertical move amount (-1..1)
+        # ---------------------- TYPE-* messages ----------------------
+        if mtype:
+            if mtype == P.TYPE_SCAN_MOVE:
+                # Only accept during per-pose centering window
+                if state.centering_active.is_set():
+                    dx = float(msg.get("horizontal", 0.0))
+                    dy = float(msg.get("vertical", 0.0))
+                    # Clamp to [-1, 1]
+                    dx = -1.0 if dx < -1.0 else (1.0 if dx > 1.0 else dx)
+                    dy = -1.0 if dy < -1.0 else (1.0 if dy > 1.0 else dy)
+                    move_servos(pi, dx, dy, scale_us=C.MOVE_SCALE_US)
+                    if debug:
+                        print(f"[RPi] SCAN_MOVE dx={dx:.3f} dy={dy:.3f}")
+                        print(f"btm={state.current_horizontal} top={state.current_vertical}")
+                else:
+                    if debug:
+                        print("[RPi] SCAN_MOVE ignored (not in centering window)")
 
-        # -------------------------------------------------
-        # TYPE_SEARCH: start or stop the Pi's search mode
-        # -------------------------------------------------
-        elif mtype == P.TYPE_SEARCH:
-            if msg.get("active", False):
-                if not state.search_active.is_set():
-                    print("[RPi] Search ON")
-                state.search_active.set()
-            else:
-                if state.search_active.is_set():
-                    print("[RPi] Search OFF")
-                state.search_active.clear()
+            elif mtype == P.TYPE_SEARCH:
+                active = bool(msg.get("active", False))
+                if active:
+                    state.search_active.set()
+                    if debug:
+                        print("[RPi] SEARCH: ON")
+                else:
+                    # Immediate stop: clear search + centering; sweep worker will exit
+                    state.search_active.clear()
+                    state.centering_active.clear()
+                    if debug:
+                        print("[RPi] SEARCH: OFF (interrupt)")
 
-        # -------------------------------------------------
-        # TYPE_STOP: immediate halt of all search/centering
-        # -------------------------------------------------
-        elif mtype == P.TYPE_STOP:
-            state.search_active.clear()
-            stop = True
-
-        # -------------------------------------------------
-        # TYPE_CENTER_DONE: laptop reports centering result
-        # -------------------------------------------------
-        elif mtype == P.TYPE_CENTER_DONE:
-            try:
-                center_done_cls = int(msg.get("target_cls", -1))
-            except Exception:
-                center_done_cls = -1  # invalid class ID
-            center_success = bool(msg.get("success", False))
-            center_diag = msg.get("diag", None)  # diagnostic info (thresholds, observed stats)
-
-        # -------------------------------------------------
-        # TYPE_YOLO_RESULTS: laptop sends scan detections
-        # -------------------------------------------------
-        elif mtype == P.TYPE_YOLO_RESULTS:
-            yolo_results = msg
-
-        # -------------------------------------------------
-        # CMD_GOTO_PWMS: move servos to absolute positions
-        # -------------------------------------------------
-        elif mcmd == P.CMD_GOTO_PWMS:
-            # Ignore if busy with search or centering
-            if state.search_active.is_set() or state.centering_active.is_set():
+            elif mtype == P.TYPE_STOP:
                 if debug:
-                    print("[RPi] Ignoring GOTO_PWMS during search/centering")
-                continue
-            tb = int(msg.get("pwm_btm", 1500))  # bottom servo PWM
-            tt = int(msg.get("pwm_top", 1500))  # top servo PWM
-            slew = int(msg.get("slew_ms", 600)) # move duration
-            if debug:
-                print(f"[RPi] GOTO_PWMS btm={tb} top={tt} slew_ms={slew}")
-            goto_pwms(pi, tb, tt, duration_ms=slew, steps=24)
+                    print("[RPi] STOP received")
+                stop = True
 
-    return stop, center_done_cls, center_success, center_diag, yolo_results
+            elif mtype == P.TYPE_POSE_DONE:
+                pid = int(msg.get("pose_id", -1))
+                status = str(msg.get("status", "SKIP")).upper()
+                _set_pose_done(pid, status)
+                state.centering_active.clear()  # leave centering window; search loop advances
+                if debug:
+                    print(f"[RPi] POSE_DONE pose_id={pid} status={status}")
+
+            # TYPE_PWMS is only sent by RPi; ignore if received
+            else:
+                if debug:
+                    print(f"[RPi] Ignored message type: {mtype}")
+
+        # ---------------------- CMD-* messages -----------------------
+        elif mcmd:
+            if mcmd == P.CMD_GOTO_PWMS:
+                # Ignore if busy with search or centering
+                if state.search_active.is_set() or state.centering_active.is_set():
+                    if debug:
+                        print("[RPi] Ignoring GOTO_PWMS during search/centering")
+                    continue
+                tb = int(msg.get("pwm_btm", C.SERVO_CENTER))
+                tt = int(msg.get("pwm_top", C.SERVO_CENTER))
+                slew = int(msg.get("slew_ms", 600))
+                if debug:
+                    print(f"[RPi] GOTO_PWMS btm={tb} top={tt} slew_ms={slew}")
+                goto_pwms(pi, tb, tt, duration_ms=slew, steps=24)
+
+            elif mcmd == P.CMD_GET_PWMS:
+                payload = {
+                    "type": P.TYPE_PWMS,
+                    "pwm_btm": int(state.current_horizontal),
+                    "pwm_top": int(state.current_vertical),
+                }
+                try:
+                    send_json(conn, payload)
+                    if debug:
+                        print(f"[RPi] -> PWMS {payload}")
+                except Exception as e:
+                    if debug:
+                        print(f"[RPi] Failed to send PWMS: {e}")
+
+            else:
+                if debug:
+                    print(f"[RPi] Ignored command: {mcmd}")
+
+        else:
+            if debug:
+                print(f"[RPi] Unknown message payload (no type/cmd): {msg}")
+
+    return stop

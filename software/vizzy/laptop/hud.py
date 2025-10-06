@@ -1,32 +1,7 @@
-# -----------------------------------------------------------------------------
-# vizzy/laptop/hud.py
-#
-# Purpose:
-#   Provides utilities for drawing a heads-up display (HUD) overlay on
-#   camera frames. The primary feature is the ability to render word-wrapped
-#   text within a specified width constraint.
-#
-# Why this exists:
-#   - During scanning or centering, the laptop displays YOLO detection
-#     results and status messages on top of the camera feed.
-#   - Text may be longer than the available space, so this module handles
-#     automatic word-wrapping for better readability.
-#
-# How it fits into the bigger picture:
-#   - Called from `scanning.py` and potentially other UI/display code to
-#     overlay messages like "SCANNING" or centering diagnostics.
-#   - Helps present real-time feedback to the user without truncating text.
-#
-# Notes for new developers:
-#   - Uses OpenCV (`cv2.putText`) for rendering.
-#   - Coordinates are in pixel space, with `(x, y)` as the bottom-left
-#     corner of the text baseline for each line.
-#   - Returns the new `y` position after drawing, so callers can stack
-#     multiple text blocks vertically.
-# -----------------------------------------------------------------------------
-
 from __future__ import annotations
 import cv2
+
+# TODO: move constants to config vars
 
 # Default HUD text style constants
 HUD_FONT   = cv2.FONT_HERSHEY_SIMPLEX  # Font face
