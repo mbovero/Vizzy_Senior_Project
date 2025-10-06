@@ -54,8 +54,8 @@ SERVO_BTM = 22
 SERVO_TOP = 17
 
 # Pulse width bounds (µs)
-SERVO_MIN    = 500
-SERVO_MAX    = 2500
+SERVO_MIN    = 1000
+SERVO_MAX    = 2000
 SERVO_CENTER = 1500
 
 # Normalized scan moves (Laptop -> RPi) scaling to pulse width (µs)
@@ -64,10 +64,10 @@ MOVE_SCALE_US = 300
 
 # Search grid definition (computed on RPi)
 # Range is reduced by MIN/MAX offsets to avoid hard mechanical limits.
-SEARCH_MIN_OFFSET = 100  # µs trimmed from the low end
-SEARCH_MAX_OFFSET = 100  # µs trimmed from the high end
-SEARCH_H_STEP     = 150  # µs horizontal step between poses
-SEARCH_V_STEP     = 150  # µs vertical step between rows
+SEARCH_MIN_OFFSET = 200  # µs trimmed from the low end
+SEARCH_MAX_OFFSET = 200  # µs trimmed from the high end
+SEARCH_H_STEP     = 250  # µs horizontal step between poses
+SEARCH_V_STEP     = 100  # µs vertical step between rows
 
 # Time to allow the arm to settle mechanically at each pose before scanning
 POSE_SETTLE_S = 0.30
