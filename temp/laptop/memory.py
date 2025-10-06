@@ -14,7 +14,6 @@ class ObjectMemory:
       - pwm_top (int)       : Servo pulse width for top servo
       - last_seen_ts (float): UNIX timestamp when last centered
       - updated_this_session (int): 1 if updated in this session, else 0
-      - avg_conf (float, optional): Average detection confidence
     """
 
     def __init__(self, path: str):
@@ -85,7 +84,6 @@ class ObjectMemory:
         cls_name: str,
         pwm_btm: int,
         pwm_top: int,
-        avg_conf: float | None = None
     ) -> None:
         """
         Create or update a memory entry for a given class_id.
@@ -96,7 +94,6 @@ class ObjectMemory:
             cls_name : Human-readable name
             pwm_btm  : Bottom servo PWM position
             pwm_top  : Top servo PWM position
-            avg_conf : Optional average detection confidence
         """
         k = str(int(cls_id))
         now = time.time()
@@ -109,8 +106,6 @@ class ObjectMemory:
             "last_seen_ts": now,
             "updated_this_session": 1
         })
-        if avg_conf is not None:
-            entry["avg_conf"] = float(avg_conf)
         self.data[k] = entry
         self.save()
 
@@ -122,26 +117,3 @@ class ObjectMemory:
             self.data[k]
             for k in sorted(self.data.keys(), key=lambda x: int(x))
         ]
-
-    def print_table(self) -> None:
-        """
-        Print a formatted table of all stored objects to stdout.
-        Displays class name, IDs, PWM positions, average confidence,
-        and the last seen timestamp in human-readable form.
-        """
-        entries = self.entries_sorted()
-        if not entries:
-            print("[Memory] (empty)")
-            return
-
-        print("\n[Memory] Stored objects:")
-        print("  idx  name            id   pwm_btm  pwm_top   avg_conf   last_seen")
-        for idx, e in enumerate(entries):
-            ts = e.get("last_seen_ts")
-            import time as _t
-            ts_s = _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(ts)) if ts else "-"
-            avg_conf = e.get("avg_conf")
-            avg_conf_s = f"{avg_conf:.2f}" if isinstance(avg_conf, (int, float)) else "-"
-            print(f"  {idx:>3}  {e.get('cls_name','?'):<14} {e.get('cls_id'):>3}   "
-                  f"{e.get('pwm_btm'):>7}  {e.get('pwm_top'):>7}   {avg_conf_s:>8}   {ts_s}")
-        print()

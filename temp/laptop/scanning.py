@@ -3,13 +3,13 @@ import time, statistics, cv2
 from typing import Dict, List, Iterable, Optional, Set
 from .hud import draw_wrapped_text
 from .centering import instance_center
+from ..shared import config
 
 # TODO: duration should be static; remove class filter; have laptop track excluded ids; hard code display scale and min frames
 # TODO: lots of config variables to make here
 def run_scan_window(
     cap,
     model,
-    duration_s: float,
     class_filter: int,
     exclude_ids: Optional[Iterable[int]],
     display_scale: float,
@@ -23,7 +23,6 @@ def run_scan_window(
     Args:
         cap                : OpenCV VideoCapture object for reading frames.
         model              : YOLO model instance.
-        duration_s         : How long to scan (seconds) while stationary.
         class_filter       : Restrict detection to one class (-1 for all).
         exclude_ids        : Iterable of class IDs to ignore.
         display_scale      : Scaling factor for display window size.
@@ -46,10 +45,10 @@ def run_scan_window(
     per_class_cx:   Dict[int, List[int]]   = {}
     per_class_cy:   Dict[int, List[int]]   = {}
 
-    hud_text = f"SCANNING ~{int(duration_s*1000)} ms"
+    hud_text = f"SCANNING ~{int(config.SCAN_DURATION_MS)} ms"
 
     # Loop until scan window duration is reached
-    while (time.time() - t0) < duration_s:
+    while (time.time() - t0) < (config.SCAN_DURATION_MS / 1000):
         ok, frame = cap.read()
         if not ok:
             break  # End scan if camera feed fails

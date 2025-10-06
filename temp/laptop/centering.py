@@ -2,8 +2,9 @@ from __future__ import annotations
 import time, cv2
 from typing import Callable, Optional, Dict, Any, Tuple
 from .hud import draw_wrapped_text
-from .yolo_runner import infer_all, clear_class_filter
+from .yolo_runner import clear_class_filter
 import numpy as np
+from ..shared import config
 
 def _contour_center(mask_u8: np.ndarray) -> Optional[Tuple[int, int]]:
     """Return (cx, cy) using contour moments of the largest blob in a binary mask."""
@@ -41,65 +42,40 @@ def instance_center(box_xyxy, mask_tensor, frame_w: int, frame_h: int) -> Tuple[
 # TODO: simplify? hard code various parameters through config variables, REMOVE DEBUG/DIAGNOSTICS
 def center_on_class(cap,
                     model,
-                    duration_s: float,
                     target_cls: int,
                     epsilon_px: int,
                     center_x: int, center_y: int,
-                    thresholds: Dict[str, float],
                     send_move: Callable[[float, float], None],
                     display_scale: float,
-                    label: str,
-                    debug: bool) -> tuple[bool, Optional[Dict[str, Any]]]:
+                    label: str) -> tuple[bool, Optional[Dict[str, Any]]]:
     """
-    Run closed-loop centering on a specific class for up to `duration_s` seconds.
+    Run closed-loop centering on a specific class for up to CENTER_DURATION_MS seconds.
 
     Args:
         cap: OpenCV VideoCapture providing frames.
         model: YOLO model instance (from yolo_runner.py).
-        duration_s: Max time to attempt centering.
         target_cls: Class ID to track.
         epsilon_px: Max allowed pixel error (both x and y) for stability.
         center_x, center_y: Pixel coordinates of frame center.
-        thresholds: Dict with keys:
-            - "conf" : per-frame confidence minimum (float)
-            - "move_norm_eps" : normalized motion epsilon (float)
-            - "required_frames" : quota of frames meeting all thresholds (int)
         send_move: Callback taking normalized (dx, dy) to request servo movement.
         display_scale: Factor to scale display window for annotation.
         label: Text prefix for HUD overlay.
-        debug: If True, collect diagnostics to return.
-
-    Returns:
-        (success, diag) where:
-            success: True if quota reached within duration_s, else False.
-            diag: Diagnostic dict if debug=True, else None.
     """
-    # Extract thresholds
-    CONF = float(thresholds["conf"])
-    MOVE_EPS = float(thresholds["move_norm_eps"])
-    REQUIRED = int(thresholds["required_frames"])
 
     # Initialize timing and counters
     t0 = time.time()
     good_frames = 0
     success = False
 
-    # Diagnostic variables (only meaningful if debug=True)
-    total_frames = 0
-    max_conf_seen = 0.0
-    min_err_px_seen = float('inf')
-    min_move_norm_seen = float('inf')
-
     # Main loop — runs until time limit is reached
-    while (time.time() - t0) < duration_s:
+    while (time.time() - t0) < (config.CENTER_DURATION_MS/1000):
         ok, frame = cap.read()
         if not ok:
             break
 
         # Run YOLO inference restricted to the target class
-        results = infer_all(model, frame, [int(target_cls)])
+        results = model(frame, [int(target_cls)])
         for result in results:
-            total_frames += 1
             annotated = result.plot()
 
             # Select the highest-confidence instance of the target class in view
@@ -144,9 +120,9 @@ def center_on_class(cap,
                 move_norm = max(abs(ndx), abs(ndy))
 
                 # Threshold checks
-                conf_ok = (best_conf >= CONF)
+                conf_ok = (best_conf >= config.CENTER_CONF)
                 err_ok  = (abs(dx) <= epsilon_px and abs(dy) <= epsilon_px)
-                move_ok = (abs(ndx) < MOVE_EPS and abs(ndy) < MOVE_EPS)
+                move_ok = (abs(ndx) < config.CENTER_MOVE_NORM and abs(ndy) < config.CENTER_MOVE_NORM)
 
                 # If not stable, command movement toward center
                 if not (err_ok and move_ok):
@@ -155,7 +131,7 @@ def center_on_class(cap,
                 # Count good frames toward quota
                 if conf_ok and err_ok and move_ok:
                     good_frames += 1
-                    if good_frames >= REQUIRED:
+                    if good_frames >= config.CENTER_FRAMES:
                         success = True
 
                 # Draw object center, camera center, and connecting line ---
@@ -168,7 +144,7 @@ def center_on_class(cap,
 
                 # Build HUD overlay text with live metrics and centers
                 hud = (
-                    f"{label}  quota {good_frames}/{REQUIRED}  "
+                    f"{label}  quota {good_frames}/{config.CENTER_FRAMES}  "
                     f"conf {best_conf:.2f}  err {err_px:.0f}px  move {move_norm:.3f}  "
                     f"obj ({bx},{by})  cam ({center_x},{center_y})"
                 )
@@ -176,14 +152,7 @@ def center_on_class(cap,
             else:
                 # No detection this frame — still draw camera center as a reference
                 cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
-                hud = f"{label}  quota {good_frames}/{REQUIRED}"
-
-            # Track diagnostic extremes if debug enabled
-            if debug:
-                max_conf_seen = max(max_conf_seen, best_conf if best is not None else 0.0)
-                if best is not None:
-                    min_err_px_seen = min(min_err_px_seen, err_px)
-                    min_move_norm_seen = min(min_move_norm_seen, move_norm)
+                hud = f"{label}  quota {good_frames}/{config.CENTER_FRAMES}"
 
             # Draw HUD and show frame
             max_w = int(annotated.shape[1] * 0.92)
@@ -196,23 +165,4 @@ def center_on_class(cap,
     # Clear any class filter set during this centering attempt
     clear_class_filter(model)
 
-    # Prepare diagnostic output if requested
-    diag = None
-    if debug:
-        diag = {
-            "thresholds": {
-                "conf_per_frame": CONF,
-                "pixel_epsilon": int(epsilon_px),
-                "move_norm_eps": MOVE_EPS,
-                "required_good_frames": int(REQUIRED),
-            },
-            "observed": {
-                "total_frames": int(total_frames),
-                "good_frames": int(good_frames),
-                "max_conf_seen": round(max_conf_seen, 4),
-                "min_err_px_seen": None if min_err_px_seen == float('inf') else int(min_err_px_seen),
-                "min_move_norm_seen": None if min_move_norm_seen == float('inf') else round(min_move_norm_seen, 4),
-            }
-        }
-
-    return success, diag
+    return success

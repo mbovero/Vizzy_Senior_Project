@@ -1,4 +1,4 @@
-from . import config
+from ..shared import config
 import socket, time, cv2, threading
 from ultralytics import YOLO
 import torch
@@ -11,7 +11,6 @@ from .centering import center_on_class
 from .hud import draw_wrapped_text
 
 
-# TODO move this?
 def connect_to_pi(ip: str, port: int):
     """
     Persistent connect helper:
@@ -57,7 +56,7 @@ def main():
 
 
     # ------------------------------- Camera setup ----------------------------------
-    # Open video device using V4L2 backend on Linux
+    # Open camera using V4L2 backend on Linux
     cap = cv2.VideoCapture(config.CAM_INDEX, cv2.CAP_V4L2)
 
     # Configure image type, resolution, and FPS
@@ -75,9 +74,9 @@ def main():
         print("Error: Could not read frame from camera")
         return
     
-    # DEBUG -------------------------------
+    # Print frame dimensions to console
     frame_h, frame_w = frame0.shape[:2]
-    print(f"video width: {frame_w}, video height: {frame_h}")
+    print(f"image width: {frame_w}, image height: {frame_h}")
     # -------------------------------
 
     # Store image frame center for object centering later on
@@ -140,7 +139,6 @@ def main():
                     if msg.get("cmd") == P.CMD_YOLO_SCAN:
                         with scan_request_lock:
                             scan_request = {
-                                "duration_ms": int(msg.get("duration_ms", 900)),
                                 "exclude_cls": msg.get("exclude_cls", []),
                             }
 
@@ -151,7 +149,6 @@ def main():
                         with center_request_lock:
                             center_request = {
                                 "target_cls": int(msg.get("target_cls", -1)),
-                                "duration_ms": int(msg.get("duration_ms", 1200)),
                                 "epsilon_px": int(msg.get("epsilon_px", 25)),
                                 "target_name": msg.get("target_name", ""),
                             }
@@ -164,18 +161,11 @@ def main():
                         cls_name= str(msg.get("cls_name", ""))
                         pwm_btm = int(msg.get("pwm_btm"))
                         pwm_top = int(msg.get("pwm_top"))
-                        diag    = msg.get("diag")   #TODO remove
 
                         # Try to capture a representative confidence to save with the entry
-                        # TODO don't really need these diagnostics
-                        avg_conf = None
-                        if isinstance(diag, dict):
-                            obs = diag.get("observed") or {}
-                            if "max_conf_seen" in obs:
-                                avg_conf = float(obs["max_conf_seen"])
-                        #TODO keep this, but remove confidence; eventually change pwm to pos + orientation
+                        #TODO keep this, but eventually change pwm to pos + orientation
                         object_memory.update_entry(
-                            cls_id, cls_name or str(cls_id), pwm_btm, pwm_top, avg_conf=avg_conf
+                            cls_id, cls_name or str(cls_id), pwm_btm, pwm_top
                         )
                         print(f"[Laptop] Memory updated: {cls_name or cls_id} -> btm={pwm_btm}, top={pwm_top}")
 
@@ -283,9 +273,6 @@ def main():
                         print("[Recall] No objects in memory; turning OFF.")
                         recall_mode = False
                     else:
-                        # Print a table of stored objects for context
-                        object_memory.print_table()
-
                         # Select first entry and ask RPi to move there
                         recall_index = 0
                         e = entries[recall_index]
@@ -326,11 +313,10 @@ def main():
                 scan_request = None
 
             if pending_scan is not None:
-                duration_ms = int(pending_scan.get("duration_ms", 900)) # TODO: I don't think this needs to be sent from the RPi, just have it be a config var
                 exclude_ids = pending_scan.get("exclude_cls", [])       # TODO: this should not be sent from RPI, keep this on laptop side
 
                 summary = run_scan_window(
-                    cap, model, duration_s=duration_ms / 1000.0,
+                    cap, model,
                     class_filter=-1,
                     exclude_ids=exclude_ids,
                     display_scale=config.DISPLAY_SCALE,
@@ -356,27 +342,19 @@ def main():
 
             if pending_center is not None:
                 target = int(pending_center["target_cls"])
-                dur_s = float(pending_center["duration_ms"]) / 1000.0
                 eps   = int(pending_center["epsilon_px"])
                 label = f"CENTERING {get_name(target)} (id {target})"
 
                 # TODO: change to config vars
-                # Thresholds used by centering verification (quota-based).
-                thresholds = {
-                    "conf": 0.60,              # per-frame minimum confidence
-                    "move_norm_eps": 0.035,    # normalized motion stability
-                    "required_frames": 12      # number of “good” frames (not necessarily consecutive)
-                }
-
                 # Callback that the centering loop uses to request relative servo moves.
                 def move_cb(ndx, ndy):
                     send_servo_command(ndx, ndy)
 
                 # Run the centering attempt; this keeps the UI responsive and
                 # sends TYPE_MOVE messages to the RPi while tracking.
-                success, diag = center_on_class(
-                    cap, model, dur_s, target, eps, center_x, center_y,
-                    thresholds, move_cb, config.DISPLAY_SCALE, label, 0
+                success = center_on_class(
+                    cap, model, target, eps, center_x, center_y,
+                    move_cb, config.DISPLAY_SCALE, label
                 )
 
                 # Report completion to the RPi
