@@ -84,9 +84,8 @@ def serve_forever(debug: bool = False) -> None:
 
                     if msgs:
                         # Route messages
-                        stop, pose_done_id, pose_done_status, _, _ = dispatch.process_messages(
-                            pi, conn, msgs, debug=debug
-                        )
+                        stop = dispatch.process_messages(pi, conn, msgs, debug=debug)
+
                         if stop:
                             print("[RPi] STOP requested; closing connection.")
                             try:
