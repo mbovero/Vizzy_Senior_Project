@@ -139,7 +139,7 @@ def main():
 
     # ----------------------------- Receiver thread -------------------------------------
     def receiver_loop():
-        nonlocal pi_socket, buf, pwms_payload
+        nonlocal pi_socket, buf, pwms_payload, search_mode
         while True:
             try:
                 msgs, buf, closed = recv_lines(pi_socket, buf)
@@ -169,7 +169,10 @@ def main():
 
                     # RPi → Laptop: sweep completed by default stop
                     elif mtype == P.TYPE_SEARCH and (msg.get("active") is False):
+                        # RPi finished the sweep (default stop)
+                        search_mode = False           # <-- add this line
                         sweep_completed_flag.set()
+
 
                     # RPi → Laptop: current PWMs response
                     elif mtype == P.TYPE_PWMS:
@@ -278,6 +281,7 @@ def main():
                     object_memory.reset_session_flags()
                 else:
                     print("[Search] OFF (interrupt)")
+                    object_memory.prune_not_updated()
                 send_search(search_mode)
 
             # Toggle recall mode (m)
@@ -342,7 +346,7 @@ def main():
                 h, w = annotated.shape[:2]
                 resized = cv2.resize(annotated, (int(w * C.DISPLAY_SCALE), int(h * C.DISPLAY_SCALE)))
                 if recall_mode and not search_mode:
-                    draw_wrapped_text(resized, "RECALL MODE", (12, 12))
+                    draw_wrapped_text(resized, "RECALL MODE", 12, 12, int(resized.shape[1] * 0.6))
                 cv2.imshow("YOLO Detection", resized)
 
     finally:
