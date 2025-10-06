@@ -50,8 +50,8 @@ LISTEN_PORT = 65432
 # -----------------------------
 # Servo GPIO pins (BCM numbering for pigpio)
 # Adjust to match your wiring.
-SERVO_BTM = 18
-SERVO_TOP = 19
+SERVO_BTM = 22
+SERVO_TOP = 17
 
 # Pulse width bounds (µs)
 SERVO_MIN    = 500
