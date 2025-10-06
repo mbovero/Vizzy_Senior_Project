@@ -19,7 +19,7 @@ from ..shared import config as C
 from ..shared.jsonl import recv_lines, send_json
 from . import state
 from . import dispatch
-from . import search
+from .search import run_search_sweep
 
 
 def _make_server_socket() -> socket.socket:
@@ -32,9 +32,8 @@ def _make_server_socket() -> socket.socket:
 
 
 def _start_sweep_thread(pi: pigpio.pi, conn: socket.socket, debug: bool = False) -> threading.Thread:
-    """Start the sweep worker in a background thread."""
     t = threading.Thread(
-        target=search.run_search_sweep,
+        target=run_search_sweep,   # <— instead of search.run_search_sweep
         args=(pi, conn),
         kwargs={"debug": debug},
         daemon=True,

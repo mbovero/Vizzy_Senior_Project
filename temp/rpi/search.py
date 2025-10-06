@@ -1,125 +1,162 @@
-# vizzy/rpi/server.py
+# vizzy/rpi/search.py
 # -----------------------------------------------------------------------------
-# Single-client JSONL TCP server for Vizzy RPi side (new protocol)
+# Laptop-centric sweep FSM:
+#   For each grid pose: move -> settle -> POSE_READY -> enable centering window
+#   Wait for laptop to send POSE_DONE (SUCCESS|SKIP|FAIL), then advance.
+#   Accept SCAN_MOVE only during the centering window.
+#   Stop immediately on SEARCH {active:false} (interrupt).
+#   On final pose completion, emit SEARCH {active:false} (completed).
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
 
-import socket
-import threading
 import time
-from typing import Optional
-
-import pigpio
+from typing import Iterable, List, Tuple
 
 from ..shared import config as C
-from ..shared.jsonl import recv_lines
+from ..shared import protocol as P
+from ..shared.jsonl import send_json
+
 from . import state
-from . import dispatch
-from . import search
+from .servo import goto_pwms
+from .dispatch import process_messages, take_pose_done
 
 
-def _make_server_socket() -> socket.socket:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind((C.LISTEN_HOST, int(C.LISTEN_PORT)))
-    s.listen(1)
-    print(f"[RPi] Listening on {C.LISTEN_HOST}:{C.LISTEN_PORT}")
-    return s
+def _build_grid() -> List[Tuple[int, int]]:
+    """
+    Build a grid of (pwm_btm, pwm_top) pose targets from shared config.
+    Uses trimmed ranges [MIN+MIN_OFFSET, MAX-MAX_OFFSET] with given steps.
+    Traversal is 'snake' across rows to minimize long reversals.
+    """
+    b_lo = C.SERVO_MIN + C.SEARCH_MIN_OFFSET
+    b_hi = C.SERVO_MAX - C.SEARCH_MAX_OFFSET
+    t_lo = C.SERVO_MIN + C.SEARCH_MIN_OFFSET
+    t_hi = C.SERVO_MAX - C.SEARCH_MAX_OFFSET
+
+    if b_lo > b_hi:
+        b_lo, b_hi = b_hi, b_lo
+    if t_lo > t_hi:
+        t_lo, t_hi = t_hi, t_lo
+
+    # Build inclusive ranges with step > 0
+    def arange_inclusive(lo: int, hi: int, step: int) -> List[int]:
+        if step <= 0:
+            step = 1
+        vals = []
+        x = lo
+        if lo <= hi:
+            while x <= hi:
+                vals.append(int(x))
+                x += step
+        else:
+            while x >= hi:
+                vals.append(int(x))
+                x -= step
+        return vals
+
+    btms = arange_inclusive(b_lo, b_hi, int(C.SEARCH_H_STEP))
+    tops = arange_inclusive(t_lo, t_hi, int(C.SEARCH_V_STEP))
+
+    grid: List[Tuple[int, int]] = []
+    reverse = False
+    for top in tops:
+        row = [(b, top) for b in (reversed(btms) if reverse else btms)]
+        grid.extend(row)
+        reverse = not reverse
+    return grid
 
 
-def _start_sweep_thread(pi: pigpio.pi, conn: socket.socket, debug: bool = False) -> threading.Thread:
-    t = threading.Thread(
-        target=search.run_search_sweep,
-        args=(pi, conn),
-        kwargs={"debug": debug},
-        daemon=True,
-    )
-    t.start()
-    return t
+def run_search_sweep(pi, conn, *, debug: bool = False) -> None:
+    """
+    Run the search sweep while state.search_active is set.
+    Per pose:
+      - goto pose
+      - wait settle
+      - send POSE_READY {pose_id}
+      - enable centering window
+      - wait for POSE_DONE or interrupt
+      - advance
+    On completion (last pose), send SEARCH {active:false} once.
+    """
+    grid = _build_grid()
+    if debug:
+        print(f"[RPi] Sweep grid size: {len(grid)} poses")
 
+    # Walk the grid until interrupted or complete
+    pose_id = 0
+    for (pwm_btm, pwm_top) in grid:
+        # If interrupted, exit immediately
+        if not state.search_active.is_set():
+            if debug:
+                print("[RPi] Sweep interrupted before pose move.")
+            return
 
-def serve_forever(debug: bool = False) -> None:
-    pi = pigpio.pi()
-    if not pi.connected:
-        raise RuntimeError("[RPi] pigpio daemon not running or not reachable.")
+        # Move to target pose smoothly
+        if debug:
+            print(f"[RPi] -> Pose {pose_id}: goto btm={pwm_btm} top={pwm_top}")
+        goto_pwms(pi, pwm_btm, pwm_top, duration_ms=500, steps=24)
 
-    server_sock = _make_server_socket()
+        # Mechanical settle
+        time.sleep(float(C.POSE_SETTLE_S))
 
-    try:
+        # Announce pose ready to laptop
+        try:
+            send_json(conn, {"type": P.TYPE_POSE_READY, "pose_id": int(pose_id)})
+            if debug:
+                print(f"[RPi] <- POSE_READY {{pose_id:{pose_id}}}")
+        except Exception as e:
+            if debug:
+                print(f"[RPi] Failed to send POSE_READY: {e}")
+            # Connection issue => abort sweep
+            return
+
+        # Enable centering window: allow SCAN_MOVE until POSE_DONE
+        state.centering_active.set()
+
+        # Wait for POSE_DONE or interrupt
+        # We service inbound messages frequently to allow SCAN_MOVE, GET_PWMS, etc.
         while True:
-            print("[RPi] Waiting for laptop client...")
-            conn, addr = server_sock.accept()
-            print(f"[RPi] Client connected from {addr[0]}:{addr[1]}")
-
-            # Reset state on new connection
-            state.search_active.clear()
-            state.centering_active.clear()
-
-            buf = b""
-            sweep_thread: Optional[threading.Thread] = None
-
-            try:
-                while True:
-                    # Read any available messages
-                    try:
-                        msgs, buf, closed = recv_lines(conn, buf)
-                    except ConnectionResetError:
-                        print("[RPi] Connection reset by peer.")
-                        closed = True
-                        msgs = []
-
-                    if closed:
-                        print("[RPi] Client disconnected.")
-                        state.search_active.clear()
-                        state.centering_active.clear()
-                        break
-
-                    if msgs:
-                        stop = dispatch.process_messages(pi, conn, msgs, debug=debug)
-                        if stop:
-                            print("[RPi] STOP requested; closing connection.")
-                            try:
-                                conn.shutdown(socket.SHUT_RDWR)
-                            except Exception:
-                                pass
-                            conn.close()
-                            return  # exit server
-
-                    # Start sweep worker if search turned ON
-                    if state.search_active.is_set():
-                        if sweep_thread is None or not sweep_thread.is_alive():
-                            if debug:
-                                print("[RPi] Starting search sweep worker...")
-                            sweep_thread = _start_sweep_thread(pi, conn, debug=debug)
-
-                    time.sleep(0.01)
-
-            except Exception as e:
-                print(f"[RPi] Error in client loop: {e}")
-                try:
-                    conn.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                state.search_active.clear()
+            # Interrupt: stop immediately
+            if not state.search_active.is_set():
+                if debug:
+                    print("[RPi] Sweep interrupted during pose.")
                 state.centering_active.clear()
-                continue
+                return
 
-            # Connection closed cleanly; loop back to accept()
-            state.search_active.clear()
-            state.centering_active.clear()
+            # Non-blocking pump of any pending messages
+            try:
+                # The server loop feeds batches of messages; here we do not read the socket
+                # directly; instead, server will call process_messages(...) and we
+                # simply check for POSE_DONE via take_pose_done().
+                pass
+            except Exception:
+                # Nothing to do here; server is responsible for reading
+                pass
 
-    finally:
-        try:
-            server_sock.close()
-        except Exception:
-            pass
-        try:
-            pi.stop()
-        except Exception:
-            pass
-        print("[RPi] Server shut down.")
+            # Check if POSE_DONE has arrived
+            pid, status = take_pose_done()
+            if pid is not None:
+                # Accept only if this is for our current pose_id; otherwise ignore/stash semantics:
+                if int(pid) == int(pose_id):
+                    if debug:
+                        print(f"[RPi] Pose {pose_id} done with status={status}")
+                    state.centering_active.clear()
+                    break
+                else:
+                    # Not for this pose; ignore and continue waiting
+                    if debug:
+                        print(f"[RPi] Ignored POSE_DONE for pid={pid} (current={pose_id})")
+
+            # Gentle tick; actual servo nudge happens inside dispatch on SCAN_MOVE
+            time.sleep(0.02)
+
+        pose_id += 1
+
+    # Completed all poses without interruption -> default stop
+    if debug:
+        print("[RPi] Sweep complete; sending SEARCH {active:false}")
+    try:
+        send_json(conn, {"type": P.TYPE_SEARCH, "active": False})
+    except Exception as e:
+        if debug:
+            print(f"[RPi] Failed to send SEARCH completion: {e}")
