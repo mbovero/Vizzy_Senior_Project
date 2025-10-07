@@ -39,7 +39,7 @@ MEM_FILE = "object_memory.json"
 # Networking
 # -----------------------------
 # Laptop connects to the Pi at this host/port.
-PI_IP   = "192.168.1.30"
+PI_IP   = "10.120.39.241"
 PI_PORT = 65432
 
 # RPi server bind (RPi will ignore PI_IP and bind to LISTEN_HOST:LISTEN_PORT)
@@ -52,6 +52,7 @@ LISTEN_PORT = 65432
 # Servo GPIO pins (BCM numbering for pigpio)
 # Adjust to match your wiring.
 SERVO_BTM = 22
+SERVO_MID = 27
 SERVO_TOP = 17
 
 # Pulse width bounds (µs)
