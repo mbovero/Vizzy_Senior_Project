@@ -22,12 +22,11 @@ def init_servos(pi) -> None:
     Initialize servo outputs at SERVO_CENTER so they are powered and not limp.
     Safe to call multiple times.
     """
-    tb = int(C.SERVO_CENTER)
-    tt = int(C.SERVO_CENTER)
-    pi.set_servo_pulsewidth(C.SERVO_BTM, tb)
-    pi.set_servo_pulsewidth(C.SERVO_TOP, tt)
-    state.current_horizontal = tb
-    state.current_vertical = tt
+    pi.set_servo_pulsewidth(C.SERVO_BTM, C.SERVO_CENTER)
+    pi.set_servo_pulsewidth(C.SERVO_MID, C.SERVO_CENTER)
+    pi.set_servo_pulsewidth(C.SERVO_TOP, C.SERVO_CENTER)
+    state.current_horizontal = C.SERVO_CENTER
+    state.current_vertical = C.SERVO_CENTER
 
 
 def _clamp(v: int, vmin: int, vmax: int) -> int:
