@@ -24,6 +24,67 @@ def _draw_scan_hud(frame, text: str, *, display_scale: float) -> Any:
     draw_wrapped_text(frame, text, 8, 8, int(w * 0.8))
     return frame
 
+# ---------------------------------------------------------------------------
+# Laptop-driven search path
+# ---------------------------------------------------------------------------
+def build_search_path() -> list[dict]:
+    """
+    Build the serpentine search path as a list of poses:
+      [{"pose_id": int, "pwm_btm": int, "pwm_top": int, "slew_ms": int}, ...]
+
+    Logic matches the RPi version:
+      - Use [SERVO_MIN+SEARCH_MIN_OFFSET, SERVO_MAX-SEARCH_MAX_OFFSET] for both axes
+      - Inclusive steps (SEARCH_H_STEP / SEARCH_V_STEP), step<=0 -> 1
+      - Serpentine traversal across rows to avoid long reversals
+    """
+    # Bounds (trimmed)
+    b_lo = int(C.SERVO_MIN + C.SEARCH_MIN_OFFSET)
+    b_hi = int(C.SERVO_MAX - C.SEARCH_MAX_OFFSET)
+    t_lo = int(C.SERVO_MIN + C.SEARCH_MIN_OFFSET)
+    t_hi = int(C.SERVO_MAX - C.SEARCH_MAX_OFFSET)
+
+    # Ensure lo <= hi on both axes
+    if b_lo > b_hi:
+        b_lo, b_hi = b_hi, b_lo
+    if t_lo > t_hi:
+        t_lo, t_hi = t_hi, t_lo
+
+    # Steps (guard against non-positive)
+    h_step = int(C.SEARCH_H_STEP) if int(getattr(C, "SEARCH_H_STEP", 0)) > 0 else 1
+    v_step = int(C.SEARCH_V_STEP) if int(getattr(C, "SEARCH_V_STEP", 0)) > 0 else 1
+
+    # Inclusive ranges
+    btms: list[int] = []
+    x = b_lo
+    while x <= b_hi:
+        btms.append(int(x))
+        x += h_step
+
+    tops: list[int] = []
+    y = t_lo
+    while y <= t_hi:
+        tops.append(int(y))
+        y += v_step
+
+    # Serpentine rows
+    grid: list[tuple[int, int]] = []
+    reverse = False
+    for top in tops:
+        row = btms[::-1] if reverse else btms
+        grid.extend((b, top) for b in row)
+        reverse = not reverse
+
+    # Attach pose_id and per-pose slew
+    slew_ms = int(C.GOTO_POSE_SLEW_MS)
+    path: list[dict] = []
+    for pid, (pwm_btm, pwm_top) in enumerate(grid):
+        path.append({
+            "pose_id": pid,
+            "pwm_btm": int(pwm_btm),
+            "pwm_top": int(pwm_top),
+            "slew_ms": slew_ms,
+        })
+    return path
 
 def _result_iter(model_result, frame_w: int, frame_h: int):
     """

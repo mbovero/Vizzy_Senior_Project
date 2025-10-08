@@ -64,6 +64,11 @@ SERVO_CENTER = 1500
 # The laptop sends SCAN_MOVE with values in [-1, 1]; the RPi multiplies by this scale.
 MOVE_SCALE_US = 40
 
+# Return-to-pose behavior (laptop -> RPi)
+GOTO_POSE_SLEW_MS = 600    # how quickly to snap back to the baseline pose after a centering attempt
+RETURN_TO_POSE_DWELL_S = 0.25   # small pause to let the arm settle before the next scan window
+
+
 # Search grid definition (computed on RPi)
 # Range is reduced by MIN/MAX offsets to avoid hard mechanical limits.
 SEARCH_MIN_OFFSET = 200  # µs trimmed from the low end

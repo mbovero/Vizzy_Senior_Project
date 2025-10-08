@@ -238,7 +238,7 @@ class StateManager:
             pass
 
         secs_left = max(0.0, self.idle_deadline - time.time())
-        status = f"IDLE \u2022 auto-search in {secs_left:0.1f}s"
+        status = f"IDLE | auto-search in {secs_left:0.1f}s"
 
         self._draw_idle_hud(annotated, status, display_scale=C.DISPLAY_SCALE)
 

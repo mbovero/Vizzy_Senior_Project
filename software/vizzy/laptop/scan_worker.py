@@ -1,20 +1,13 @@
 # vizzy/laptop/scan_worker.py
 # -----------------------------------------------------------------------------
-# ScanWorker: runs a full SEARCH cycle.
-# Per pose:
-#   - Repeat:
-#       scan window -> pick next unseen viable class -> center -> GET_PWMS -> memory update
+# ScanWorker: laptop-driven SEARCH cycle.
+# For each pose from build_search_path():
+#   - GOTO baseline -> wait for POSE_READY
+#   - repeat at SAME pose:
+#       scan window -> pick unseen viable class -> center -> GET_PWMS -> memory
+#       -> return to baseline (GOTO) -> wait for POSE_READY -> dwell
 #     until no new viable objects remain at that pose.
-#   - Then send a single POSE_DONE with status: SUCCESS (>=1 success), FAIL (>0 tries, 0 success), or SKIP (0 tries).
-# Exits when:
-#   - RPi completes the grid (SEARCH {active:false}), or
-#   - scan_abort is set (future), or
-#   - socket problems (safe exit).
-#
-# Notes:
-# - Memory flags are reset at the start of the search.
-# - Memory is pruned on completion (default stop or early exit).
-# - All GUI rendering is forwarded via frame_sink to the main thread.
+# Exits when path is exhausted or scan_abort is set.
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -27,16 +20,12 @@ import cv2
 from ultralytics import YOLO
 
 from ..shared import config as C
-from ..shared import protocol as P
-from ..shared.jsonl import send_json
 
 from .memory import ObjectMemory
-from .scanning import run_scan_window
+from .scanning import run_scan_window, build_search_path
 from .centering import center_on_class
 from .motion import Motion
 
-
-# TODO: Thread pool, thread manager to synchronize enrichment LLM returns
 
 FrameSink = Optional[Callable[[Any], None]]
 
@@ -45,14 +34,14 @@ class ScanWorker(threading.Thread):
     def __init__(
         self,
         *,
-        sock,
+        sock,  # kept for parity with callers, not directly used here
         cap: cv2.VideoCapture,
         model: YOLO,
         mail,
         events,
         motion: Motion,
         display_scale: float = 1.0,
-        frame_sink: FrameSink = None,   # <--- new: push frames to main thread
+        frame_sink: FrameSink = None,
     ):
         super().__init__(name="ScanWorker")
         self.sock = sock
@@ -76,7 +65,6 @@ class ScanWorker(threading.Thread):
             h0, w0 = frame0.shape[:2]
             self.center_x, self.center_y = w0 // 2, h0 // 2
         else:
-            # Reasonable defaults; centering will still function visually
             self.center_x, self.center_y = 640 // 2, 480 // 2
 
     # ------------------------------- helpers ---------------------------------
@@ -90,36 +78,57 @@ class ScanWorker(threading.Thread):
         except Exception:
             return str(cid)
 
-    def _send(self, payload: Dict[str, Any]) -> None:
+    def _drain_pose_ready(self) -> None:
+        """Clear any stale POSE_READY ids in the mailbox queue."""
         try:
-            send_json(self.sock, payload)
+            while True:
+                _ = self.mail.pose_ready_q.get_nowait()
         except Exception:
-            # Best-effort; upstream orchestrator handles reconnects
             pass
+
+    def _wait_pose_ready(self, expected_id: Optional[int], slew_ms: int) -> bool:
+        """
+        Wait for a TYPE_POSE_READY ack. If expected_id is not None, only return
+        True when that id is seen; otherwise accept the first ack.
+        Timeout is derived from the motion duration plus settle.
+        """
+        t_deadline = time.time() + (slew_ms / 1000.0) + C.POSE_SETTLE_S + 1.5
+        while time.time() < t_deadline and not self.events.scan_abort.is_set():
+            try:
+                pid = self.mail.pose_ready_q.get(timeout=0.05)
+                if expected_id is None or int(pid) == int(expected_id):
+                    return True
+                # else: ignore mismatched acks (could be late from a prior goto)
+            except Exception:
+                pass
+        return False
 
     # ------------------------------- main run --------------------------------
 
     def run(self) -> None:
-        # Mark entries as not updated for this session, announce SEARCH start
+        # Mark entries as not updated for this session
         self.memory.reset_session_flags()
-        self._send({"type": P.TYPE_SEARCH, "active": True})
-
-        # Clear completion flags for a fresh run
         self.events.scan_finished.clear()
 
+        path = build_search_path()  # [{"pose_id","pwm_btm","pwm_top","slew_ms"}, ...]
+
         try:
-            while not self.events.scan_abort.is_set():
-                # If RPi has already finished (edge case), stop
-                if self.events.search_completed_from_rpi.is_set():
+            # Iterate poses locally; RPi just executes gotos & nudges.
+            for pose in path:
+                if self.events.scan_abort.is_set():
                     break
 
-                # Wait for next pose_id from receiver/mailbox
-                try:
-                    pose_id = self.mail.pose_ready_q.get(timeout=0.05)
-                except Exception:
-                    # No pose yet; small idle tick
-                    time.sleep(0.01)
-                    continue
+                pid = int(pose["pose_id"])
+                btm = int(pose["pwm_btm"])
+                top = int(pose["pwm_top"])
+                slew = int(pose["slew_ms"])
+
+                # Go to baseline pose for this grid point
+                self._drain_pose_ready()
+                self.motion.goto_pose_pwm(btm, top, slew_ms=slew, pose_id=pid)
+                if not self._wait_pose_ready(pid, slew):
+                    # If ack missing, proceed cautiously after an extra dwell
+                    time.sleep(C.POSE_SETTLE_S)
 
                 # Per-pose repeat: try to find and center multiple distinct classes
                 successes = 0
@@ -127,21 +136,22 @@ class ScanWorker(threading.Thread):
                 fails_at_pose: Dict[int, int] = {}
 
                 while not self.events.scan_abort.is_set():
-                    # Build exclusion list: already updated this session, or too many failures at this pose
-                    exclude_ids = [int(e["cls_id"]) for e in self.memory.entries_sorted() if e.get("updated_this_session") == 1]
+                    # Exclusions: already updated this session, or too many fails here
+                    exclude_ids = [int(e["cls_id"]) for e in self.memory.entries_sorted()
+                                   if e.get("updated_this_session") == 1]
                     for cid, fcount in fails_at_pose.items():
-                        if fcount >= int(C.MAX_FAILS_PER_POSE):
+                        if fcount >= C.MAX_FAILS_PER_POSE:
                             exclude_ids.append(int(cid))
 
-                    # Scan the window at this pose (emit frames via frame_sink if provided)
+                    # Scan the window at this pose (publish frames via frame_sink)
                     summary = run_scan_window(
                         cap=self.cap,
                         model=self.model,
                         exclude_ids=exclude_ids,
                         get_name=self._get_name,
-                        min_frames_for_class=int(C.SCAN_MIN_FRAMES),
-                        frame_sink=self.frame_sink,               # <--- forward frames
-                        display_scale=self.display_scale,          # keep consistent sizing
+                        min_frames_for_class=C.SCAN_MIN_FRAMES,
+                        frame_sink=self.frame_sink,
+                        display_scale=self.display_scale,
                     )
 
                     objs = summary.get("objects", [])
@@ -156,28 +166,27 @@ class ScanWorker(threading.Thread):
                             break
 
                     if candidate is None:
-                        # Nothing new to try at this pose -> report POSE_DONE and move on
-                        status = "SUCCESS" if successes > 0 else ("FAIL" if attempts > 0 else "SKIP")
-                        self._send({"type": P.TYPE_POSE_DONE, "pose_id": int(pose_id), "status": status})
-                        break  # advance to next pose
+                        # Nothing new to try at this pose -> advance to next pose
+                        break
 
                     attempts += 1
                     cls_id = int(candidate["cls_id"])
                     label = f"CENTER {candidate.get('cls_name', self._get_name(cls_id))} (id {cls_id})"
 
                     # Centering loop; this owns the HUD during SEARCH
-                    result = center_on_class(
-                        cap=self.cap,
-                        model=self.model,
-                        target_cls=cls_id,
-                        center_x=self.center_x,
-                        center_y=self.center_y,
-                        send_move=self.motion.nudge_scan,          # normalized deltas
-                        display_scale=self.display_scale,
-                        label=label,
-                        frame_sink=self.frame_sink,                # <--- forward frames
+                    success = bool(
+                        center_on_class(
+                            cap=self.cap,
+                            model=self.model,
+                            target_cls=cls_id,
+                            center_x=self.center_x,
+                            center_y=self.center_y,
+                            send_move=self.motion.nudge_scan,      # normalized deltas
+                            display_scale=self.display_scale,
+                            label=label,
+                            frame_sink=self.frame_sink,
+                        )
                     )
-                    success = result if isinstance(result, bool) else bool(result[0])
 
                     if success:
                         successes += 1
@@ -190,21 +199,27 @@ class ScanWorker(threading.Thread):
                                 pwm_btm=int(pwms["pwm_btm"]),
                                 pwm_top=int(pwms["pwm_top"]),
                             )
-                        # Loop again at the SAME pose to look for another unseen class
-                        continue
                     else:
                         # Track failures to avoid infinite loops on hard cases
                         fails_at_pose[cls_id] = fails_at_pose.get(cls_id, 0) + 1
-                        # If we’ve hit the per-pose failure cap for this class, it’ll be excluded next iteration
-                        continue
+
+                    # --- Always return to the baseline pose before next attempt ---
+                    self._drain_pose_ready()
+                    self.motion.goto_pose_pwm(
+                        btm, top,
+                        slew_ms=C.RETURN_TO_POSE_SLEW_MS,
+                        pose_id=pid
+                    )
+                    _ = self._wait_pose_ready(pid, C.RETURN_TO_POSE_SLEW_MS)
+                    time.sleep(C.RETURN_TO_POSE_DWELL_S)
 
                 # end while per-pose
 
-                # Check for end-of-grid signal
-                if self.events.search_completed_from_rpi.is_set():
+                if self.events.scan_abort.is_set():
                     break
 
-            # Normal exit path: RPi signals end-of-grid or abort was requested
+            # end for pose in path
+
         finally:
             # Prune entries not updated this session (end-of-search behavior)
             try:

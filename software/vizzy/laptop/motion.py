@@ -2,7 +2,7 @@
 # -----------------------------------------------------------------------------
 # Motion facade used by ScanWorker and TaskAgent/EXECUTE_TASK.
 # - nudge_scan(dx, dy): send normalized [-1, 1] deltas (RPi scales & clamps)
-# - goto_pose_pwm(pwm_btm, pwm_top, slew_ms): absolute move for recall / tasks
+# - goto_pose_pwm(pwm_btm, pwm_top, slew_ms, pose_id): absolute move (RPi echoes pose_id)
 # - get_pwms(timeout_s): request current PWM pose from the RPi
 # -----------------------------------------------------------------------------
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Optional, Dict, Any
 
 from ..shared import protocol as P
+from ..shared import config as C
 from ..shared.jsonl import send_json
 
 
@@ -34,7 +35,11 @@ class Motion:
 
     def _send(self, payload: Dict[str, Any]) -> None:
         """Best-effort send; reconnects are orchestrator's responsibility."""
-        send_json(self.sock, payload)
+        try:
+            send_json(self.sock, payload)
+        except Exception:
+            # Don’t crash worker threads on transient socket errors.
+            pass
 
     # ----------------------------------------------------------- public API
 
@@ -48,16 +53,31 @@ class Motion:
         v = max(-1.0, min(1.0, float(dy)))
         self._send({"type": P.TYPE_SCAN_MOVE, "horizontal": h, "vertical": v})
 
-    def goto_pose_pwm(self, pwm_btm: int, pwm_top: int, *, slew_ms: int = 600) -> None:
+    def goto_pose_pwm(
+        self,
+        pwm_btm: int,
+        pwm_top: int,
+        *,
+        slew_ms: Optional[int] = None,
+        pose_id: Optional[int] = None,
+    ) -> None:
         """
-        Send an absolute PWM pose move to the RPi (ignored during search/centering).
+        Send an absolute PWM pose move to the RPi.
+        If pose_id is provided, the RPi should echo it in TYPE_POSE_READY upon move completion.
         """
-        self._send({
+        if slew_ms is None:
+            slew_ms = int(C.GOTO_POSE_SLEW_MS)
+
+        payload: Dict[str, Any] = {
             "cmd": P.CMD_GOTO_PWMS,
             "pwm_btm": int(pwm_btm),
             "pwm_top": int(pwm_top),
             "slew_ms": int(slew_ms),
-        })
+        }
+        if pose_id is not None:
+            payload["pose_id"] = int(pose_id)
+
+        self._send(payload)
 
     def get_pwms(self, timeout_s: float = 0.3) -> Optional[Dict[str, int]]:
         """
@@ -68,7 +88,11 @@ class Motion:
         dict | None
             {"pwm_btm": int, "pwm_top": int} on success, or None on timeout/parse error.
         """
-        self._pwms_event.clear()
+        try:
+            self._pwms_event.clear()
+        except Exception:
+            pass
+
         self._send({"cmd": P.CMD_GET_PWMS})
         ok = self._pwms_event.wait(timeout_s)
         if not ok:

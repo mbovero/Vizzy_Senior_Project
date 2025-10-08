@@ -1,12 +1,12 @@
 # vizzy/rpi/dispatch.py
 # -----------------------------------------------------------------------------
-# Central message dispatcher for Raspberry Pi side (new laptop-centric protocol)
+# Central message dispatcher for Raspberry Pi side (laptop-driven sweep)
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
-import threading
+from typing import Iterable
+import time
 
 from ..shared import protocol as P
 from ..shared import config as C
@@ -14,29 +14,6 @@ from ..shared.jsonl import send_json
 
 from . import state
 from .servo import move_servos, goto_pwms
-
-
-# Internal latches used by the search FSM to know when a pose is done.
-_last_pose_done_id: Optional[int] = None
-_last_pose_done_status: Optional[str] = None
-_pose_done_lock = threading.Lock()
-
-
-def _set_pose_done(pid: int, status: str) -> None:
-    global _last_pose_done_id, _last_pose_done_status
-    with _pose_done_lock:
-        _last_pose_done_id = int(pid)
-        _last_pose_done_status = str(status).upper()
-
-
-def take_pose_done() -> tuple[Optional[int], Optional[str]]:
-    """Called by search loop to fetch (and clear) the most recent POSE_DONE."""
-    global _last_pose_done_id, _last_pose_done_status
-    with _pose_done_lock:
-        pid, st = _last_pose_done_id, _last_pose_done_status
-        _last_pose_done_id = None
-        _last_pose_done_status = None
-        return pid, st
 
 
 def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False) -> bool:
@@ -55,7 +32,7 @@ def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False)
         # ---------------------- TYPE-* messages ----------------------
         if mtype:
             if mtype == P.TYPE_SCAN_MOVE:
-                # Only accept during per-pose centering window
+                # Accept nudges only when we're not slewing an absolute GOTO.
                 if state.centering_active.is_set():
                     dx = float(msg.get("horizontal", 0.0))
                     dy = float(msg.get("vertical", 0.0))
@@ -64,39 +41,17 @@ def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False)
                     dy = -1.0 if dy < -1.0 else (1.0 if dy > 1.0 else dy)
                     move_servos(pi, dx, dy, scale_us=C.MOVE_SCALE_US)
                     if debug:
-                        print(f"[RPi] SCAN_MOVE dx={dx:.3f} dy={dy:.3f}")
-                        print(f"btm={state.current_horizontal} top={state.current_vertical}")
+                        print(f"[RPi] SCAN_MOVE dx={dx:.3f} dy={dy:.3f}  "
+                              f"btm={state.current_horizontal} top={state.current_vertical}")
                 else:
                     if debug:
-                        print("[RPi] SCAN_MOVE ignored (not in centering window)")
-
-            elif mtype == P.TYPE_SEARCH:
-                active = bool(msg.get("active", False))
-                if active:
-                    state.search_active.set()
-                    if debug:
-                        print("[RPi] SEARCH: ON")
-                else:
-                    # Immediate stop: clear search + centering; sweep worker will exit
-                    state.search_active.clear()
-                    state.centering_active.clear()
-                    if debug:
-                        print("[RPi] SEARCH: OFF (interrupt)")
+                        print("[RPi] SCAN_MOVE ignored (slewing/settling)")
 
             elif mtype == P.TYPE_STOP:
                 if debug:
                     print("[RPi] STOP received")
                 stop = True
 
-            elif mtype == P.TYPE_POSE_DONE:
-                pid = int(msg.get("pose_id", -1))
-                status = str(msg.get("status", "SKIP")).upper()
-                _set_pose_done(pid, status)
-                state.centering_active.clear()  # leave centering window; search loop advances
-                if debug:
-                    print(f"[RPi] POSE_DONE pose_id={pid} status={status}")
-
-            # TYPE_PWMS is only sent by RPi; ignore if received
             else:
                 if debug:
                     print(f"[RPi] Ignored message type: {mtype}")
@@ -104,17 +59,41 @@ def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False)
         # ---------------------- CMD-* messages -----------------------
         elif mcmd:
             if mcmd == P.CMD_GOTO_PWMS:
-                # Ignore if busy with search or centering
-                if state.search_active.is_set() or state.centering_active.is_set():
-                    if debug:
-                        print("[RPi] Ignoring GOTO_PWMS during search/centering")
-                    continue
-                tb = int(msg.get("pwm_btm", C.SERVO_CENTER))
-                tt = int(msg.get("pwm_top", C.SERVO_CENTER))
-                slew = int(msg.get("slew_ms", 600))
+                tb   = int(msg.get("pwm_btm", C.SERVO_CENTER))
+                tt   = int(msg.get("pwm_top", C.SERVO_CENTER))
+                slew = int(msg.get("slew_ms", C.GOTO_POSE_SLEW_MS))
+                pose_id = msg.get("pose_id", None)
+                if pose_id is not None:
+                    try:
+                        pose_id = int(pose_id)
+                    except Exception:
+                        pose_id = None
+
                 if debug:
-                    print(f"[RPi] GOTO_PWMS btm={tb} top={tt} slew_ms={slew}")
-                goto_pwms(pi, tb, tt, duration_ms=slew, steps=24)
+                    extra = f" pose_id={pose_id}" if pose_id is not None else ""
+                    print(f"[RPi] GOTO_PWMS btm={tb} top={tt} slew_ms={slew}{extra}")
+
+                # Block nudges during absolute motion
+                state.centering_active.clear()
+
+                # Synchronous goto; steps from config
+                goto_pwms(pi, tb, tt, duration_ms=slew, steps=C.GOTO_STEPS)
+
+                # Small settle to reduce oscillation, then allow nudges again
+                time.sleep(C.POSE_SETTLE_S)
+                state.centering_active.set()
+
+                # Ack move completion (echo pose_id if provided)
+                payload = {"type": P.TYPE_POSE_READY}
+                if pose_id is not None:
+                    payload["pose_id"] = pose_id
+                try:
+                    send_json(conn, payload)
+                    if debug:
+                        print(f"[RPi] -> POSE_READY {payload}")
+                except Exception as e:
+                    if debug:
+                        print(f"[RPi] Failed to send POSE_READY: {e}")
 
             elif mcmd == P.CMD_GET_PWMS:
                 payload = {
