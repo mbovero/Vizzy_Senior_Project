@@ -211,7 +211,7 @@ class StateManager:
                 buf = b""
 
     # ----------------------------- Idle preview -------------------------------
-
+    @staticmethod
     def _draw_idle_hud(frame, text: str, *, display_scale: float) -> None:
         h, w = frame.shape[:2]
         overlay = frame.copy()
@@ -240,7 +240,7 @@ class StateManager:
         secs_left = max(0.0, self.idle_deadline - time.time())
         status = f"IDLE \u2022 auto-search in {secs_left:0.1f}s"
 
-        _draw_idle_hud(annotated, status, display_scale=C.DISPLAY_SCALE)
+        self._draw_idle_hud(annotated, status, display_scale=C.DISPLAY_SCALE)
 
         h, w = annotated.shape[:2]
         resized = cv2.resize(annotated, (int(w * C.DISPLAY_SCALE), int(h * C.DISPLAY_SCALE)))
