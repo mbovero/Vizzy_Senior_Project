@@ -9,7 +9,7 @@
 # Vision / Camera (Laptop)
 # -----------------------------
 YOLO_MODEL = "yolo11m-seg.engine"
-CAM_INDEX = 0
+CAM_INDEX = 4
 DISPLAY_SCALE = 1.3
 YOLO_VERBOSE = False
 
@@ -26,7 +26,7 @@ SCAN_MIN_FRAMES = 4
 CENTER_CONF        = 0.60     # Per-frame minimum confidence
 CENTER_EPSILON_PX  = 25       # Pixel error tolerance for success
 CENTER_MOVE_NORM   = 0.035    # Normalized motion stability
-CENTER_FRAMES      = 12       # Number of “good” frames (not necessarily consecutive)
+CENTER_FRAMES      = 12       # Number of good frames (not necessarily consecutive)
 CENTER_DEADZONE    = 30       # HUD/visual deadzone (px); also helps avoid micro-hunting
 
 # Retry / safety

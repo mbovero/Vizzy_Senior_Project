@@ -212,17 +212,39 @@ class StateManager:
 
     # ----------------------------- Idle preview -------------------------------
 
+    def _draw_idle_hud(frame, text: str, *, display_scale: float) -> None:
+        h, w = frame.shape[:2]
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, int(28 * display_scale)), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+        from .hud import draw_wrapped_text
+        draw_wrapped_text(frame, text, 8, 8, int(w * 0.8))
+
     def _run_idle_preview_once(self) -> None:
-        """Render one IDLE preview frame."""
         ok, frame = self.cap.read()
         if not ok:
             return
-        results = self.model(frame, verbose = C.YOLO_VERBOSE)
-        for result in results:
-            annotated = result.plot()
-            h, w = annotated.shape[:2]
-            resized = cv2.resize(annotated, (int(w * C.DISPLAY_SCALE), int(h * C.DISPLAY_SCALE)))
-            cv2.imshow("Vizzy (IDLE Preview)", resized)
+
+        try:
+            results = self.model(frame, verbose=getattr(C, "YOLO_VERBOSE", False))
+        except TypeError:
+            results = self.model(frame)
+
+        annotated = frame
+        try:
+            for r in results:
+                annotated = r.plot()
+        except Exception:
+            pass
+
+        secs_left = max(0.0, self.idle_deadline - time.time())
+        status = f"IDLE \u2022 auto-search in {secs_left:0.1f}s"
+
+        _draw_idle_hud(annotated, status, display_scale=C.DISPLAY_SCALE)
+
+        h, w = annotated.shape[:2]
+        resized = cv2.resize(annotated, (int(w * C.DISPLAY_SCALE), int(h * C.DISPLAY_SCALE)))
+        cv2.imshow("Vizzy (IDLE Preview)", resized)
 
     # ------------------------------ Main loop --------------------------------
 
