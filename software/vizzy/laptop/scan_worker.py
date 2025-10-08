@@ -36,6 +36,8 @@ from .centering import center_on_class
 from .motion import Motion
 
 
+# TODO: Thread pool, thread manager to synchronize enrichment LLM returns
+
 FrameSink = Optional[Callable[[Any], None]]
 
 

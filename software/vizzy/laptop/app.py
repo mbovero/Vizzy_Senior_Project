@@ -40,10 +40,12 @@ class Events:
         self.scan_finished = threading.Event()
         self.search_completed_from_rpi = threading.Event()  # ReceiverThread sets on SEARCH {active:false}
         self.query_ready = threading.Event()
+        # TODO LLM task scheduler return event
 
-
+# Used by scan cycle and execution
+# TODO add execution networking interactions
 class Mailboxes:
-    """Network mailboxes the ReceiverThread fills (same semantics as current client.py)."""
+    """Network mailboxes the ReceiverThread fills."""
     def __init__(self):
         from queue import Queue
         self.pose_ready_q: "Queue[int]" = Queue(maxsize=8)
@@ -55,11 +57,11 @@ class StateManager:
     def __init__(self):
         # State
         self.state: StateName = "IDLE"
-        self._prev_state: Optional[StateName] = None  # NEW: to manage window teardown
+        self._prev_state: Optional[StateName] = None
         self.events = Events()
         self.mail = Mailboxes()
-        self.idle_deadline: float = time.time() + getattr(C, "IDLE_TIMEOUT_S", 45.0)
-        self.search_mode: bool = False  # mirror of wire SEARCH state
+        self.idle_deadline: float = time.time() + C.IDLE_TIMEOUT_S
+        self.search_mode: bool = False 
 
         # IO / vision
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -67,6 +69,8 @@ class StateManager:
         self.cap = cv2.VideoCapture(C.CAM_INDEX)
         if not self.cap.isOpened():
             raise RuntimeError(f"Could not open camera index {C.CAM_INDEX}")
+
+        # TODO add in USB cam config
 
         ok, frame0 = self.cap.read()
         if not ok:
@@ -81,9 +85,9 @@ class StateManager:
         self.sock.connect((C.PI_IP, C.PI_PORT))
 
         # Thread handles (filled later)
-        self.receiver_thread: Optional[threading.Thread] = None
-        self.scan_worker: Optional[threading.Thread] = None
-        self.task_agent: Optional[threading.Thread] = None
+        self.receiver_thread: Optional[threading.Thread] = None     # Networking
+        self.scan_worker: Optional[threading.Thread] = None         # Scanning thread
+        self.task_agent: Optional[threading.Thread] = None          # User query -> task scheduler -> execution
 
         # Motion facade & camera manager (motion is created lazily)
         self.motion = None
@@ -138,7 +142,7 @@ class StateManager:
         self.events.scan_active.clear()
         self.events.scan_finished.clear()
         self._switch_state("IDLE")
-        self.idle_deadline = time.time() + getattr(C, "IDLE_TIMEOUT_S", 45.0)
+        self.idle_deadline = time.time() + C.IDLE_TIMEOUT_S
 
     # --------------------------- Receiver thread ------------------------------
 
@@ -259,7 +263,7 @@ class StateManager:
                         self.finish_search()
                         self.events.search_completed_from_rpi.clear()
 
-                # If a scan ended (e.g., normal path), finish
+                # If a scan ended (via interrupt) TODO
                 if self.events.scan_finished.is_set() and self.events.scan_active.is_set():
                     self.finish_search()
 

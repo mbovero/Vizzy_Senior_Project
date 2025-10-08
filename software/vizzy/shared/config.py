@@ -9,8 +9,9 @@
 # Vision / Camera (Laptop)
 # -----------------------------
 YOLO_MODEL = "yolo11m-seg.engine"
-CAM_INDEX = 4
+CAM_INDEX = 0
 DISPLAY_SCALE = 1.3
+YOLO_VERBOSE = False
 
 # Duration knobs (ms)
 SCAN_DURATION_MS   = 1750   # Per-pose scan window
@@ -38,7 +39,7 @@ MEM_FILE = "object_memory.json"
 # Networking
 # -----------------------------
 # Laptop connects to the Pi at this host/port.
-PI_IP   = "192.168.1.30"
+PI_IP   = "10.120.39.241"
 PI_PORT = 65432
 
 # RPi server bind (RPi will ignore PI_IP and bind to LISTEN_HOST:LISTEN_PORT)
@@ -51,6 +52,7 @@ LISTEN_PORT = 65432
 # Servo GPIO pins (BCM numbering for pigpio)
 # Adjust to match your wiring.
 SERVO_BTM = 22
+SERVO_MID = 27
 SERVO_TOP = 17
 
 # Pulse width bounds (µs)
@@ -71,3 +73,6 @@ SEARCH_V_STEP     = 100  # µs vertical step between rows
 
 # Time to allow the arm to settle mechanically at each pose before scanning
 POSE_SETTLE_S = 0.30
+
+# Idle/auto-search behavior (laptop)
+IDLE_TIMEOUT_S = 20.0   # seconds of inactivity before auto SEARCH

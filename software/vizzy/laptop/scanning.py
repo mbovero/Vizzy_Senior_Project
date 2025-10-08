@@ -1,134 +1,144 @@
 from __future__ import annotations
-import time, statistics, cv2
-from typing import Dict, List, Iterable, Optional, Set
+import time
+import statistics
+from typing import Dict, List, Iterable, Optional, Set, Any, Callable, Tuple
+
+import cv2
+import numpy as np
+
 from .hud import draw_wrapped_text
 from .centering import instance_center
-from ..shared import config
+from ..shared import config as C
 
-# TODO: duration should be static; remove class filter; have laptop track excluded ids; hard code display scale and min frames
-# TODO: lots of config variables to make here
+# Always publish frames via the sink; main thread renders them.
+FrameSink = Callable[[Any], None]
+
+
+def _draw_scan_hud(frame, text: str, *, display_scale: float) -> Any:
+    h, w = frame.shape[:2]
+    # translucent header bar
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, int(28 * display_scale)), (0, 0, 0), -1)
+    alpha = 0.35
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+    draw_wrapped_text(frame, text, 8, 8, int(w * 0.8))
+    return frame
+
+
+def _result_iter(model_result, frame_w: int, frame_h: int):
+    """
+    Yield (cls_id:int, conf:float, cx:int, cy:int) for each detection.
+    Uses mask center (segmentation) when available; otherwise bbox center.
+    """
+    boxes = getattr(model_result, "boxes", None)
+    masks = getattr(model_result, "masks", None)
+
+    if boxes is None or boxes.xyxy is None:
+        return
+
+    # Torch -> numpy for boxes; leave masks as *torch tensors* (centering.instance_center expects tensor)
+    xyxy = boxes.xyxy.detach().cpu().numpy()
+    confs = boxes.conf.detach().cpu().numpy() if boxes.conf is not None else np.zeros((xyxy.shape[0],), dtype=float)
+    clss = boxes.cls.detach().cpu().numpy().astype(int) if boxes.cls is not None else np.zeros((xyxy.shape[0],), dtype=int)
+
+    mask_list = None
+    if masks is not None and getattr(masks, "data", None) is not None:
+        # masks.data is a torch.Tensor of shape (N, Hm, Wm); keep as tensors
+        mask_list = list(masks.data)
+
+    for i in range(xyxy.shape[0]):
+        cls_id = int(clss[i])
+        conf = float(confs[i])
+
+        if mask_list is not None and i < len(mask_list):
+            cx, cy = instance_center(xyxy[i], mask_list[i], frame_w, frame_h)
+            yield cls_id, conf, int(cx), int(cy)
+        else:
+            x1, y1, x2, y2 = xyxy[i]
+            cx = int(0.5 * (x1 + x2))
+            cy = int(0.5 * (y1 + y2))
+            yield cls_id, conf, int(cx), int(cy)
+
+
 def run_scan_window(
     cap,
     model,
     exclude_ids: Optional[Iterable[int]],
     get_name,
-    min_frames_for_class: int = 4
+    min_frames_for_class: int = 4,
+    *,
+    frame_sink: FrameSink,                 # REQUIRED: main-thread renderer
+    display_scale: float = None,
 ) -> dict:
     """
-    Perform a short, stationary scan at the current arm position and
-    summarize object detections from YOLO.
-
-    Args:
-        cap                : OpenCV VideoCapture object for reading frames.
-        model              : YOLO model instance.
-        exclude_ids        : Iterable of class IDs to ignore.
-        get_name           : Function mapping class ID → human-readable name.
-        min_frames_for_class: Minimum appearances before keeping a class.
-
-    Returns:
-        Dictionary containing:
-          - "frames": total frames processed
-          - "objects": list of objects sorted by avg_conf desc, each with:
-              cls_id, cls_name, avg_conf, median_center[x,y], frames
+    Run a short scan window and aggregate per-class stats while continuously
+    publishing YOLO-annotated frames to the main thread.
     """
-    # Convert exclusion list to set for faster lookups
-    exclude: Set[int] = set(int(x) for x in (exclude_ids or []))
+    if display_scale is None:
+        display_scale = float(getattr(C, "DISPLAY_SCALE", 1.0))
+
+    exclude: Set[int] = set(int(e) for e in (exclude_ids or []))
     t0 = time.time()
     frames = 0
 
-    # Per-class tracking of confidences and center positions
     per_class_conf: Dict[int, List[float]] = {}
-    per_class_cx:   Dict[int, List[int]]   = {}
-    per_class_cy:   Dict[int, List[int]]   = {}
+    per_class_cx: Dict[int, List[int]] = {}
+    per_class_cy: Dict[int, List[int]] = {}
 
-    hud_text = f"SCANNING ~{int(config.SCAN_DURATION_MS)} ms"
+    window_ms = int(getattr(C, "SCAN_DURATION_MS", 800))
+    hud_text = f"SCANNING ~{window_ms} ms"
+    duration_s = float(window_ms) / 1000.0
 
-    # Loop until scan window duration is reached
-    while (time.time() - t0) < (config.SCAN_DURATION_MS / 1000):
+    while (time.time() - t0) < duration_s:
         ok, frame = cap.read()
         if not ok:
-            break  # End scan if camera feed fails
-        
-        # Image dimensions for mask resizing / center calc
+            break
+        frames += 1
         h, w = frame.shape[:2]
 
-        # Run YOLO inference
-        results = model(frame)
+        # Run YOLO and get an annotated image to display
+        results = model(frame, verbose = C.YOLO_VERBOSE)
 
-        for result in results:
-            frames += 1
+        annotated = frame  # fallback if no results object behaves oddly
+        for r in results:
+            # Aggregate stats from detections
+            for cls_id, conf, cx, cy in _result_iter(r, w, h):
+                if cls_id in exclude:
+                    continue
+                per_class_conf.setdefault(cls_id, []).append(conf)
+                per_class_cx.setdefault(cls_id, []).append(cx)
+                per_class_cy.setdefault(cls_id, []).append(cy)
 
-            # --- Most-confident-per-class selection for this frame (use mask centers if available) ---
-            best_for_class = {}  # cls_id -> (conf, area, cx, cy)
+            # Use YOLO's plotted/annotated frame for display
+            try:
+                annotated = r.plot()
+            except Exception:
+                pass  # if plot fails, show the raw frame + HUD
 
-            if len(result.boxes) > 0:
-                # Prepare parallel access to masks (may be None)
-                masks = getattr(result, "masks", None)
-                mask_list = list(masks.data) if (masks is not None and masks.data is not None) else None
+        # Add a simple HUD ribbon and publish to the main thread
+        annotated = _draw_scan_hud(annotated, hud_text, display_scale=display_scale)
+        rh, rw = annotated.shape[:2]
+        resized = cv2.resize(annotated, (int(rw * display_scale), int(rh * display_scale)))
+        frame_sink(resized)
 
-                # Iterate by index so we can align boxes <-> masks reliably
-                n = len(result.boxes)
-                for i in range(n):
-                    box_xyxy = result.boxes.xyxy[i].detach().cpu().numpy()
-                    cid      = int(result.boxes.cls[i].item())
-                    conf     = float(result.boxes.conf[i].item())
-
-                    if cid in exclude:
-                        continue
-
-                    x1, y1, x2, y2 = map(int, box_xyxy)
-                    area = (x2 - x1) * (y2 - y1)
-
-                    # Compute center via segmentation if available, else box center
-                    mask_tensor = mask_list[i] if mask_list is not None and i < len(mask_list) else None
-                    cx, cy = instance_center(box_xyxy, mask_tensor, w, h)
-
-                    # Keep the most confident detection per class for this frame.
-                    # Tie-breaker: larger area wins when conf ties.
-                    prev = best_for_class.get(cid)
-                    if (prev is None) or (conf > prev[0]) or (conf == prev[0] and area > prev[1]):
-                        best_for_class[cid] = (conf, area, cx, cy)
-
-            # Commit the per-class selections to our per_class_* aggregators
-            for cid, (conf, _area, cx, cy) in best_for_class.items():
-                per_class_conf.setdefault(cid, []).append(conf)
-                per_class_cx.setdefault(cid, []).append(cx)
-                per_class_cy.setdefault(cid, []).append(cy)
-                
-            # Draw text overlay and display the annotated frame (HUD)
-            annotated = result.plot()
-            draw_wrapped_text(
-                annotated,
-                hud_text,
-                10,
-                24,
-                int(annotated.shape[1] * 0.92)
-            )
-            h, w = annotated.shape[:2]
-            resized = cv2.resize(annotated, (int(w * config.DISPLAY_SCALE), int(h * config.DISPLAY_SCALE))) # TODO hardcode display scale config var
-            cv2.imshow("YOLO Detection", resized)
-            cv2.waitKey(1)  # Keep OpenCV's window responsive TODO: remove this because we no longer have keyboard input?
-
-    # Build output list of detected objects
-    objects = []
+    # Build summary
+    objects: List[dict] = []
     for cls_id, confs in per_class_conf.items():
-        if len(confs) < min_frames_for_class:
-            continue  # Ignore objects that appeared too few times
-        avg_conf = sum(confs) / len(confs)
-        med_cx = statistics.median(per_class_cx[cls_id])
-        med_cy = statistics.median(per_class_cy[cls_id])
-        name = get_name(int(cls_id))
-        objects.append({
-            "cls_id": int(cls_id),
-            "cls_name": name,
-            "avg_conf": float(avg_conf),
-            "median_center": [float(med_cx), float(med_cy)],
-            "frames": int(len(confs))
-        })
+        if len(confs) < int(min_frames_for_class):
+            continue
+        name = str(get_name(cls_id))
+        avg_conf = float(sum(confs) / max(1, len(confs)))
+        med_cx = int(statistics.median(per_class_cx.get(cls_id, [0])))
+        med_cy = int(statistics.median(per_class_cy.get(cls_id, [0])))
+        objects.append(
+            {
+                "cls_id": int(cls_id),
+                "cls_name": name,
+                "avg_conf": float(avg_conf),
+                "median_center": [float(med_cx), float(med_cy)],
+                "frames": int(len(confs)),
+            }
+        )
 
-    # Sort by confidence (highest first)
     objects.sort(key=lambda r: r["avg_conf"], reverse=True)
-
-    # TODO: this should not return; laptop should decide here which object it should center on, execute 
-    # centering, then repeat scanning at this search path position until no new objects are identified
     return {"frames": int(frames), "objects": objects}
