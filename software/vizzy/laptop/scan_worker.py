@@ -207,10 +207,10 @@ class ScanWorker(threading.Thread):
                     self._drain_pose_ready()
                     self.motion.goto_pose_pwm(
                         btm, top,
-                        slew_ms=C.RETURN_TO_POSE_SLEW_MS,
+                        slew_ms=C.GOTO_POSE_SLEW_MS,
                         pose_id=pid
                     )
-                    _ = self._wait_pose_ready(pid, C.RETURN_TO_POSE_SLEW_MS)
+                    _ = self._wait_pose_ready(pid, C.GOTO_POSE_SLEW_MS)
                     time.sleep(C.RETURN_TO_POSE_DWELL_S)
 
                 # end while per-pose

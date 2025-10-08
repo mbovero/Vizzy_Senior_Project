@@ -67,7 +67,7 @@ MOVE_SCALE_US = 40
 # Return-to-pose behavior (laptop -> RPi)
 GOTO_POSE_SLEW_MS = 600    # how quickly to snap back to the baseline pose after a centering attempt
 RETURN_TO_POSE_DWELL_S = 0.25   # small pause to let the arm settle before the next scan window
-
+GOTO_STEPS = 24             # micro-steps per goto (used by rpi/servo.goto_pwms)
 
 # Search grid definition (computed on RPi)
 # Range is reduced by MIN/MAX offsets to avoid hard mechanical limits.
