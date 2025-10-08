@@ -1,26 +1,24 @@
 # vizzy/rpi/server.py
 # -----------------------------------------------------------------------------
-# Single-client JSONL TCP server for Vizzy RPi side.
+# Single-client JSONL TCP server for Vizzy RPi side (laptop-driven sweep).
 # - Reads newline-delimited JSON messages from the laptop
-# - Dispatches to the new protocol handlers
-# - Starts/stops the search sweep worker as search_active toggles
+# - Dispatches to protocol handlers
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
 
 import socket
-import threading
 import time
 from typing import Optional, Tuple
 
 import pigpio
 
 from ..shared import config as C
-from ..shared.jsonl import recv_lines, send_json
+from ..shared.jsonl import recv_lines
 from . import state
-from . import dispatch
-from .search import run_search_sweep
+from .dispatch import process_messages
 from .servo import init_servos
+
 
 def _make_server_socket() -> socket.socket:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -31,19 +29,8 @@ def _make_server_socket() -> socket.socket:
     return s
 
 
-def _start_sweep_thread(pi: pigpio.pi, conn: socket.socket, debug: bool = False) -> threading.Thread:
-    t = threading.Thread(
-        target=run_search_sweep,   # <— instead of search.run_search_sweep
-        args=(pi, conn),
-        kwargs={"debug": debug},
-        daemon=True,
-    )
-    t.start()
-    return t
-
-
 def serve_forever(debug: bool = False) -> None:
-    """Main server loop: accept one client, process messages, manage sweep worker."""
+    """Main server loop: accept one client and dispatch messages until STOP/close."""
     pi = pigpio.pi()
     if not pi.connected:
         raise RuntimeError("[RPi] pigpio daemon not running or not reachable.")
@@ -60,18 +47,17 @@ def serve_forever(debug: bool = False) -> None:
             print(f"[RPi] Client connected from {addr[0]}:{addr[1]}")
 
             # Reset state on new connection
-            state.search_active.clear()
-            state.centering_active.clear()
+            state.centering_active.set()   # allow nudges when idle
 
+            # Re-center to a known safe pose on connect
             init_servos(pi)
 
-            # Per-connection buffers and worker handle
+            # Per-connection receive buffer
             buf = b""
-            sweep_thread: Optional[threading.Thread] = None
 
             try:
                 while True:
-                    # Read any available messages
+                    # Read any available messages (newline-delimited JSON)
                     try:
                         msgs, buf, closed = recv_lines(conn, buf)
                     except ConnectionResetError:
@@ -81,15 +67,11 @@ def serve_forever(debug: bool = False) -> None:
 
                     if closed:
                         print("[RPi] Client disconnected.")
-                        # Stop any ongoing sweep immediately
-                        state.search_active.clear()
-                        state.centering_active.clear()
                         break
 
                     if msgs:
-                        # Route messages
-                        stop = dispatch.process_messages(pi, conn, msgs, debug=debug)
-
+                        # Route messages; stop=True means TYPE_STOP received
+                        stop = process_messages(pi, conn, msgs, debug=debug)
                         if stop:
                             print("[RPi] STOP requested; closing connection.")
                             try:
@@ -99,17 +81,7 @@ def serve_forever(debug: bool = False) -> None:
                             conn.close()
                             return  # exit server
 
-                    # If search has been turned ON and no worker is running, start it
-                    if state.search_active.is_set():
-                        if sweep_thread is None or not sweep_thread.is_alive():
-                            if debug:
-                                print("[RPi] Starting search sweep worker...")
-                            sweep_thread = _start_sweep_thread(pi, conn, debug=debug)
-                    else:
-                        # If search is OFF, let worker exit on its own; nothing to do here
-                        pass
-
-                    # Light tick
+                    # Light tick to avoid a hot loop
                     time.sleep(0.01)
 
             except Exception as e:
@@ -122,14 +94,7 @@ def serve_forever(debug: bool = False) -> None:
                     conn.close()
                 except Exception:
                     pass
-                # Reset flags; loop back to accept()
-                state.search_active.clear()
-                state.centering_active.clear()
-                continue
-
-            # Connection closed cleanly; loop back to accept()
-            state.search_active.clear()
-            state.centering_active.clear()
+                # Loop back to accept()
 
     finally:
         try:

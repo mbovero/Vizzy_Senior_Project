@@ -1,12 +1,8 @@
 # vizzy/rpi/dispatch.py
-# -----------------------------------------------------------------------------
-# Central message dispatcher for Raspberry Pi side (laptop-driven sweep)
-# -----------------------------------------------------------------------------
-
 from __future__ import annotations
 
-from typing import Iterable
 import time
+from typing import Iterable
 
 from ..shared import protocol as P
 from ..shared import config as C
@@ -19,7 +15,6 @@ from .servo import move_servos, goto_pwms
 def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False) -> bool:
     """
     Dispatch a batch of messages from the laptop.
-
     Returns:
         stop (bool): True if the server should stop and exit.
     """
