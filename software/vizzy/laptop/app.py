@@ -58,7 +58,7 @@ class Mailboxes:
 
 
 class StateManager:
-    def __init__(self):
+    def __init__(self):         
         # State
         self.state: StateName = "IDLE"
         self._prev_state: Optional[StateName] = None
@@ -100,12 +100,15 @@ class StateManager:
         self.frame_bus = FrameBus(maxsize=4)
 
         # NEW: LLM worker manager for semantic enrichment
+        print("[StateManager] Initializing LLM memory...")
         self.llm_memory = ObjectMemory(C.MEM_FILE)
+        print("[StateManager] Initializing LLM worker manager...")
         self.llm_worker = WorkerManager(
             memory=self.llm_memory,
             max_workers=getattr(C, "LLM_WORKERS", 5),
             model=getattr(C, "IMAGE_PROCESS_MODEL", "gpt-5"),
         )
+        print("[StateManager] LLM components initialized (not started yet)")
 
     # ------------------------------- Triggers ---------------------------------
 
@@ -239,6 +242,7 @@ class StateManager:
             print("[StateManager] WARNING: Failed to read camera frame in IDLE")
             return
 
+        print("[StateManager] Running YOLO inference on IDLE frame...")
         try:
             results = self.model(frame, verbose=getattr(C, "YOLO_VERBOSE", False))
         except TypeError:
@@ -269,26 +273,36 @@ class StateManager:
 
     def start(self) -> None:
         """Start background threads and enter the FSM main loop."""
+        print("[StateManager] Starting background threads...")
+        
         # Start LLM worker manager
+        print("[StateManager] Starting LLM worker...")
         self.llm_worker.start()
+        print("[StateManager] LLM worker started")
         
         # Start receiver (network)
+        print("[StateManager] Starting receiver thread...")
         self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self.receiver_thread.start()
+        print("[StateManager] Receiver thread started")
 
         # Start TaskAgent (user input -> plan -> execute)
+        print("[StateManager] Starting TaskAgent...")
         from .task_agent import TaskAgent
         agent = TaskAgent(state_mgr=self, events=self.events)
         agent.daemon = True
         agent.start()
         self.task_agent = agent
+        print("[StateManager] TaskAgent started")
 
         print(f"[Laptop] StateManager started on device={self.device}")
+        print("[StateManager] Entering main loop...")
 
         self.run()
 
     def run(self) -> None:
         """Small FSM: IDLE preview + timers; kicks off SEARCH when requested."""
+        print("[StateManager] Main loop started, entering IDLE state")
         try:
             while True:
                 now = time.time()
