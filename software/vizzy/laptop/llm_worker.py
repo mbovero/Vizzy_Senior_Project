@@ -185,6 +185,9 @@ class WorkerManager:
         Returns:
             Dictionary with task results and metadata
         """
+        print(f"[LLM Worker] Processing task for object {task.object_id}")
+        print(f"[LLM Worker] File ID: {task.file_id}, Model: {self.model}")
+        
         t0 = time.perf_counter()
         attempts = 0
         backoff = 2.0
@@ -193,11 +196,13 @@ class WorkerManager:
         while True:
             attempts += 1
             try:
+                print(f"[LLM Worker] Calling GPT vision API (attempt {attempts})...")
                 semantics = call_llm_for_semantics(task.file_id, self.model)
+                print(f"[LLM Worker] SUCCESS: Got semantics: {semantics.get('name', 'N/A')}")
                 break
             except OpenAIError as e:
                 if attempts >= 3:
-                    print(f"[LLM Worker] Failed after {attempts} attempts: {e}")
+                    print(f"[LLM Worker] FAILED after {attempts} attempts: {e}")
                     # Return empty semantics on failure
                     semantics = {
                         "name": "",
@@ -211,6 +216,17 @@ class WorkerManager:
                 print(f"[LLM Worker] Retry {attempts}/3 after error: {e}")
                 time.sleep(backoff)
                 backoff *= 2
+            except Exception as e:
+                print(f"[LLM Worker] UNEXPECTED ERROR: {type(e).__name__}: {e}")
+                semantics = {
+                    "name": "",
+                    "material": "",
+                    "color": "",
+                    "unique_attributes": f"Error: {str(e)[:100]}",
+                    "grasp_position": "",
+                    "grasp_xy": [0, 0],
+                }
+                break
         
         dt = time.perf_counter() - t0
 
