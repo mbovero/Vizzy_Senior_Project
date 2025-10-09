@@ -40,28 +40,26 @@ The user will provide a natural language request. You must parse it into a struc
 Available command types:
 - PICK: Pick up target object and return to resting position
 - MOVE_TO: Move arm to destination (with or without object)
-- ROTATE: Rotate end-effector (roll/yaw)
+- ROTATE: Rotate end-effector in roll/yaw directions
 - RELEASE: Open claw to drop object or open claw
 - PLACE_TO: Move to destination and release object (assumes object in claw)
 - RELOCATE: Pick target and place at destination (high-level: PICK + PLACE_TO)
 
-Each task should be a JSON object with:
-{{
-  "command": "<COMMAND_TYPE>",
-  "target": "<unique_id or [x, y, z]>",
-  "destination": "<unique_id or [x, y, z]>",
-  "parameters": {{}}
-}}
+Each task must be a JSON object. Task format:
+- command: PICK, MOVE_TO, ROTATE, RELEASE, PLACE_TO, or RELOCATE
+- target: object ID like 0xA1B2C3D4 or coordinate array like [1.5, 2.0, 0.3]
+- destination: object ID or coordinates (for commands that need it)
+- parameters: dict with extra params (for ROTATE: roll and yaw angles in degrees)
 
 Rules:
-1. Use unique object IDs (like "0xA1B2C3D4") when referring to known objects from memory
+1. Use unique object IDs (like 0xA1B2C3D4) when referring to known objects from memory
 2. Use coordinate arrays [x, y, z] for absolute positions
-3. PICK requires only "target"
-4. MOVE_TO requires "destination"
-5. PLACE_TO requires "destination" (assumes object already held)
-6. RELOCATE requires both "target" and "destination"
-7. RELEASE takes no target/destination (operates on currently held object)
-8. ROTATE requires "parameters" with rotation angles (e.g., {"roll": 45, "yaw": 30})
+3. PICK requires only target
+4. MOVE_TO requires destination
+5. PLACE_TO requires destination (assumes object already held)
+6. RELOCATE requires both target and destination
+7. RELEASE takes no target or destination
+8. ROTATE requires parameters dict with roll and/or yaw keys
 
 Memory context (objects currently in the workspace):
 {memory_context}
