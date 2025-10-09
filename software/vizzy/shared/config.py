@@ -5,10 +5,15 @@
 # All code should import from this module instead of module-local configs.
 # -----------------------------------------------------------------------------
 
+from pathlib import Path
+
+PKG_ROOT   = Path(__file__).resolve().parent.parent
+LAPTOP_DIR = PKG_ROOT / "laptop"
+
 # -----------------------------
 # Vision / Camera (Laptop)
 # -----------------------------
-YOLO_MODEL = "yolo11m-seg.engine"
+YOLO_MODEL = str(LAPTOP_DIR / "yolo11m-seg.engine")
 CAM_INDEX = 4
 DISPLAY_SCALE = 1.3
 YOLO_VERBOSE = False
@@ -33,7 +38,7 @@ CENTER_DEADZONE    = 30       # HUD/visual deadzone (px); also helps avoid micro
 MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a single pose
 
 # Object memory
-MEM_FILE = "object_memory.json"
+MEM_FILE = str(LAPTOP_DIR / "object_memory.json")
 
 # -----------------------------
 # Networking
@@ -86,16 +91,16 @@ IDLE_TIMEOUT_S = 20.0   # seconds of inactivity before auto SEARCH
 # LLM / Semantic Enrichment
 # -----------------------------
 # OpenAI model for semantic enrichment of captured objects
-IMAGE_PROCESS_MODEL = "gpt-5-mini"
+IMAGE_PROCESS_MODEL = "gpt-5-nano"
 
 # OpenAI model for task scheduling / planning
-TASK_SCHEDULER_MODEL = "gpt-5-mini"
+TASK_SCHEDULER_MODEL = "gpt-5-nano"
 
 # Number of concurrent LLM worker threads for semantic enrichment
 LLM_WORKERS = 5
 
 # Directory to save captured images (for LLM processing)
-IMAGE_DIR = "captured_images"
+IMAGE_DIR = str (LAPTOP_DIR /"captured_images")
 
 # Timeout for waiting for LLM enrichment to complete before processing user queries (seconds)
 # Set to None to wait forever, or a number for timeout
