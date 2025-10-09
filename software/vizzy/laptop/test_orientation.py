@@ -4,17 +4,24 @@ Test script for orientation detection.
 
 Runs YOLO on camera feed and displays orientation angles for detected objects.
 Press 'q' to quit.
+
+Usage:
+    python test_orientation.py              # Use minrect (default)
+    python test_orientation.py --method pca # Use PCA
+    python test_orientation.py -m moments   # Use moments
 """
 
 import cv2
 import numpy as np
+import argparse
 from ultralytics import YOLO
 from orientation import calculate_grasp_angle, visualize_orientation
 from ..shared import config as C
 
 
-def main():
+def main(method="minrect"):
     print("[Orientation Test] Starting...")
+    print(f"[Orientation Test] Using method: {method}")
     
     # Load YOLO model
     model = YOLO(C.YOLO_MODEL)
@@ -63,7 +70,7 @@ def main():
                     mask_binary = (mask_resized * 255).astype(np.uint8)
                     
                     # Calculate orientation
-                    orientation = calculate_grasp_angle(mask_binary, method="minrect")
+                    orientation = calculate_grasp_angle(mask_binary, method=method)
                     
                     if orientation["success"]:
                         # Draw orientation visualization
@@ -75,14 +82,21 @@ def main():
                         if frame_count % 30 == 0:
                             yaw = orientation["yaw_angle"]
                             confidence = orientation["confidence"]
-                            width = orientation.get("grasp_width_px", 0)
-                            aspect = orientation.get("aspect_ratio", 0)
+                            width = orientation.get("grasp_width_px")
+                            aspect = orientation.get("aspect_ratio")
+                            elongation = orientation.get("elongation")
                             
-                            print(f"[{cls_name}] "
-                                  f"Yaw: {yaw:+6.1f}° | "
-                                  f"Conf: {confidence:.2f} | "
-                                  f"Width: {width:.0f}px | "
-                                  f"Aspect: {aspect:.2f}")
+                            # Build output string
+                            output = f"[{cls_name}] Yaw: {yaw:+6.1f}° | Conf: {confidence:.2f}"
+                            
+                            if width is not None:
+                                output += f" | Width: {width:.0f}px"
+                            if aspect is not None:
+                                output += f" | Aspect: {aspect:.2f}"
+                            if elongation is not None:
+                                output += f" | Elongation: {elongation:.2f}"
+                            
+                            print(output)
                         
                         # Draw bounding box with class name
                         x1, y1, x2, y2 = map(int, box.xyxy[0])
@@ -106,11 +120,12 @@ def main():
                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
         
         # Add instructions
-        cv2.putText(display_frame, "Press 'q' to quit", (10, h - 20),
+        cv2.putText(display_frame, f"Method: {method.upper()} | Press 'q' to quit", 
+                   (10, h - 20),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         # Display
-        cv2.imshow("Orientation Test", display_frame)
+        cv2.imshow(f"Orientation Test - {method.upper()}", display_frame)
         
         # Check for quit
         key = cv2.waitKey(1) & 0xFF
@@ -123,5 +138,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Test orientation detection on live camera feed"
+    )
+    parser.add_argument(
+        "-m", "--method",
+        type=str,
+        default="minrect",
+        choices=["minrect", "pca", "moments"],
+        help="Orientation calculation method (default: minrect)"
+    )
+    
+    args = parser.parse_args()
+    main(method=args.method)
 
