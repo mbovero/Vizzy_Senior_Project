@@ -250,7 +250,7 @@ class StateManager:
             print("[StateManager] WARNING: Failed to read camera frame in IDLE")
             return
 
-        print("[StateManager] Running YOLO inference on IDLE frame...")
+        #print("[StateManager] Running YOLO inference on IDLE frame...") TODO
         try:
             results = self.model(frame, verbose=getattr(C, "YOLO_VERBOSE", False))
         except TypeError:
