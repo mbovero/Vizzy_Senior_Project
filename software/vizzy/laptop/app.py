@@ -363,8 +363,8 @@ class StateManager:
                     for frame in self.frame_bus.drain():
                         last = frame
                         frame_count += 1
-                    if frame_count > 0:
-                        print(f"[StateManager] Drained {frame_count} frame(s) from bus")
+                    # if frame_count > 0:
+                    #     print(f"[StateManager] Drained {frame_count} frame(s) from bus")
                     if last is not None:
                         cv2.imshow("Vizzy (SEARCH)", last)  # reuse one window for all active modes
 
