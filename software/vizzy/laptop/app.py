@@ -99,16 +99,16 @@ class StateManager:
         # NEW: Frame bus for worker->main display handoff
         self.frame_bus = FrameBus(maxsize=4)
 
-        # NEW: LLM worker manager for semantic enrichment
-        print("[StateManager] Initializing LLM memory...")
-        self.llm_memory = ObjectMemory(C.MEM_FILE)
+        # NEW: Shared memory and LLM worker manager
+        print("[StateManager] Initializing object memory...")
+        self.memory = ObjectMemory(C.MEM_FILE)
         print("[StateManager] Initializing LLM worker manager...")
         self.llm_worker = WorkerManager(
-            memory=self.llm_memory,
+            memory=self.memory,
             max_workers=getattr(C, "LLM_WORKERS", 5),
             model=getattr(C, "IMAGE_PROCESS_MODEL", "gpt-5"),
         )
-        print("[StateManager] LLM components initialized (not started yet)")
+        print("[StateManager] Memory and LLM components initialized")
 
     # ------------------------------- Triggers ---------------------------------
 
@@ -151,6 +151,7 @@ class StateManager:
             display_scale=C.DISPLAY_SCALE,
             frame_sink=self.frame_bus.publish,   # NEW: push frames to main thread
             llm_worker=self.llm_worker,          # NEW: LLM worker pool for enrichment
+            memory=self.memory,                  # NEW: Share same memory instance!
         )
         worker.daemon = True
         print("[StateManager] Starting ScanWorker thread...")

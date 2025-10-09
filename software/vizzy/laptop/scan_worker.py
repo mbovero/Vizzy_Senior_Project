@@ -43,6 +43,7 @@ class ScanWorker(threading.Thread):
         display_scale: float = 1.0,
         frame_sink: FrameSink = None,
         llm_worker=None,  # NEW: LLM WorkerManager for semantic enrichment
+        memory=None,  # NEW: Shared ObjectMemory instance
     ):
         super().__init__(name="ScanWorker")
         self.sock = sock
@@ -58,8 +59,8 @@ class ScanWorker(threading.Thread):
         # names map for labels
         self._names = model.names
 
-        # memory
-        self.memory = ObjectMemory(C.MEM_FILE)
+        # Use shared memory instance or create new one (backward compatible)
+        self.memory = memory if memory is not None else ObjectMemory(C.MEM_FILE)
         
         # Image capture directory for LLM processing
         self.image_dir = getattr(C, "IMAGE_DIR", "captured_images")

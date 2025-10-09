@@ -37,8 +37,8 @@ class TaskAgent(threading.Thread):
         self.state_mgr = state_mgr
         self.events = events
 
-        # Local helpers
-        self._memory = ObjectMemory(C.MEM_FILE)
+        # Use shared memory instance from StateManager
+        self._memory = state_mgr.memory
 
         # Task scheduler: uses GPT-5 to convert user requests into structured task lists
         self._scheduler = TaskScheduler(
