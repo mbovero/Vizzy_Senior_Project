@@ -46,12 +46,12 @@ Available command types:
 - RELOCATE: Pick target and place at destination (high-level: PICK + PLACE_TO)
 
 Each task should be a JSON object with:
-{
+{{
   "command": "<COMMAND_TYPE>",
   "target": "<unique_id or [x, y, z]>",
-  "destination": "<unique_id or [x, y, z]>",  // optional, for commands that need it
-  "parameters": { ... }  // optional, for additional command-specific parameters
-}
+  "destination": "<unique_id or [x, y, z]>",
+  "parameters": {{}}
+}}
 
 Rules:
 1. Use unique object IDs (like "0xA1B2C3D4") when referring to known objects from memory
@@ -123,10 +123,22 @@ def _parse_task_list(text: str) -> List[Dict[str, Any]]:
     """
     cand = text.strip()
     
+    print(f"[TaskScheduler] Raw LLM output:\n{text}")
+    
     # Try to extract JSON from code fences
     m = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", cand)
     if m:
         cand = m.group(1)
+        print(f"[TaskScheduler] Extracted from code fence")
+    
+    # Also try to find JSON array without code fences
+    if not m:
+        array_match = re.search(r'\[[\s\S]*\]', cand)
+        if array_match:
+            cand = array_match.group(0)
+            print(f"[TaskScheduler] Found JSON array")
+    
+    print(f"[TaskScheduler] Attempting to parse: {cand[:200]}...")
     
     try:
         tasks = json.loads(cand)
@@ -153,8 +165,10 @@ def _parse_task_list(text: str) -> List[Dict[str, Any]]:
         return valid_tasks
     
     except json.JSONDecodeError as e:
-        print(f"[TaskScheduler] Failed to parse task list: {e}")
-        print(f"[TaskScheduler] Raw output: {text[:500]}")
+        print(f"[TaskScheduler] JSON parsing error: {e}")
+        print(f"[TaskScheduler] Failed at position {e.pos}")
+        print(f"[TaskScheduler] Near: {cand[max(0, e.pos-50):min(len(cand), e.pos+50)]}")
+        print(f"[TaskScheduler] Full output length: {len(text)} chars")
         return []
 
 
@@ -170,10 +184,17 @@ def plan_tasks(user_request: str, memory: ObjectMemory, model: str = TASK_SCHEDU
     Returns:
         List of task dictionaries with commands, targets, and destinations
     """
+    print(f"[plan_tasks] ==> Function called")
+    print(f"[plan_tasks] Request: '{user_request}'")
+    print(f"[plan_tasks] Model: {model}")
+    print(f"[plan_tasks] Memory objects: {len(memory.list_objects())}")
+    
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     
     # Build memory context
+    print("[plan_tasks] Building memory context...")
     memory_context = _build_memory_context(memory)
+    print(f"[plan_tasks] Memory context: {len(memory_context)} chars")
     
     # Format prompt
     prompt = TASK_SCHEDULER_PROMPT.format(
@@ -181,7 +202,7 @@ def plan_tasks(user_request: str, memory: ObjectMemory, model: str = TASK_SCHEDU
         user_request=user_request
     )
     
-    print("[TaskScheduler] Planning tasks...")
+    print("[plan_tasks] Calling OpenAI API...")
     
     try:
         # Call GPT-5 with structured output preference
@@ -196,6 +217,8 @@ def plan_tasks(user_request: str, memory: ObjectMemory, model: str = TASK_SCHEDU
             text={"verbosity": "low"},
         )
         
+        print("[plan_tasks] API call successful, extracting output...")
+        
         # Extract output text
         output = getattr(response, "output_text", None)
         if not output:
@@ -204,8 +227,11 @@ def plan_tasks(user_request: str, memory: ObjectMemory, model: str = TASK_SCHEDU
             except Exception:
                 output = str(response)
         
+        print(f"[plan_tasks] Got output ({len(output)} chars), parsing...")
+        
         # Parse into task list
         tasks = _parse_task_list(output)
+        print(f"[plan_tasks] Parsed {len(tasks)} tasks")
         
         print(f"[TaskScheduler] Generated {len(tasks)} tasks")
         for i, task in enumerate(tasks):
@@ -238,8 +264,14 @@ class TaskScheduler:
         Returns:
             List of task dictionaries
         """
+        print(f"[TaskScheduler.plan] Called with request: '{user_request}'")
+        
         if memory is None:
+            print("[TaskScheduler.plan] ERROR: No memory provided!")
             raise ValueError("TaskScheduler.plan() requires a memory instance")
+        
+        print(f"[TaskScheduler.plan] Memory has {len(memory.list_objects())} objects")
+        print(f"[TaskScheduler.plan] Calling plan_tasks() with model={self.model}")
         
         return plan_tasks(user_request, memory, self.model)
 

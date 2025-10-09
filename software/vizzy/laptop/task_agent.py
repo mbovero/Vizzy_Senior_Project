@@ -123,9 +123,15 @@ class TaskAgent(threading.Thread):
 
             # Produce a plan using the task scheduler (kept internal to TaskAgent)
             try:
+                print(f"[TaskAgent] Processing query: '{user_text}'")
                 # Reload memory to get latest state (including LLM-enriched semantics)
+                print("[TaskAgent] Reloading memory...")
                 self._memory.load()
+                print(f"[TaskAgent] Memory has {len(self._memory.list_objects())} objects")
+                
+                print("[TaskAgent] Calling task scheduler...")
                 plan = self._scheduler.plan(user_text, self._memory)
+                print(f"[TaskAgent] Scheduler returned {len(plan) if plan else 0} tasks")
                 
                 if not plan:
                     print("[TaskAgent] No tasks generated from request")
@@ -135,7 +141,10 @@ class TaskAgent(threading.Thread):
                     continue
                     
             except Exception as e:
-                print(f"[TaskAgent] Planning failed: {e}")
+                import traceback
+                print(f"[TaskAgent] Planning failed with exception: {type(e).__name__}: {e}")
+                print(f"[TaskAgent] Full traceback:")
+                traceback.print_exc()
                 # Return to IDLE and reset idle timer so auto-search can resume later
                 self.state_mgr.state = "IDLE"
                 self._reset_idle_timer()
