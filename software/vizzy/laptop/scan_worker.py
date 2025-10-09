@@ -158,14 +158,18 @@ class ScanWorker(threading.Thread):
     # ------------------------------- main run --------------------------------
 
     def run(self) -> None:
+        print("[ScanWorker] Thread started, initializing scan...")
         # Mark entries as not updated for this session
         self.memory.reset_session_flags()
         self.events.scan_finished.clear()
 
+        print("[ScanWorker] Building search path...")
         path = build_search_path()  # [{"pose_id","pwm_btm","pwm_top","slew_ms"}, ...]
+        print(f"[ScanWorker] Search path has {len(path)} poses")
 
         try:
             # Iterate poses locally; RPi just executes gotos & nudges.
+            print("[ScanWorker] Starting pose iteration...")
             for pose in path:
                 if self.events.scan_abort.is_set():
                     break
@@ -174,18 +178,26 @@ class ScanWorker(threading.Thread):
                 btm = int(pose["pwm_btm"])
                 top = int(pose["pwm_top"])
                 slew = int(pose["slew_ms"])
+                print(f"[ScanWorker] Pose {pid}: BTM={btm}, TOP={top}")
 
                 # Go to baseline pose for this grid point
+                print(f"[ScanWorker] Draining pose_ready queue...")
                 self._drain_pose_ready()
+                print(f"[ScanWorker] Sending GOTO_POSE to RPi...")
                 self.motion.goto_pose_pwm(btm, top, slew_ms=slew, pose_id=pid)
+                print(f"[ScanWorker] Waiting for POSE_READY...")
                 if not self._wait_pose_ready(pid, slew):
                     # If ack missing, proceed cautiously after an extra dwell
+                    print(f"[ScanWorker] No POSE_READY received, settling...")
                     time.sleep(C.POSE_SETTLE_S)
+                else:
+                    print(f"[ScanWorker] POSE_READY received")
 
                 # Per-pose repeat: try to find and center multiple distinct classes
                 successes = 0
                 attempts = 0
                 fails_at_pose: Dict[int, int] = {}
+                print(f"[ScanWorker] Starting scan loop at pose {pid}...")
 
                 while not self.events.scan_abort.is_set():
                     # Exclusions: already updated this session, or too many fails here

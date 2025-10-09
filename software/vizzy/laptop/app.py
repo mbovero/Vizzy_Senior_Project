@@ -122,7 +122,10 @@ class StateManager:
         (Spawns the worker, wires in Motion, and flips scan_active.)
         """
         if self.events.scan_active.is_set():
+            print("[StateManager] Search already active, skipping")
             return
+        
+        print("[StateManager] Starting search cycle...")
         self.events.search_requested.clear()
         self.events.scan_finished.clear()
         self.events.scan_abort.clear()
@@ -133,9 +136,11 @@ class StateManager:
 
         # Ensure we have a Motion façade
         if self.motion is None:
+            print("[StateManager] Creating Motion facade...")
             self.motion = Motion(self.sock, self.mail.pwms_event, self.mail.pwms_payload)
 
         # Hand off the camera to the worker directly; worker pushes frames to frame_bus
+        print("[StateManager] Creating ScanWorker thread...")
         worker = ScanWorker(
             sock=self.sock,
             cap=self.cap,
@@ -148,10 +153,12 @@ class StateManager:
             llm_worker=self.llm_worker,          # NEW: LLM worker pool for enrichment
         )
         worker.daemon = True
+        print("[StateManager] Starting ScanWorker thread...")
         worker.start()
         self.scan_worker = worker
         self.events.scan_active.set()
         self._switch_state("SEARCH")
+        print("[StateManager] Entered SEARCH state, ScanWorker is running")
 
     def finish_search(self) -> None:
         """Handle end-of-grid or manual stop; return to IDLE and reset idle timer."""
@@ -351,8 +358,12 @@ class StateManager:
                             pass
                     # Drain frames from the bus and render the latest one
                     last = None
+                    frame_count = 0
                     for frame in self.frame_bus.drain():
                         last = frame
+                        frame_count += 1
+                    if frame_count > 0:
+                        print(f"[StateManager] Drained {frame_count} frame(s) from bus")
                     if last is not None:
                         cv2.imshow("Vizzy (SEARCH)", last)  # reuse one window for all active modes
 
