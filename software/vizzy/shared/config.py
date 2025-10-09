@@ -81,3 +81,18 @@ POSE_SETTLE_S = 0.30
 
 # Idle/auto-search behavior (laptop)
 IDLE_TIMEOUT_S = 20.0   # seconds of inactivity before auto SEARCH
+
+# -----------------------------
+# LLM / Semantic Enrichment
+# -----------------------------
+# OpenAI model for semantic enrichment of captured objects
+IMAGE_PROCESS_MODEL = "gpt-5"
+
+# OpenAI model for task scheduling / planning
+TASK_SCHEDULER_MODEL = "gpt-5"
+
+# Number of concurrent LLM worker threads for semantic enrichment
+LLM_WORKERS = 5
+
+# Directory to save captured images (for LLM processing)
+IMAGE_DIR = "captured_images"

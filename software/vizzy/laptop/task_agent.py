@@ -20,7 +20,7 @@ from ..shared import config as C
 from .motion import Motion
 from .memory import ObjectMemory
 from . import tasks       # will be added next
-from .gpt_client import GPTClient  # will be added next
+from .llm_task_scheduler import TaskScheduler  # NEW: LLM-based task scheduler
 
 
 class TaskAgent(threading.Thread):
@@ -40,8 +40,10 @@ class TaskAgent(threading.Thread):
         # Local helpers
         self._memory = ObjectMemory(C.MEM_FILE)
 
-        # GPT client: endpoint/key are read by the client (env vars), but it's okay if stubs for now
-        self._gpt = GPTClient()
+        # Task scheduler: uses GPT-5 to convert user requests into structured task lists
+        self._scheduler = TaskScheduler(
+            model=getattr(C, "TASK_SCHEDULER_MODEL", "gpt-5")
+        )
 
         # Motion facade: create if not already provided by StateManager
         if self.state_mgr.motion is None:
@@ -108,9 +110,19 @@ class TaskAgent(threading.Thread):
             # Transition to PROCESS_QUERY (informational; StateManager reads state for UI/telemetry)
             self.state_mgr.state = "PROCESS_QUERY"
 
-            # Produce a plan (kept internal to TaskAgent)
+            # Produce a plan using the task scheduler (kept internal to TaskAgent)
             try:
-                plan = self._gpt.plan(user_text)
+                # Reload memory to get latest state (including LLM-enriched semantics)
+                self._memory.load()
+                plan = self._scheduler.plan(user_text, self._memory)
+                
+                if not plan:
+                    print("[TaskAgent] No tasks generated from request")
+                    self.state_mgr.state = "IDLE"
+                    self._reset_idle_timer()
+                    self.events.query_ready.clear()
+                    continue
+                    
             except Exception as e:
                 print(f"[TaskAgent] Planning failed: {e}")
                 # Return to IDLE and reset idle timer so auto-search can resume later

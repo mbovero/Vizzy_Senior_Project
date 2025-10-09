@@ -42,6 +42,7 @@ class ScanWorker(threading.Thread):
         motion: Motion,
         display_scale: float = 1.0,
         frame_sink: FrameSink = None,
+        llm_worker=None,  # NEW: LLM WorkerManager for semantic enrichment
     ):
         super().__init__(name="ScanWorker")
         self.sock = sock
@@ -52,12 +53,18 @@ class ScanWorker(threading.Thread):
         self.motion = motion
         self.display_scale = float(display_scale)
         self.frame_sink = frame_sink
+        self.llm_worker = llm_worker  # NEW: LLM worker pool for semantic enrichment
 
         # names map for labels
         self._names = model.names
 
         # memory
         self.memory = ObjectMemory(C.MEM_FILE)
+        
+        # Image capture directory for LLM processing
+        self.image_dir = getattr(C, "IMAGE_DIR", "captured_images")
+        import os
+        os.makedirs(self.image_dir, exist_ok=True)
 
         # frame center (set from a fresh read; fallback to last known if needed)
         ok, frame0 = self.cap.read()
@@ -102,6 +109,51 @@ class ScanWorker(threading.Thread):
             except Exception:
                 pass
         return False
+
+    def _capture_and_enrich(self, object_id: str) -> Optional[str]:
+        """
+        Capture the current centered frame, save it, upload to OpenAI, and submit to LLM worker.
+        This is non-blocking - the LLM processing happens asynchronously in the worker pool.
+        
+        Args:
+            object_id: The unique object ID to enrich
+        
+        Returns:
+            Path to the saved image, or None on failure
+        """
+        if self.llm_worker is None:
+            return None
+        
+        import os
+        from .llm_semantics import upload_image
+        
+        try:
+            # Capture current centered frame
+            ok, frame = self.cap.read()
+            if not ok:
+                print(f"[ScanWorker] Failed to capture image for {object_id}")
+                return None
+            
+            # Save image to disk with timestamp
+            timestamp = int(time.time() * 1000)
+            image_filename = f"{object_id}_{timestamp}.jpg"
+            image_path = os.path.join(self.image_dir, image_filename)
+            cv2.imwrite(image_path, frame)
+            print(f"[ScanWorker] Captured image: {image_path}")
+            
+            # Upload to OpenAI
+            file_id = upload_image(image_path)
+            print(f"[ScanWorker] Uploaded image {image_path} -> file_id={file_id}")
+            
+            # Submit to LLM worker pool (non-blocking - returns immediately)
+            uid, fut = self.llm_worker.submit(object_id=object_id, file_id=file_id)
+            print(f"[ScanWorker] Submitted enrichment task {uid[:8]} for {object_id}")
+            
+            return image_path
+        
+        except Exception as e:
+            print(f"[ScanWorker] Error capturing/enriching image for {object_id}: {e}")
+            return None
 
     # ------------------------------- main run --------------------------------
 
@@ -190,15 +242,31 @@ class ScanWorker(threading.Thread):
 
                     if success:
                         successes += 1
-                        # While still centered, ask for PWMs and update memory
+                        # While still centered, ask for PWMs and create object in memory
                         pwms = self.motion.get_pwms(timeout_s=0.3)
                         if pwms:
-                            self.memory.update_entry(
+                            # Create object entry with unique ID (returns the object_id)
+                            object_id = self.memory.update_entry(
                                 cls_id=cls_id,
                                 cls_name=candidate.get("cls_name", self._get_name(cls_id)),
                                 pwm_btm=int(pwms["pwm_btm"]),
                                 pwm_top=int(pwms["pwm_top"]),
+                                x=0.0,  # TODO: Calculate from IK
+                                y=0.0,  # TODO: Calculate from IK
+                                z=0.0,  # TODO: Read from laser sensor
                             )
+                            
+                            # Capture image and submit for LLM enrichment (non-blocking)
+                            # The LLM worker will process this asynchronously and update semantics
+                            image_path = self._capture_and_enrich(object_id)
+                            
+                            # Update object with image path if capture succeeded
+                            if image_path and object_id:
+                                obj = self.memory.get_object(object_id)
+                                if obj:
+                                    obj["image_path"] = image_path
+                                    self.memory.data["objects"][object_id] = obj
+                                    self.memory.save()
                     else:
                         # Track failures to avoid infinite loops on hard cases
                         fails_at_pose[cls_id] = fails_at_pose.get(cls_id, 0) + 1

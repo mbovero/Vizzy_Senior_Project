@@ -28,6 +28,10 @@ from ..shared import protocol as P
 # NEW: frame bus for cross-thread rendering
 from .display_bus import FrameBus
 
+# NEW: LLM worker manager for semantic enrichment
+from .llm_worker import WorkerManager
+from .memory import ObjectMemory
+
 StateName = Literal["IDLE", "SEARCH", "PROCESS_QUERY", "EXECUTE_TASK", "INTERRUPT"]
 
 
@@ -95,6 +99,14 @@ class StateManager:
         # NEW: Frame bus for worker->main display handoff
         self.frame_bus = FrameBus(maxsize=4)
 
+        # NEW: LLM worker manager for semantic enrichment
+        self.llm_memory = ObjectMemory(C.MEM_FILE)
+        self.llm_worker = WorkerManager(
+            memory=self.llm_memory,
+            max_workers=getattr(C, "LLM_WORKERS", 5),
+            model=getattr(C, "IMAGE_PROCESS_MODEL", "gpt-5"),
+        )
+
     # ------------------------------- Triggers ---------------------------------
 
     def request_search(self, reason: str = "idle") -> None:
@@ -130,6 +142,7 @@ class StateManager:
             motion=self.motion,
             display_scale=C.DISPLAY_SCALE,
             frame_sink=self.frame_bus.publish,   # NEW: push frames to main thread
+            llm_worker=self.llm_worker,          # NEW: LLM worker pool for enrichment
         )
         worker.daemon = True
         worker.start()
@@ -250,6 +263,9 @@ class StateManager:
 
     def start(self) -> None:
         """Start background threads and enter the FSM main loop."""
+        # Start LLM worker manager
+        self.llm_worker.start()
+        
         # Start receiver (network)
         self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self.receiver_thread.start()
@@ -324,6 +340,13 @@ class StateManager:
                 time.sleep(0.01)
 
         finally:
+            # Stop LLM worker gracefully
+            try:
+                print("[Laptop] Stopping LLM worker...")
+                self.llm_worker.stop(wait=True)
+            except Exception as e:
+                print(f"[Laptop] Error stopping LLM worker: {e}")
+            
             try:
                 send_json(self.sock, {"type": P.TYPE_STOP})
             except Exception:
