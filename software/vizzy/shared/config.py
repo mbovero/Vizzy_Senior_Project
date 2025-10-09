@@ -86,10 +86,10 @@ IDLE_TIMEOUT_S = 20.0   # seconds of inactivity before auto SEARCH
 # LLM / Semantic Enrichment
 # -----------------------------
 # OpenAI model for semantic enrichment of captured objects
-IMAGE_PROCESS_MODEL = "gpt-5"
+IMAGE_PROCESS_MODEL = "gpt-5-mini"
 
 # OpenAI model for task scheduling / planning
-TASK_SCHEDULER_MODEL = "gpt-5"
+TASK_SCHEDULER_MODEL = "gpt-5-mini"
 
 # Number of concurrent LLM worker threads for semantic enrichment
 LLM_WORKERS = 5
