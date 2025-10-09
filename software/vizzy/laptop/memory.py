@@ -65,6 +65,19 @@ class ObjectMemory:
                 print(f"[Memory] Failed to load {self.path}: {e}")
                 self.data = {"objects": {}, "class_index": {}}
 
+    def _save_unlocked(self) -> None:
+        """
+        Internal save method that does NOT acquire the lock.
+        Should only be called when lock is already held.
+        """
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, indent=2, sort_keys=True)
+            os.replace(tmp, self.path)
+        except Exception as e:
+            print(f"[Memory] Failed to save {self.path}: {e}")
+
     def save(self) -> None:
         """
         Save current data to disk atomically:
@@ -72,13 +85,7 @@ class ObjectMemory:
         - Replace the original file to avoid partial writes
         """
         with self._lock:
-            tmp = self.path + ".tmp"
-            try:
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(self.data, f, indent=2, sort_keys=True)
-                os.replace(tmp, self.path)
-            except Exception as e:
-                print(f"[Memory] Failed to save {self.path}: {e}")
+            self._save_unlocked()
 
     @staticmethod
     def _new_object_id() -> str:
@@ -93,7 +100,7 @@ class ObjectMemory:
         with self._lock:
             for obj in self.data.get("objects", {}).values():
                 obj["updated_this_session"] = 0
-            self.save()
+            self._save_unlocked()  # Use unlocked version since we hold the lock
 
     def prune_not_updated(self) -> None:
         """
@@ -119,7 +126,7 @@ class ObjectMemory:
             
             # Rebuild class index
             self._rebuild_class_index()
-            self.save()
+            self._save_unlocked()  # Use unlocked version since we hold the lock
 
     def _rebuild_class_index(self) -> None:
         """Rebuild the class_index from current objects."""
@@ -187,7 +194,7 @@ class ObjectMemory:
             cls_id_str = str(cls_id)
             self.data.setdefault("class_index", {}).setdefault(cls_id_str, []).append(oid)
             
-            self.save()
+            self._save_unlocked()  # Use unlocked version since we hold the lock
             return oid
 
     def update_entry(
@@ -235,7 +242,7 @@ class ObjectMemory:
                 sem.update(semantics or {})
                 obj["semantics"] = sem
                 objects[object_id] = obj
-                self.save()
+                self._save_unlocked()  # Use unlocked version since we hold the lock
             else:
                 print(f"[Memory] Warning: Cannot update semantics for unknown object {object_id}")
 
