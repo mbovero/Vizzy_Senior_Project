@@ -236,18 +236,23 @@ class StateManager:
     def _run_idle_preview_once(self) -> None:
         ok, frame = self.cap.read()
         if not ok:
+            print("[StateManager] WARNING: Failed to read camera frame in IDLE")
             return
 
         try:
             results = self.model(frame, verbose=getattr(C, "YOLO_VERBOSE", False))
         except TypeError:
             results = self.model(frame)
+        except Exception as e:
+            print(f"[StateManager] WARNING: YOLO inference failed: {e}")
+            results = []
 
         annotated = frame
         try:
             for r in results:
                 annotated = r.plot()
-        except Exception:
+        except Exception as e:
+            print(f"[StateManager] WARNING: YOLO plot failed: {e}")
             pass
 
         secs_left = max(0.0, self.idle_deadline - time.time())
@@ -257,7 +262,8 @@ class StateManager:
 
         h, w = annotated.shape[:2]
         resized = cv2.resize(annotated, (int(w * C.DISPLAY_SCALE), int(h * C.DISPLAY_SCALE)))
-        cv2.imshow("Vizzy (IDLE Preview)", resized)
+        # Route all GUI frames through the display bus
+        self.frame_bus.publish(resized)
 
     # ------------------------------ Main loop --------------------------------
 
@@ -313,7 +319,14 @@ class StateManager:
                             cv2.destroyWindow("Vizzy (SEARCH)")
                         except Exception:
                             pass
+                    # Publish an IDLE frame via the display bus
                     self._run_idle_preview_once()
+                    # Drain and display the latest IDLE frame on main thread
+                    last = None
+                    for frame in self.frame_bus.drain():
+                        last = frame
+                    if last is not None:
+                        cv2.imshow("Vizzy (IDLE Preview)", last)
 
                 elif self.state in ("SEARCH", "EXECUTE_TASK"):
                     # Close IDLE window when entering an active view
