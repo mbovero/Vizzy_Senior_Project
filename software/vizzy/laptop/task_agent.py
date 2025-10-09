@@ -106,6 +106,17 @@ class TaskAgent(threading.Thread):
                 # Wait with small ticks so we remain responsive
                 while self.events.scan_active.is_set() and not self._stop:
                     time.sleep(0.05)
+            
+            # Wait for LLM enrichment to complete
+            if self.state_mgr.llm_worker:
+                pending = self.state_mgr.llm_worker.get_pending_count()
+                if pending > 0:
+                    print(f"[TaskAgent] Waiting for {pending} LLM enrichment task(s) to complete...")
+                    # Wait up to 30 seconds for enrichment (configurable)
+                    timeout = getattr(C, "LLM_COMPLETION_TIMEOUT", 30.0)
+                    completed = self.state_mgr.llm_worker.wait_for_completion(timeout=timeout)
+                    if not completed:
+                        print("[TaskAgent] Warning: Some enrichment tasks still pending, proceeding anyway...")
 
             # Transition to PROCESS_QUERY (informational; StateManager reads state for UI/telemetry)
             self.state_mgr.state = "PROCESS_QUERY"

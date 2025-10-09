@@ -96,6 +96,41 @@ class WorkerManager:
         self._executor.shutdown(wait=wait)
         print("[LLM WorkerManager] Stopped")
 
+    def wait_for_completion(self, timeout: float = None) -> bool:
+        """
+        Wait for all currently pending LLM tasks to complete.
+        
+        Args:
+            timeout: Maximum time to wait in seconds (None = wait forever)
+        
+        Returns:
+            True if all tasks completed, False if timeout
+        """
+        import time
+        start = time.time()
+        
+        print(f"[LLM WorkerManager] Waiting for {len(self._pending)} pending enrichment task(s)...")
+        
+        while self._pending:
+            if timeout and (time.time() - start) > timeout:
+                print(f"[LLM WorkerManager] Timeout waiting for enrichment (still {len(self._pending)} pending)")
+                return False
+            time.sleep(0.1)
+        
+        # Also wait for queue to empty
+        while not self._queue.empty():
+            if timeout and (time.time() - start) > timeout:
+                print(f"[LLM WorkerManager] Timeout waiting for queue to empty")
+                return False
+            time.sleep(0.1)
+        
+        print("[LLM WorkerManager] All enrichment tasks completed")
+        return True
+    
+    def get_pending_count(self) -> int:
+        """Return the number of pending enrichment tasks."""
+        return len(self._pending) + self._queue.qsize()
+
     def submit(self, *, object_id: str, file_id: str) -> Tuple[str, cf.Future]:
         """
         Submit a semantic enrichment task.

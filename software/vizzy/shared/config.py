@@ -96,3 +96,7 @@ LLM_WORKERS = 5
 
 # Directory to save captured images (for LLM processing)
 IMAGE_DIR = "captured_images"
+
+# Timeout for waiting for LLM enrichment to complete before processing user queries (seconds)
+# Set to None to wait forever, or a number for timeout
+LLM_COMPLETION_TIMEOUT = 30.0
