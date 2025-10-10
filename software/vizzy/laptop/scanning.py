@@ -136,7 +136,7 @@ def run_scan_window(
     publishing YOLO-annotated frames to the main thread.
     """
     if display_scale is None:
-        display_scale = float(getattr(C, "DISPLAY_SCALE", 1.0))
+        display_scale = float(C.DISPLAY_SCALE)
 
     exclude: Set[int] = set(int(e) for e in (exclude_ids or []))
     t0 = time.time()
@@ -146,7 +146,7 @@ def run_scan_window(
     per_class_cx: Dict[int, List[int]] = {}
     per_class_cy: Dict[int, List[int]] = {}
 
-    window_ms = int(getattr(C, "SCAN_DURATION_MS", 800))
+    window_ms = int(C.SCAN_DURATION_MS)
     hud_text = f"SCANNING ~{window_ms} ms"
     duration_s = float(window_ms) / 1000.0
 

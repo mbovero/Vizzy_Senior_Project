@@ -137,7 +137,13 @@ class StateManager:
         # Ensure we have a Motion façade
         if self.motion is None:
             print("[StateManager] Creating Motion facade...")
-            self.motion = Motion(self.sock, self.mail.pwms_event, self.mail.pwms_payload)
+            self.motion = Motion(
+                self.sock,
+                self.mail.pose_ready_q,
+                self.mail.pwms_event,
+                self.mail.pwms_payload,
+                abort_event=self.events.scan_abort,
+            )
 
         # Hand off the camera to the worker directly; worker pushes frames to frame_bus
         print("[StateManager] Creating ScanWorker thread...")

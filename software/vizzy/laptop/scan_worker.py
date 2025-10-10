@@ -74,6 +74,7 @@ class ScanWorker(threading.Thread):
             self.center_x, self.center_y = w0 // 2, h0 // 2
         else:
             self.center_x, self.center_y = 640 // 2, 480 // 2
+        self._centering_active = False
 
     # ------------------------------- helpers ---------------------------------
 
@@ -85,31 +86,6 @@ class ScanWorker(threading.Thread):
             return str(names[int(cid)])
         except Exception:
             return str(cid)
-
-    def _drain_pose_ready(self) -> None:
-        """Clear any stale POSE_READY ids in the mailbox queue."""
-        try:
-            while True:
-                _ = self.mail.pose_ready_q.get_nowait()
-        except Exception:
-            pass
-
-    def _wait_pose_ready(self, expected_id: Optional[int], slew_ms: int) -> bool:
-        """
-        Wait for a TYPE_POSE_READY ack. If expected_id is not None, only return
-        True when that id is seen; otherwise accept the first ack.
-        Timeout is derived from the motion duration plus settle.
-        """
-        t_deadline = time.time() + (slew_ms / 1000.0) + C.POSE_SETTLE_S + 1.5
-        while time.time() < t_deadline and not self.events.scan_abort.is_set():
-            try:
-                pid = self.mail.pose_ready_q.get(timeout=0.05)
-                if expected_id is None or int(pid) == int(expected_id):
-                    return True
-                # else: ignore mismatched acks (could be late from a prior goto)
-            except Exception:
-                pass
-        return False
 
     def _capture_and_enrich(self, object_id: str) -> Optional[str]:
         """
@@ -156,6 +132,14 @@ class ScanWorker(threading.Thread):
             print(f"[ScanWorker] Error capturing/enriching image for {object_id}: {e}")
             return None
 
+    def _flush_capture(self, frames: int = 5) -> None:
+        """Drop buffered frames so fresh scans reflect the baseline pose."""
+        try:
+            for _ in range(max(0, frames)):
+                self.cap.grab()
+        except Exception:
+            pass
+
     # ------------------------------- main run --------------------------------
 
     def run(self) -> None:
@@ -178,21 +162,17 @@ class ScanWorker(threading.Thread):
                 pid = int(pose["pose_id"])
                 btm = int(pose["pwm_btm"])
                 top = int(pose["pwm_top"])
-                slew = int(pose["slew_ms"])
-                print(f"[ScanWorker] Pose {pid}: BTM={btm}, TOP={top}")
+                print(f"[ScanWorker] Pose {pid}: BTM={btm}, TOP={top}, SLEW={pose.get('slew_ms')}")
 
                 # Go to baseline pose for this grid point
-                print(f"[ScanWorker] Draining pose_ready queue...")
-                self._drain_pose_ready()
                 print(f"[ScanWorker] Sending GOTO_POSE to RPi...")
-                self.motion.goto_pose_pwm(btm, top, slew_ms=slew, pose_id=pid)
-                print(f"[ScanWorker] Waiting for POSE_READY...")
-                if not self._wait_pose_ready(pid, slew):
+                ok = self.motion.goto_pose_pwm(btm, top, pose_id=pid)
+                if ok:
+                    print(f"[ScanWorker] POSE_READY received")
+                else:
                     # If ack missing, proceed cautiously after an extra dwell
                     print(f"[ScanWorker] No POSE_READY received, settling...")
                     time.sleep(C.POSE_SETTLE_S)
-                else:
-                    print(f"[ScanWorker] POSE_READY received")
 
                 # Per-pose repeat: try to find and center multiple distinct classes
                 successes = 0
@@ -200,7 +180,15 @@ class ScanWorker(threading.Thread):
                 fails_at_pose: Dict[int, int] = {}
                 print(f"[ScanWorker] Starting scan loop at pose {pid}...")
 
+                # Ensure we start each scan loop with fresh frames from the baseline pose
+                self._flush_capture()
+
                 while not self.events.scan_abort.is_set():
+                    if self._centering_active:
+                        # Defensive: should never run when centering flag is set.
+                        time.sleep(0.01)
+                        continue
+
                     # Exclusions: already updated this session, or too many fails here
                     exclude_ids = [int(e["cls_id"]) for e in self.memory.entries_sorted()
                                    if e.get("updated_this_session") == 1]
@@ -239,6 +227,7 @@ class ScanWorker(threading.Thread):
                     label = f"CENTER {candidate.get('cls_name', self._get_name(cls_id))} (id {cls_id})"
 
                     # Centering loop; this owns the HUD during SEARCH
+                    self._centering_active = True
                     success = bool(
                         center_on_class(
                             cap=self.cap,
@@ -252,6 +241,7 @@ class ScanWorker(threading.Thread):
                             frame_sink=self.frame_sink,
                         )
                     )
+                    self._centering_active = False
 
                     if success:
                         successes += 1
@@ -285,14 +275,11 @@ class ScanWorker(threading.Thread):
                         fails_at_pose[cls_id] = fails_at_pose.get(cls_id, 0) + 1
 
                     # --- Always return to the baseline pose before next attempt ---
-                    self._drain_pose_ready()
-                    self.motion.goto_pose_pwm(
-                        btm, top,
-                        slew_ms=C.GOTO_POSE_SLEW_MS,
-                        pose_id=pid
-                    )
-                    _ = self._wait_pose_ready(pid, C.GOTO_POSE_SLEW_MS)
+                    returned = self.motion.goto_pose_pwm(btm, top, pose_id=pid)
+                    if not returned:
+                        print("[ScanWorker] RETURN pose ack missing or aborted; continuing after settle...")
                     time.sleep(C.RETURN_TO_POSE_DWELL_S)
+                    self._flush_capture()
 
                 # end while per-pose
 
