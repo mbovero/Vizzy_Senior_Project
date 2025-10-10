@@ -16,21 +16,18 @@ import numpy as np
 import argparse
 from ultralytics import YOLO
 from orientation import calculate_grasp_angle, visualize_orientation
-from ..shared import config as C
-
 
 def main(method="minrect"):
     print("[Orientation Test] Starting...")
     print(f"[Orientation Test] Using method: {method}")
     
     # Load YOLO model
-    model = YOLO(C.YOLO_MODEL)
-    print(f"[Orientation Test] Loaded YOLO model: {C.YOLO_MODEL}")
+    model = YOLO("yolo11m-seg.engine")
     
     # Open camera
-    cap = cv2.VideoCapture(C.CAM_INDEX)
+    cap = cv2.VideoCapture(4)
     if not cap.isOpened():
-        print(f"[Orientation Test] ERROR: Cannot open camera {C.CAM_INDEX}")
+        print(f"[Orientation Test] ERROR: Cannot open camera ")
         return
     
     print(f"[Orientation Test] Camera opened. Press 'q' to quit.")
@@ -87,7 +84,7 @@ def main(method="minrect"):
                             elongation = orientation.get("elongation")
                             
                             # Build output string
-                            output = f"[{cls_name}] Yaw: {yaw:+6.1f}° | Conf: {confidence:.2f}"
+                            output = f"[{cls_name}] Yaw: {yaw:+6.1f} | Conf: {confidence:.2f}"
                             
                             if width is not None:
                                 output += f" | Width: {width:.0f}px"
