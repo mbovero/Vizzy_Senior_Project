@@ -109,8 +109,9 @@ class TaskAgent(threading.Thread):
                 while self.events.scan_active.is_set() and not self._stop:
                     time.sleep(0.05)
             
-            # Wait for LLM enrichment to complete
-            if self.state_mgr.llm_worker:
+            # Wait for LLM enrichment to complete (skip if directly accessing task scheduler)
+            skip_scan = getattr(C, "SKIP_TO_TASK_SCHEDULER", False)
+            if not skip_scan and self.state_mgr.llm_worker:
                 pending = self.state_mgr.llm_worker.get_pending_count()
                 if pending > 0:
                     print(f"[TaskAgent] Waiting for {pending} LLM enrichment task(s) to complete...")
@@ -119,6 +120,8 @@ class TaskAgent(threading.Thread):
                     completed = self.state_mgr.llm_worker.wait_for_completion(timeout=timeout)
                     if not completed:
                         print("[TaskAgent] Warning: Some enrichment tasks still pending, proceeding anyway...")
+            elif skip_scan:
+                print("[TaskAgent] SKIP_TO_TASK_SCHEDULER: Using existing memory, skipping enrichment wait")
 
             # Transition to PROCESS_QUERY (informational; StateManager reads state for UI/telemetry)
             self.state_mgr.state = "PROCESS_QUERY"
@@ -134,6 +137,9 @@ class TaskAgent(threading.Thread):
                 print("[TaskAgent] Calling task scheduler...")
                 plan = self._scheduler.plan(user_text, self._memory)
                 print(f"[TaskAgent] Scheduler returned {len(plan) if plan else 0} tasks")
+                
+                # Save the plan to a file for verification
+                self._save_plan_to_file(user_text, plan)
                 
                 if not plan:
                     print("[TaskAgent] No tasks generated from request")
@@ -180,3 +186,25 @@ class TaskAgent(threading.Thread):
     def _reset_idle_timer(self) -> None:
         """After handling a query, restart the IDLE timeout so SEARCH can auto-trigger later."""
         self.state_mgr.idle_deadline = time.time() + getattr(C, "IDLE_TIMEOUT_S", 45.0)
+    
+    def _save_plan_to_file(self, user_query: str, plan: list) -> None:
+        """Save the task scheduler output to a file for verification."""
+        import json
+        from datetime import datetime
+        
+        output_file = getattr(C, "TASK_SCHEDULER_OUTPUT_FILE", "task_scheduler_output.json")
+        
+        output_data = {
+            "timestamp": datetime.now().isoformat(),
+            "user_query": user_query,
+            "plan": plan,
+            "num_tasks": len(plan) if plan else 0,
+            "memory_objects": len(self._memory.list_objects())
+        }
+        
+        try:
+            with open(output_file, 'w') as f:
+                json.dump(output_data, f, indent=2)
+            print(f"[TaskAgent] Plan saved to: {output_file}")
+        except Exception as e:
+            print(f"[TaskAgent] Warning: Failed to save plan to file: {e}")

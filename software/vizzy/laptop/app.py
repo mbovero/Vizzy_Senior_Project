@@ -121,6 +121,11 @@ class StateManager:
         Spawn a ScanWorker and set scan_active if not already scanning.
         (Spawns the worker, wires in Motion, and flips scan_active.)
         """
+        # Don't start scan worker if we're skipping scan cycle
+        if getattr(C, "SKIP_TO_TASK_SCHEDULER", False) or getattr(C, "SKIP_SCAN_CYCLE", False):
+            print("[StateManager] Scan cycle skipped, scan worker will not run")
+            return
+            
         if self.events.scan_active.is_set():
             print("[StateManager] Search already active, skipping")
             return
@@ -317,6 +322,29 @@ class StateManager:
     def run(self) -> None:
         """Small FSM: IDLE preview + timers; kicks off SEARCH when requested."""
         print("[StateManager] Main loop started, entering IDLE state")
+        
+        # Check if SKIP_TO_TASK_SCHEDULER or SKIP_SCAN_CYCLE is enabled
+        if getattr(C, "SKIP_TO_TASK_SCHEDULER", False) or getattr(C, "SKIP_SCAN_CYCLE", False):
+            skip_mode = "TASK_SCHEDULER_ONLY" if getattr(C, "SKIP_TO_TASK_SCHEDULER", False) else "SKIP_SCAN"
+            print("="*70)
+            print(f"[StateManager] {skip_mode} MODE")
+            print("[StateManager] Bypassing scan cycle - using existing object memory")
+            print("[StateManager] Memory will NOT be cleared")
+            print("[StateManager] Ready for user queries...")
+            print("="*70)
+            # Skip scan cycle, just wait for user input - memory persists
+            while True:
+                time.sleep(0.1)
+                # Display any frames from task execution
+                while True:
+                    try:
+                        frame = self.frame_bus.get_nowait()
+                        cv2.imshow("Vizzy (Task Scheduler)", frame)
+                        cv2.waitKey(1)
+                    except Exception:
+                        break
+            return
+        
         try:
             while True:
                 now = time.time()

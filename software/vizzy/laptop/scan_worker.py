@@ -260,16 +260,20 @@ class ScanWorker(threading.Thread):
                             )
                             
                             # Capture image and submit for LLM enrichment (non-blocking)
-                            # The LLM worker will process this asynchronously and update semantics
-                            image_path = self._capture_and_enrich(object_id)
-                            
-                            # Update object with image path if capture succeeded
-                            if image_path and object_id:
-                                obj = self.memory.get_object(object_id)
-                                if obj:
-                                    obj["image_path"] = image_path
-                                    self.memory.data["objects"][object_id] = obj
-                                    self.memory.save()
+                            # Skip if SKIP_SEMANTIC_ENRICHMENT is enabled
+                            if not getattr(C, "SKIP_SEMANTIC_ENRICHMENT", False):
+                                # The LLM worker will process this asynchronously and update semantics
+                                image_path = self._capture_and_enrich(object_id)
+                                
+                                # Update object with image path if capture succeeded
+                                if image_path and object_id:
+                                    obj = self.memory.get_object(object_id)
+                                    if obj:
+                                        obj["image_path"] = image_path
+                                        self.memory.data["objects"][object_id] = obj
+                                        self.memory.save()
+                            else:
+                                print(f"[ScanWorker] Skipping semantic enrichment (SKIP_SEMANTIC_ENRICHMENT enabled)")
                     else:
                         # Track failures to avoid infinite loops on hard cases
                         fails_at_pose[cls_id] = fails_at_pose.get(cls_id, 0) + 1

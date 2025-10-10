@@ -105,3 +105,11 @@ IMAGE_DIR = str (LAPTOP_DIR /"captured_images")
 # Timeout for waiting for LLM enrichment to complete before processing user queries (seconds)
 # Set to None to wait forever, or a number for timeout
 LLM_COMPLETION_TIMEOUT = 30.0
+
+# Operation mode flags (can be set via interactive menu or manually)
+SKIP_TO_TASK_SCHEDULER = False  # Skip to task scheduler only (testing mode)
+SKIP_SCAN_CYCLE = False          # Skip scan cycle, use existing memory
+SKIP_SEMANTIC_ENRICHMENT = False # Skip LLM semantic enrichment
+
+# Output file for LLM task scheduler results (for verification)
+TASK_SCHEDULER_OUTPUT_FILE = str(LAPTOP_DIR / "task_scheduler_output.json")
