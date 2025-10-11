@@ -40,8 +40,8 @@ class C:
     SERVO_TOP = 6   # was 17
 
     # Pulse width bounds (µs)
-    SERVO_MIN    = 1000
-    SERVO_MAX    = 2000
+    SERVO_MIN    = 600
+    SERVO_MAX    = 2500
     SERVO_CENTER = 1500
 
     # Networking (Laptop connects to the Pi at this host/port)
@@ -85,14 +85,12 @@ init_servos(pi)
 # ---------------------------- JSONL helpers -----------------------------
 
 def send_json(sock: socket.socket, obj: dict) -> None:
-    data = (json.dumps(obj, separators=(",", ":")) + "").encode("utf-8")
+    data = (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
     sock.sendall(data)
 
 
-def recv_lines(sock: socket.socket, buf: bytes) -> tuple[list[dict], bytes, bool]:
-    """Read available data, split by newlines into JSON objects.
-    Returns (messages, remaining_buffer, closed)
-    """
+def recv_lines(sock: socket.socket, buf: bytes):
+    """Return (messages, remaining_buffer, closed). Robust to partial reads."""
     closed = False
     try:
         chunk = sock.recv(4096)
@@ -104,17 +102,21 @@ def recv_lines(sock: socket.socket, buf: bytes) -> tuple[list[dict], bytes, bool
     except ConnectionResetError:
         return [], buf, True
 
-    lines = buf.split(b"")
-    buf = lines.pop()  # remainder (possibly partial)
-
-    msgs: list[dict] = []
-    for ln in lines:
-        if not ln:
-            continue
+    msgs = []
+    while True:
+        i = buf.find(b"\n")
+        if i == -1:
+            break  # no full line yet
+        line = buf[:i]
+        buf = buf[i+1:]
+        if not line:
+            continue  # skip empty lines
         try:
-            msgs.append(json.loads(ln.decode("utf-8")))
-        except Exception:
-            msgs.append({"type": "ERR", "error": "bad json", "raw": ln.decode("utf-8", "replace")})
+            # Decode strictly; if it fails, report an error frame
+            obj = json.loads(line.decode("utf-8"))
+            msgs.append(obj)
+        except Exception as e:
+            msgs.append({"type": "ERR", "error": f"bad json ({e})", "raw": line.decode("utf-8", "replace")})
     return msgs, buf, closed
 
 
