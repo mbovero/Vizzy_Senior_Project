@@ -1,129 +1,201 @@
 # vizzy/rpi/dispatch.py
-# -----------------------------------------------------------------------------
-# Purpose
-#   This module defines the **central message dispatcher** for the Raspberry Pi
-#   side of the Vizzy robotic arm project.
-#
-# Why this exists
-#   - All messages from the laptop (received over the TCP socket) come through
-#     here for interpretation and action.
-#   - This function decides what each message means and which part of the Pi's
-#     code should handle it.
-#
-# How it fits into the project
-#   - The Pi's server receives raw JSON messages from the laptop (via jsonl.py).
-#   - These messages are passed here to `process_messages`, which:
-#       * Updates global state flags (search/centering)
-#       * Moves servos directly when appropriate
-#       * Handles centering completion notifications
-#       * Saves YOLO scan results
-#       * Processes "go to position" commands
-#   - This is the main **control switchboard** for the Pi.
-#
-# Key points for understanding:
-#   - Messages can either be "type" messages (P.TYPE_...) or "command" messages
-#     (P.CMD_...).
-#   - Some commands are ignored when the Pi is busy searching or centering.
-#   - The function returns a tuple of information so the caller can act on it:
-#       (stop_requested, center_done_cls, center_success, center_diag, yolo_results)
-# -----------------------------------------------------------------------------
-
 from __future__ import annotations
-from typing import Tuple, Optional
+
+import time
+from typing import Iterable
+
 from ..shared import protocol as P
+from ..shared import config as C
+from ..shared.jsonl import send_json
+
 from . import state
 from .servo import move_servos, goto_pwms
 
-def process_messages(pi, msgs, debug: bool
-                     ) -> Tuple[bool, Optional[int], Optional[bool], Optional[dict], Optional[dict]]:
+
+def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False) -> bool:
     """
-    Process a list of incoming messages from the laptop.
-
-    Args:
-        pi: pigpio instance controlling the servos.
-        msgs: List of decoded JSON messages from the socket.
-        debug: If True, print extra details about actions taken.
-
+    Dispatch a batch of messages from the laptop.
     Returns:
-        A tuple of:
-          stop (bool)               - True if a stop command was received.
-          center_done_cls (int|None)- Class ID of object just centered on, if any.
-          center_success (bool|None)- True if centering was verified as successful.
-          center_diag (dict|None)   - Optional diagnostic data from centering.
-          yolo_results (dict|None)  - Latest YOLO scan results, if any.
+        stop (bool): True if the server should stop and exit.
     """
-    stop = False  # flag: should the search loop stop?
-    center_done_cls: Optional[int] = None
-    center_success: Optional[bool] = None
-    center_diag: Optional[dict] = None
-    yolo_results: Optional[dict] = None
+    stop = False
 
-    # Loop through each message in the batch
-    for msg in msgs:
-        mtype = msg.get("type")  # event type (e.g., TYPE_MOVE)
-        mcmd  = msg.get("cmd")   # request command (e.g., CMD_GOTO_PWMS)
+    for msg in messages:
+        mtype = msg.get("type")
+        mcmd  = msg.get("cmd")
 
-        # -------------------------------------------------
-        # TYPE_MOVE: joystick-like incremental servo control
-        # -------------------------------------------------
-        if mtype == P.TYPE_MOVE:
-            # Only allow servo motion if we're centering OR not searching
-            if state.centering_active.is_set() or not state.search_active.is_set():
-                move_servos(pi,
-                            msg.get("horizontal", 0.0),  # horizontal move amount (-1..1)
-                            msg.get("vertical", 0.0))    # vertical move amount (-1..1)
+        # ---------------------- TYPE-* messages ----------------------
+        if mtype:
+            if mtype == P.TYPE_SCAN_MOVE:
+                # Accept nudges only when we're not slewing an absolute GOTO.
+                if state.centering_active.is_set():
+                    dx = float(msg.get("horizontal", 0.0))
+                    dy = float(msg.get("vertical", 0.0))
+                    # Clamp to [-1, 1]
+                    dx = -1.0 if dx < -1.0 else (1.0 if dx > 1.0 else dx)
+                    dy = -1.0 if dy < -1.0 else (1.0 if dy > 1.0 else dy)
+                    move_servos(pi, dx, dy, scale_us=C.MOVE_SCALE_US)
+                    if debug:
+                        print(f"[RPi] SCAN_MOVE dx={dx:.3f} dy={dy:.3f}  "
+                              f"btm={state.current_horizontal} top={state.current_vertical}")
+                else:
+                    if debug:
+                        print("[RPi] SCAN_MOVE ignored (slewing/settling)")
 
-        # -------------------------------------------------
-        # TYPE_SEARCH: start or stop the Pi's search mode
-        # -------------------------------------------------
-        elif mtype == P.TYPE_SEARCH:
-            if msg.get("active", False):
-                if not state.search_active.is_set():
-                    print("[RPi] Search ON")
-                state.search_active.set()
-            else:
-                if state.search_active.is_set():
-                    print("[RPi] Search OFF")
-                state.search_active.clear()
-
-        # -------------------------------------------------
-        # TYPE_STOP: immediate halt of all search/centering
-        # -------------------------------------------------
-        elif mtype == P.TYPE_STOP:
-            state.search_active.clear()
-            stop = True
-
-        # -------------------------------------------------
-        # TYPE_CENTER_DONE: laptop reports centering result
-        # -------------------------------------------------
-        elif mtype == P.TYPE_CENTER_DONE:
-            try:
-                center_done_cls = int(msg.get("target_cls", -1))
-            except Exception:
-                center_done_cls = -1  # invalid class ID
-            center_success = bool(msg.get("success", False))
-            center_diag = msg.get("diag", None)  # diagnostic info (thresholds, observed stats)
-
-        # -------------------------------------------------
-        # TYPE_YOLO_RESULTS: laptop sends scan detections
-        # -------------------------------------------------
-        elif mtype == P.TYPE_YOLO_RESULTS:
-            yolo_results = msg
-
-        # -------------------------------------------------
-        # CMD_GOTO_PWMS: move servos to absolute positions
-        # -------------------------------------------------
-        elif mcmd == P.CMD_GOTO_PWMS:
-            # Ignore if busy with search or centering
-            if state.search_active.is_set() or state.centering_active.is_set():
+            elif mtype == P.TYPE_STOP:
                 if debug:
-                    print("[RPi] Ignoring GOTO_PWMS during search/centering")
-                continue
-            tb = int(msg.get("pwm_btm", 1500))  # bottom servo PWM
-            tt = int(msg.get("pwm_top", 1500))  # top servo PWM
-            slew = int(msg.get("slew_ms", 600)) # move duration
-            if debug:
-                print(f"[RPi] GOTO_PWMS btm={tb} top={tt} slew_ms={slew}")
-            goto_pwms(pi, tb, tt, duration_ms=slew, steps=24)
+                    print("[RPi] STOP received")
+                stop = True
 
-    return stop, center_done_cls, center_success, center_diag, yolo_results
+            else:
+                if debug:
+                    print(f"[RPi] Ignored message type: {mtype}")
+
+        # ---------------------- CMD-* messages -----------------------
+        elif mcmd:
+            if mcmd == P.CMD_GOTO_PWMS:
+                tb   = int(msg.get("pwm_btm", C.SERVO_CENTER))
+                tt   = int(msg.get("pwm_top", C.SERVO_CENTER))
+                slew = int(msg.get("slew_ms", C.GOTO_POSE_SLEW_MS))
+                pose_id = msg.get("pose_id", None)
+                if pose_id is not None:
+                    try:
+                        pose_id = int(pose_id)
+                    except Exception:
+                        pose_id = None
+
+                if debug:
+                    extra = f" pose_id={pose_id}" if pose_id is not None else ""
+                    print(f"[RPi] GOTO_PWMS btm={tb} top={tt} slew_ms={slew}{extra}")
+
+                # Block nudges during absolute motion
+                state.centering_active.clear()
+
+                # Synchronous goto; steps from config
+                goto_pwms(pi, tb, tt, duration_ms=slew, steps=C.GOTO_STEPS)
+
+                # Small settle to reduce oscillation, then allow nudges again
+                time.sleep(C.POSE_SETTLE_S)
+                state.centering_active.set()
+
+                # Ack move completion (echo pose_id if provided)
+                payload = {"type": P.TYPE_POSE_READY}
+                if pose_id is not None:
+                    payload["pose_id"] = pose_id
+                try:
+                    send_json(conn, payload)
+                    if debug:
+                        print(f"[RPi] -> POSE_READY {payload}")
+                except Exception as e:
+                    if debug:
+                        print(f"[RPi] Failed to send POSE_READY: {e}")
+
+            elif mcmd == P.CMD_GET_PWMS:
+                payload = {
+                    "type": P.TYPE_PWMS,
+                    "pwm_btm": int(state.current_horizontal),
+                    "pwm_top": int(state.current_vertical),
+                }
+                try:
+                    send_json(conn, payload)
+                    if debug:
+                        print(f"[RPi] -> PWMS {payload}")
+                except Exception as e:
+                    if debug:
+                        print(f"[RPi] Failed to send PWMS: {e}")
+
+            # ============ NEW: Primitive Command Handlers (STUB) ============
+            
+            elif mcmd == P.CMD_MOVE_TO:
+                # STUB: Print and confirm (no actual movement)
+                x = msg.get("x", 0)
+                y = msg.get("y", 0)
+                z = msg.get("z", 0)
+                print(f"[RPi] RECEIVED: MOVE_TO command")
+                print(f"[RPi]   Target position: x={x}, y={y}, z={z} mm")
+                print(f"[RPi]   (Stub: Not executing - would calculate IK and move servos)")
+                
+                # Send success confirmation
+                try:
+                    send_json(conn, {
+                        "type": P.TYPE_CMD_COMPLETE,
+                        "cmd": P.CMD_MOVE_TO,
+                        "status": "success"
+                    })
+                    print(f"[RPi] CONFIRMED: MOVE_TO completed")
+                except Exception as e:
+                    print(f"[RPi] Failed to send confirmation: {e}")
+            
+            elif mcmd == P.CMD_GRAB:
+                # STUB: Print and confirm (no actual gripper control)
+                print(f"[RPi] RECEIVED: GRAB command")
+                print(f"[RPi]   (Stub: Not executing - would close gripper)")
+                
+                try:
+                    send_json(conn, {
+                        "type": P.TYPE_CMD_COMPLETE,
+                        "cmd": P.CMD_GRAB,
+                        "status": "success"
+                    })
+                    print(f"[RPi] CONFIRMED: GRAB completed")
+                except Exception as e:
+                    print(f"[RPi] Failed to send confirmation: {e}")
+            
+            elif mcmd == P.CMD_RELEASE:
+                # STUB: Print and confirm (no actual gripper control)
+                print(f"[RPi] RECEIVED: RELEASE command")
+                print(f"[RPi]   (Stub: Not executing - would open gripper)")
+                
+                try:
+                    send_json(conn, {
+                        "type": P.TYPE_CMD_COMPLETE,
+                        "cmd": P.CMD_RELEASE,
+                        "status": "success"
+                    })
+                    print(f"[RPi] CONFIRMED: RELEASE completed")
+                except Exception as e:
+                    print(f"[RPi] Failed to send confirmation: {e}")
+            
+            elif mcmd == P.CMD_ROT_YAW:
+                # STUB: Print and confirm (no actual servo control)
+                angle = msg.get("angle", 0.0)
+                print(f"[RPi] RECEIVED: ROT_YAW command")
+                print(f"[RPi]   Target angle: {angle}°")
+                print(f"[RPi]   (Stub: Not executing - would rotate yaw servo)")
+                
+                try:
+                    send_json(conn, {
+                        "type": P.TYPE_CMD_COMPLETE,
+                        "cmd": P.CMD_ROT_YAW,
+                        "status": "success"
+                    })
+                    print(f"[RPi] CONFIRMED: ROT_YAW completed")
+                except Exception as e:
+                    print(f"[RPi] Failed to send confirmation: {e}")
+            
+            elif mcmd == P.CMD_ROT_PITCH:
+                # STUB: Print and confirm (no actual servo control)
+                angle = msg.get("angle", 0.0)
+                print(f"[RPi] RECEIVED: ROT_PITCH command")
+                print(f"[RPi]   Target angle: {angle}°")
+                print(f"[RPi]   (Stub: Not executing - would rotate pitch servo)")
+                
+                try:
+                    send_json(conn, {
+                        "type": P.TYPE_CMD_COMPLETE,
+                        "cmd": P.CMD_ROT_PITCH,
+                        "status": "success"
+                    })
+                    print(f"[RPi] CONFIRMED: ROT_PITCH completed")
+                except Exception as e:
+                    print(f"[RPi] Failed to send confirmation: {e}")
+
+            else:
+                if debug:
+                    print(f"[RPi] Ignored command: {mcmd}")
+
+        else:
+            if debug:
+                print(f"[RPi] Unknown message payload (no type/cmd): {msg}")
+
+    return stop

@@ -1,50 +1,6 @@
-# vizzy/shared/jsonl.py
-# -----------------------------------------------------------------------------
-# Purpose
-#   Tiny helper module that implements a simple, robust “newline-delimited JSON”
-#   (JSONL) framing for our TCP socket messages between the Laptop and the RPi.
-#
-# Why this exists
-#   TCP is a byte stream with no built-in message boundaries. If we just send
-#   raw JSON, the receiver can’t tell where one message ends and the next one
-#   begins. By appending a '\n' (newline) after each JSON object, we create an
-#   easy boundary marker that both sides understand. This file provides:
-#
-#   - send_json(sock, obj):      serialize a Python dict to JSON and send it
-#                                with a trailing newline. One call = one message.
-#   - recv_lines(sock, buf):     read whatever bytes are available, split them
-#                                by newline into *complete* JSON objects, and
-#                                return any leftover partial data so callers can
-#                                keep it for the next read.
-#
-# How it fits into the project
-#   - Both vizzy.laptop and vizzy.rpi import these helpers to exchange messages
-#     like:
-#       * Commands (e.g., "YOLO_SCAN", "CENTER_ON", "GOTO_PWMS")
-#       * Events   (e.g., "YOLO_RESULTS", "CENTER_DONE", "CENTER_SNAPSHOT")
-#   - The laptop’s receive thread and the RPi server loop call recv_lines()
-#     repeatedly with a persistent buffer. This lets them handle messages that
-#     arrive in chunks or batches (common with TCP).
-#
-# Key idea: persistent buffer
-#   recv_lines() takes a 'buf' (bytes) that the caller maintains between calls.
-#   - New bytes are appended to 'buf'.
-#   - Complete JSONL records (ending with '\n') are parsed and returned.
-#   - Any leftover partial JSON (no newline yet) stays in 'buf' for later.
-#
-# Safety / resilience
-#   - If a partial or malformed JSON line is encountered, we skip it rather than
-#     crashing the program. (You can add logging here in the future.)
-#   - When the socket returns no data (peer closed the connection), we signal
-#     that with 'closed=True'.
-#
-# NOTE: This module deliberately stays small and dependency-free. It’s used by
-#       both sides so they agree on the exact framing and parsing rules.
-# -----------------------------------------------------------------------------
-
 from __future__ import annotations
 import json
-from typing import Tuple, List, Any  # 'Any' is imported for potential future use
+from typing import Tuple, List
 
 def send_json(sock, obj: dict) -> None:
     """

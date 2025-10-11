@@ -1,60 +1,80 @@
-# vizzy/shared/protocol.py
-# -----------------------------------------------------------------------------
-# Purpose
-#   Centralized definition of **message types** and **commands** for the Vizzy
-#   Laptop <-> Raspberry Pi communication protocol.
-#
-# Why this exists
-#   The laptop and RPi exchange messages over TCP using JSONL (newline-delimited
-#   JSON) framing. Each message contains fields like:
-#       { "type": "move", "horizontal": 0.1, "vertical": -0.05 }
-#     or
-#       { "cmd": "YOLO_SCAN", "duration_ms": 900 }
-#
-#   To avoid typos and keep the protocol consistent, we store all valid "type"
-#   and "cmd" strings in one place here. Both the laptop and RPi import these
-#   constants instead of hardcoding strings all over the codebase.
-#
-# How it fits into the project
-#   - **Types** describe the nature of the message — usually data or events
-#     flowing from one side to the other.
-#   - **Commands** are requests telling the other side to do something.
-#   - The RPi server and Laptop client both use these constants in send/receive
-#     logic, dispatch tables, and message processing functions.
-#
-# Benefits:
-#   - If a protocol string ever needs to change, we update it in one file.
-#   - Code completion / linting can help catch invalid values.
-#   - Clear separation of "type" vs. "cmd" messages.
-#
-# Example:
-#   Laptop sending a command to start a YOLO scan:
-#       send_json(sock, { "cmd": CMD_YOLO_SCAN, "duration_ms": 900 })
-#
-#   RPi sending YOLO detection results back:
-#       send_json(sock, { "type": TYPE_YOLO_RESULTS, "objects": [...] })
-#
-# -----------------------------------------------------------------------------
-
-from __future__ import annotations
+# shared/protocol.py
 
 # -----------------------------
-# Message "type" constants
+# Types (events)
 # -----------------------------
-# These usually indicate **what kind of data/event** the message represents.
+TYPE_POSE_READY   = "TYPE_POSE_READY"     # RPi -> Laptop; move complete (optional pose_id)
+TYPE_SCAN_MOVE    = "TYPE_SCAN_MOVE"      # Laptop -> RPi; normalized nudges in [-1,1]
+TYPE_PWMS         = "TYPE_PWMS"           # RPi -> Laptop; current PWM snapshot
+TYPE_STOP         = "TYPE_STOP"           # Laptop -> RPi; shutdown/close
+TYPE_CMD_COMPLETE = "CMD_COMPLETE"        # RPi -> Laptop; primitive command completed
+TYPE_CMD_ERROR    = "CMD_ERROR"           # RPi -> Laptop; primitive command failed
 
-TYPE_MOVE            = "move"              # (Laptop -> RPi) Move servos by offset or absolute target.
-TYPE_SEARCH          = "search"            # (Laptop -> RPi) Toggle search mode ON/OFF.
-TYPE_STOP            = "stop"              # (Laptop -> RPi) Stop all motion/operations cleanly.
-TYPE_YOLO_RESULTS    = "YOLO_RESULTS"      # (Laptop -> RPi) Send YOLO detections and confidences.
-TYPE_CENTER_DONE     = "CENTER_DONE"       # (RPi -> Laptop) Report result of centering attempt.
-TYPE_CENTER_SNAPSHOT = "CENTER_SNAPSHOT"   # (RPi -> Laptop) Send PWM pose + class info for memory.
+# TODO Deprecated (kept for compatibility during transition; will be removed)
+TYPE_SEARCH       = "TYPE_SEARCH"         # (deprecated) start/complete search cycle
+TYPE_POSE_DONE    = "TYPE_POSE_DONE"      # (deprecated) per-pose status
 
 # -----------------------------
-# Message "cmd" constants
+# Commands (requests) - Scan System
 # -----------------------------
-# These are **requests** to perform a specific action.
+CMD_GET_PWMS      = "CMD_GET_PWMS"        # Laptop -> RPi; request current PWM pose
+CMD_GOTO_PWMS     = "CMD_GOTO_PWMS"       # Laptop -> RPi; absolute move (now supports pose_id)
 
-CMD_YOLO_SCAN        = "YOLO_SCAN"         # Ask laptop to run YOLO inference for N milliseconds.
-CMD_CENTER_ON        = "CENTER_ON"         # Ask RPi to center on a given object class.
-CMD_GOTO_PWMS        = "GOTO_PWMS"         # Ask RPi to move servos to specific PWM positions.
+# -----------------------------
+# Primitive Commands - Task Execution System
+# -----------------------------
+# Note: Values are simple names without CMD_ prefix to match LLM output
+CMD_GRAB          = "GRAB"                # Laptop -> RPi; close gripper
+CMD_RELEASE       = "RELEASE"             # Laptop -> RPi; open gripper
+CMD_ROT_YAW       = "ROT_YAW"             # Laptop -> RPi; rotate yaw axis
+CMD_ROT_PITCH     = "ROT_PITCH"           # Laptop -> RPi; rotate pitch axis
+CMD_MOVE_TO       = "MOVE_TO"             # Laptop -> RPi; move to XYZ coordinates
+
+# High-level commands (expanded by laptop, never sent to RPi)
+CMD_PICK          = "PICK"                # LLM output; expanded to primitives
+CMD_PLACE         = "PLACE"               # LLM output; expanded to primitives
+
+# -----------------------------
+# Payload notes
+# -----------------------------
+# CMD_GOTO_PWMS:
+#   { "cmd": CMD_GOTO_PWMS, "pwm_btm": int, "pwm_top": int, "slew_ms": int, "pose_id": int? }
+#     - "pose_id" optional; when present, RPi should echo it in TYPE_POSE_READY
+#
+# TYPE_POSE_READY:
+#   { "type": TYPE_POSE_READY, "pose_id": int? }
+#     - "pose_id" optional; echo from CMD_GOTO_PWMS if provided, else omit or 0
+#
+# TYPE_SCAN_MOVE:
+#   { "type": TYPE_SCAN_MOVE, "horizontal": float, "vertical": float } # [-1,1], RPi scales
+#
+# TYPE_PWMS:
+#   { "type": TYPE_PWMS, "pwm_btm": int, "pwm_top": int }
+#
+# TYPE_STOP:
+#   { "type": TYPE_STOP }
+#
+# ===== NEW PRIMITIVE COMMAND SYSTEM =====
+#
+# CMD_MOVE_TO:
+#   { "cmd": CMD_MOVE_TO, "x": float, "y": float, "z": float }
+#
+# CMD_GRAB:
+#   { "cmd": CMD_GRAB }
+#
+# CMD_RELEASE:
+#   { "cmd": CMD_RELEASE }
+#
+# CMD_ROT_YAW:
+#   { "cmd": CMD_ROT_YAW, "angle": float }  # degrees
+#
+# CMD_ROT_PITCH:
+#   { "cmd": CMD_ROT_PITCH, "angle": float }  # degrees
+#
+# TYPE_CMD_COMPLETE:
+#   { "type": TYPE_CMD_COMPLETE, "cmd": str, "status": "success" }
+#     - Sent by RPi when a primitive command completes successfully
+#
+# TYPE_CMD_ERROR:
+#   { "type": TYPE_CMD_ERROR, "cmd": str, "status": "error", "message": str? }
+#     - Sent by RPi when a primitive command fails
