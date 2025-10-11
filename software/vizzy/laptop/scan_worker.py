@@ -173,14 +173,7 @@ class ScanWorker(threading.Thread):
                     continue
                 
                 # Run YOLO inference
-                results = self.model.predict(
-                    frame,
-                    imgsz=C.YOLO_IMGSZ,
-                    conf=C.YOLO_CONF_THRESH,
-                    iou=C.YOLO_IOU_THRESH,
-                    verbose=False,
-                    device=self.device,
-                )
+                results = self.model.predict(frame, verbose=False)
                 
                 if not results or len(results) == 0:
                     print(f"[ScanWorker] Frame {i+1}/{num_frames}: No detections")
