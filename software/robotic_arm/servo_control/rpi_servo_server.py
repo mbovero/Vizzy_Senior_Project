@@ -1,92 +1,236 @@
-#!/usr/bin/env python3
+# rpi_servo_server.py
 """
-Raspberry Pi Servo Server — TCP JSON protocol on port 65432
-Each command is a JSON line:
-  {"cmd":"center"}
-  {"cmd":"stop"}
-  {"cmd":"get"}
-  {"cmd":"set","target":"btm|mid|top","us":1500}
+Minimal JSONL TCP server for controlling a single hobby servo on Raspberry Pi.
+Now includes your requested constants, networking defaults, and an init_servos()
+that powers all three servo outputs to center on startup.
+
+- JSONL commands (all messages end with "
+"):
+    {"cmd": "SET_PWM", "pwm": 1500}          -> set pulse width (µs) on the primary servo
+    {"cmd": "GET_PWM"}                         -> reply with current pulse width
+    {"cmd": "STOP"}                            -> stop server (optional)
+
+Responses:
+    {"type": "ACK", "ok": true, "pwm": <int>}
+    {"type": "PWM", "pwm": <int>}
+    {"type": "ERR", "error": "..."}
+
+Run on the Pi (requires pigpio daemon running):
+    sudo systemctl enable pigpiod --now
+    python3 rpi_servo_server.py --port 65432
 """
+from __future__ import annotations
 
-import json, socket, threading, pigpio
-from typing import Dict, Any
+import argparse
+import json
+import socket
+import time
+from dataclasses import dataclass
 
-# ---- USER SETTINGS (BCM numbering) ----
-SERVO_PINS = {
-    "btm": 0,   # GPIO0
-    "mid": 5,   # GPIO5
-    "top": 6,   # GPIO6
-}
-SERVO_MIN_US, SERVO_MAX_US, SERVO_CENTER_US = 1000, 2000, 1500
+import pigpio
 
-HOST, PORT = "0.0.0.0", 65432
-AUTH_TOKEN = None   # optional simple auth
+# ----------------------------- Constants ---------------------------------
+# Servos & Sweep (RPi)
+# NOTE: Using your requested GPIO pins for the three servos.
+class C:
+    # Servo GPIO pins (BCM numbering for pigpio)
+    # @Burke use GPIO pins 0, 5, and 6 !!! these would be in place SERVO_BTM, ...
+    SERVO_BTM = 0   # was 22
+    SERVO_MID = 5   # was 27
+    SERVO_TOP = 6   # was 17
 
-# ---- pigpio setup ----
+    # Pulse width bounds (µs)
+    SERVO_MIN    = 1000
+    SERVO_MAX    = 2000
+    SERVO_CENTER = 1500
+
+    # Networking (Laptop connects to the Pi at this host/port)
+    PI_IP   = "10.120.39.241"
+    PI_PORT = 65432
+
+
+# Lightweight state holder
+class _State:
+    def __init__(self) -> None:
+        self.current_horizontal = C.SERVO_CENTER
+        self.current_vertical = C.SERVO_CENTER
+        self.current_pwm = C.SERVO_CENTER
+
+state = _State()
+
+
+# pigpio instance and servo init
 pi = pigpio.pi()
 if not pi.connected:
-    raise RuntimeError("pigpiod not running (sudo systemctl start pigpiod)")
+    raise RuntimeError("pigpio daemon not running. Start with: sudo systemctl start pigpiod")
 
-def clamp_us(us: int) -> int:
-    return max(SERVO_MIN_US, min(SERVO_MAX_US, int(us)))
 
-def set_servo(name: str, us: int) -> Dict[str, Any]:
-    if name not in SERVO_PINS:
-        return {"ok": False, "err": f"bad target '{name}'"}
-    us = clamp_us(us)
-    pi.set_servo_pulsewidth(SERVO_PINS[name], us)
-    return {"ok": True, "target": name, "us": us}
+def init_servos(pi: pigpio.pi) -> None:
+    """
+    Initialize servo outputs at SERVO_CENTER so they are powered and not limp.
+    Safe to call multiple times.
+    """
+    pi.set_servo_pulsewidth(C.SERVO_BTM, C.SERVO_CENTER)
+    pi.set_servo_pulsewidth(C.SERVO_MID, C.SERVO_CENTER)
+    pi.set_servo_pulsewidth(C.SERVO_TOP, C.SERVO_CENTER)
+    state.current_horizontal = C.SERVO_CENTER
+    state.current_vertical = C.SERVO_CENTER
+    state.current_pwm = C.SERVO_CENTER
 
-def center_all():
-    for g in SERVO_PINS.values():
-        pi.set_servo_pulsewidth(g, SERVO_CENTER_US)
-    return {"ok": True, "center": SERVO_CENTER_US}
 
-def stop_all():
-    for g in SERVO_PINS.values():
-        pi.set_servo_pulsewidth(g, 0)
-    return {"ok": True}
+# Call once at import to bring all servos to life
+init_servos(pi)
 
-def get_state():
-    return {"ok": True,
-            "state": {k: pi.get_servo_pulsewidth(v) for k, v in SERVO_PINS.items()}}
 
-def handle(cmd: Dict[str, Any]) -> Dict[str, Any]:
-    if AUTH_TOKEN and cmd.get("token") != AUTH_TOKEN:
-        return {"ok": False, "err": "unauthorized"}
-    op = cmd.get("cmd")
-    if op == "center": return center_all()
-    if op == "stop":   return stop_all()
-    if op == "get":    return get_state()
-    if op == "set":    return set_servo(cmd.get("target",""), int(cmd.get("us", SERVO_CENTER_US)))
-    return {"ok": False, "err": f"unknown cmd '{op}'"}
+# ---------------------------- JSONL helpers -----------------------------
 
-def client(conn, _):
-    buf = b""
+def send_json(sock: socket.socket, obj: dict) -> None:
+    data = (json.dumps(obj, separators=(",", ":")) + "
+").encode("utf-8")
+    sock.sendall(data)
+
+
+def recv_lines(sock: socket.socket, buf: bytes) -> tuple[list[dict], bytes, bool]:
+    """Read available data, split by newlines into JSON objects.
+    Returns (messages, remaining_buffer, closed)
+    """
+    closed = False
     try:
-        while (data := conn.recv(4096)):
-            buf += data
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                if not line.strip(): continue
-                try:
-                    resp = handle(json.loads(line))
-                except Exception as e:
-                    resp = {"ok": False, "err": str(e)}
-                conn.sendall((json.dumps(resp) + "\n").encode())
-    finally:
-        conn.close()
+        chunk = sock.recv(4096)
+        if not chunk:
+            return [], buf, True
+        buf += chunk
+    except BlockingIOError:
+        pass
+    except ConnectionResetError:
+        return [], buf, True
 
-def main():
-    center_all()
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((HOST, PORT))
-        s.listen(5)
-        print(f"Servo server listening on {HOST}:{PORT}")
-        while True:
-            conn, addr = s.accept()
-            threading.Thread(target=client, args=(conn, addr), daemon=True).start()
+    lines = buf.split(b"
+")
+    buf = lines.pop()  # remainder (possibly partial)
+
+    msgs: list[dict] = []
+    for ln in lines:
+        if not ln:
+            continue
+        try:
+            msgs.append(json.loads(ln.decode("utf-8")))
+        except Exception:
+            msgs.append({"type": "ERR", "error": "bad json", "raw": ln.decode("utf-8", "replace")})
+    return msgs, buf, closed
+
+
+# ----------------------------- Config -----------------------------------
+
+@dataclass
+class Config:
+    host: str = "0.0.0.0"
+    port: int = C.PI_PORT
+    primary_servo_pin: int = C.SERVO_TOP   # choose which single servo to drive via SET_PWM
+    servo_min: int = C.SERVO_MIN
+    servo_max: int = C.SERVO_MAX
+    settle_s: float = 0.02
+
+
+# ---------------------------- Server logic ------------------------------
+
+class ServoServer:
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.current_pwm = C.SERVO_CENTER
+        # Ensure servos are initialized (already done at import), but safe to repeat
+        init_servos(pi)
+
+    def _clamp(self, v: int) -> int:
+        return max(self.cfg.servo_min, min(self.cfg.servo_max, int(v)))
+
+    def _apply(self, pwm: int) -> None:
+        pwm = self._clamp(pwm)
+        pi.set_servo_pulsewidth(self.cfg.primary_servo_pin, pwm)
+        self.current_pwm = pwm
+        state.current_pwm = pwm
+
+    def _handle(self, msg: dict, conn: socket.socket) -> bool:
+        """Return True to request server stop."""
+        if msg.get("type") == "ERR" and msg.get("error") == "bad json":
+            send_json(conn, msg)
+            return False
+        cmd = msg.get("cmd")
+        if cmd == "SET_PWM":
+            try:
+                pwm = int(msg.get("pwm"))
+            except Exception:
+                send_json(conn, {"type": "ERR", "error": "SET_PWM requires integer 'pwm'"})
+                return False
+            self._apply(pwm)
+            time.sleep(self.cfg.settle_s)
+            send_json(conn, {"type": "ACK", "ok": True, "pwm": self.current_pwm})
+        elif cmd == "GET_PWM":
+            send_json(conn, {"type": "PWM", "pwm": self.current_pwm})
+        elif cmd == "STOP":
+            send_json(conn, {"type": "ACK", "ok": True, "stopping": True})
+            return True
+        else:
+            send_json(conn, {"type": "ERR", "error": f"unknown cmd: {cmd}"})
+        return False
+
+    def serve_forever(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((self.cfg.host, self.cfg.port))
+            s.listen(1)
+            print(f"[RPi] Listening on {self.cfg.host}:{self.cfg.port} (primary_servo_pin={self.cfg.primary_servo_pin})")
+            try:
+                while True:
+                    print("[RPi] Waiting for laptop client…")
+                    conn, addr = s.accept()
+                    print(f"[RPi] Client connected: {addr[0]}:{addr[1]}")
+                    init_servos(pi)
+                    buf = b""
+                    try:
+                        with conn:
+                            conn.setblocking(False)
+                            while True:
+                                msgs, buf, closed = recv_lines(conn, buf)
+                                if closed:
+                                    print("[RPi] Client disconnected.")
+                                    break
+                                for m in msgs:
+                                    stop = self._handle(m, conn)
+                                    if stop:
+                                        print("[RPi] STOP requested; shutting down.")
+                                        return
+                                time.sleep(0.01)
+                    except Exception as e:
+                        print(f"[RPi] client loop error: {e}")
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+            finally:
+                try:
+                    init_servos(pi)
+                except Exception:
+                    pass
+                pi.stop()
+                print("[RPi] Server shut down.")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Single-servo TCP server (JSONL)")
+    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=C.PI_PORT)
+    ap.add_argument("--pin", dest="primary_servo_pin", type=int, default=C.SERVO_TOP, help="BCM pin for primary servo signal")
+    ap.add_argument("--min", dest="servo_min", type=int, default=C.SERVO_MIN)
+    ap.add_argument("--max", dest="servo_max", type=int, default=C.SERVO_MAX)
+    ap.add_argument("--settle", dest="settle_s", type=float, default=0.02)
+    args = ap.parse_args()
+    cfg = Config(host=args.host, port=args.port, primary_servo_pin=args.primary_servo_pin,
+                 servo_min=args.servo_min, servo_max=args.servo_max, settle_s=args.settle_s)
+    ServoServer(cfg).serve_forever()
+
 
 if __name__ == "__main__":
     main()
+
+
