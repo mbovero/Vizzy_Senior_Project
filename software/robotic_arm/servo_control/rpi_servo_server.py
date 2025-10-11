@@ -33,86 +33,11 @@ except Exception as e:
 # ---------- Moteus ----------
 import moteus
 
-<<<<<<< HEAD
 # Optional transports (choose one at startup)
 def build_transport(kind: str):
     """Return a moteus transport for 'pi3hat' or 'socketcan:<ifname>' or 'auto'."""
     kind = (kind or "pi3hat").lower()
     if kind == "pi3hat":
-=======
-    # Pulse width bounds (µs)
-    SERVO_MIN    = 600
-    SERVO_MAX    = 2500
-    SERVO_CENTER = 1500
-
-    # Networking (Laptop connects to the Pi at this host/port)
-    PI_IP   = "10.120.39.241"
-    PI_PORT = 65432
-
-
-# Lightweight state holder
-class _State:
-    def __init__(self) -> None:
-        self.current_horizontal = C.SERVO_CENTER
-        self.current_vertical = C.SERVO_CENTER
-        self.current_pwm = C.SERVO_CENTER
-
-state = _State()
-
-
-# pigpio instance and servo init
-pi = pigpio.pi()
-if not pi.connected:
-    raise RuntimeError("pigpio daemon not running. Start with: sudo systemctl start pigpiod")
-
-
-def init_servos(pi: pigpio.pi) -> None:
-    """
-    Initialize servo outputs at SERVO_CENTER so they are powered and not limp.
-    Safe to call multiple times.
-    """
-    # pi.set_servo_pulsewidth(C.SERVO_BTM, C.SERVO_CENTER)
-    # pi.set_servo_pulsewidth(C.SERVO_MID, C.SERVO_CENTER)
-    pi.set_servo_pulsewidth(C.SERVO_TOP, C.SERVO_CENTER)
-    state.current_horizontal = C.SERVO_CENTER
-    state.current_vertical = C.SERVO_CENTER
-    state.current_pwm = C.SERVO_CENTER
-
-
-# Call once at import to bring all servos to life
-init_servos(pi)
-
-
-# ---------------------------- JSONL helpers -----------------------------
-
-def send_json(sock: socket.socket, obj: dict) -> None:
-    data = (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
-    sock.sendall(data)
-
-
-def recv_lines(sock: socket.socket, buf: bytes):
-    """Return (messages, remaining_buffer, closed). Robust to partial reads."""
-    closed = False
-    try:
-        chunk = sock.recv(4096)
-        if not chunk:
-            return [], buf, True
-        buf += chunk
-    except BlockingIOError:
-        pass
-    except ConnectionResetError:
-        return [], buf, True
-
-    msgs = []
-    while True:
-        i = buf.find(b"\n")
-        if i == -1:
-            break  # no full line yet
-        line = buf[:i]
-        buf = buf[i+1:]
-        if not line:
-            continue  # skip empty lines
->>>>>>> 84c86a9218a5c2df909b276af0bd5a6c29b7cb52
         try:
             import moteus_pi3hat
             return moteus_pi3hat.Pi3HatRouter()  # shared router
