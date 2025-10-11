@@ -104,6 +104,92 @@ def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False)
                     if debug:
                         print(f"[RPi] Failed to send PWMS: {e}")
 
+            # ============ NEW: Primitive Command Handlers (STUB) ============
+            
+            elif mcmd == P.CMD_MOVE_TO:
+                # STUB: Print and confirm (no actual movement)
+                x = msg.get("x", 0)
+                y = msg.get("y", 0)
+                z = msg.get("z", 0)
+                print(f"[RPi] RECEIVED: MOVE_TO command")
+                print(f"[RPi]   Target position: x={x}, y={y}, z={z} mm")
+                print(f"[RPi]   (Stub: Not executing - would calculate IK and move servos)")
+                
+                # Send success confirmation
+                try:
+                    send_json(conn, {
+                        "type": P.TYPE_CMD_COMPLETE,
+                        "cmd": P.CMD_MOVE_TO,
+                        "status": "success"
+                    })
+                    print(f"[RPi] CONFIRMED: MOVE_TO completed")
+                except Exception as e:
+                    print(f"[RPi] Failed to send confirmation: {e}")
+            
+            elif mcmd == P.CMD_GRAB:
+                # STUB: Print and confirm (no actual gripper control)
+                print(f"[RPi] RECEIVED: GRAB command")
+                print(f"[RPi]   (Stub: Not executing - would close gripper)")
+                
+                try:
+                    send_json(conn, {
+                        "type": P.TYPE_CMD_COMPLETE,
+                        "cmd": P.CMD_GRAB,
+                        "status": "success"
+                    })
+                    print(f"[RPi] CONFIRMED: GRAB completed")
+                except Exception as e:
+                    print(f"[RPi] Failed to send confirmation: {e}")
+            
+            elif mcmd == P.CMD_RELEASE:
+                # STUB: Print and confirm (no actual gripper control)
+                print(f"[RPi] RECEIVED: RELEASE command")
+                print(f"[RPi]   (Stub: Not executing - would open gripper)")
+                
+                try:
+                    send_json(conn, {
+                        "type": P.TYPE_CMD_COMPLETE,
+                        "cmd": P.CMD_RELEASE,
+                        "status": "success"
+                    })
+                    print(f"[RPi] CONFIRMED: RELEASE completed")
+                except Exception as e:
+                    print(f"[RPi] Failed to send confirmation: {e}")
+            
+            elif mcmd == P.CMD_ROT_YAW:
+                # STUB: Print and confirm (no actual servo control)
+                angle = msg.get("angle", 0.0)
+                print(f"[RPi] RECEIVED: ROT_YAW command")
+                print(f"[RPi]   Target angle: {angle}°")
+                print(f"[RPi]   (Stub: Not executing - would rotate yaw servo)")
+                
+                try:
+                    send_json(conn, {
+                        "type": P.TYPE_CMD_COMPLETE,
+                        "cmd": P.CMD_ROT_YAW,
+                        "status": "success"
+                    })
+                    print(f"[RPi] CONFIRMED: ROT_YAW completed")
+                except Exception as e:
+                    print(f"[RPi] Failed to send confirmation: {e}")
+            
+            elif mcmd == P.CMD_ROT_PITCH:
+                # STUB: Print and confirm (no actual servo control)
+                angle = msg.get("angle", 0.0)
+                print(f"[RPi] RECEIVED: ROT_PITCH command")
+                print(f"[RPi]   Target angle: {angle}°")
+                print(f"[RPi]   (Stub: Not executing - would rotate pitch servo)")
+                
+                try:
+                    send_json(conn, {
+                        "type": P.TYPE_CMD_COMPLETE,
+                        "cmd": P.CMD_ROT_PITCH,
+                        "status": "success"
+                    })
+                    print(f"[RPi] CONFIRMED: ROT_PITCH completed")
+                except Exception as e:
+                    print(f"[RPi] Failed to send confirmation: {e}")
+
             else:
                 if debug:
                     print(f"[RPi] Ignored command: {mcmd}")

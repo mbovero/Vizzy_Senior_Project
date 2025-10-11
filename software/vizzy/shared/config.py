@@ -87,6 +87,11 @@ POSE_SETTLE_S = 0.30
 # Idle/auto-search behavior (laptop)
 IDLE_TIMEOUT_S = 20.0   # seconds of inactivity before auto SEARCH
 
+# Rest position and orientation for arm
+REST_POSITION = [0.0, 0.0, 10.0]  # TODO: Configure based on actual robot home position
+REST_YAW_ANGLE = 0.0              # Resting yaw orientation (degrees)
+REST_PITCH_ANGLE = 0.0            # Resting pitch orientation (degrees)
+
 # -----------------------------
 # LLM / Semantic Enrichment
 # -----------------------------
@@ -113,3 +118,20 @@ SKIP_SEMANTIC_ENRICHMENT = False # Skip LLM semantic enrichment
 
 # Output file for LLM task scheduler results (for verification)
 TASK_SCHEDULER_OUTPUT_FILE = str(LAPTOP_DIR / "task_scheduler_output.json")
+
+# -----------------------------
+# Task Execution - Rest Position
+# -----------------------------
+# Rest/home position for robotic arm (all coordinates in millimeters)
+REST_POSITION = [0, 0, 800]      # [x_mm, y_mm, z_mm]
+REST_YAW_ANGLE = 0.0             # degrees
+REST_PITCH_ANGLE = 0.0           # degrees
+
+# Timeout for primitive command execution (seconds)
+PRIMITIVE_CMD_TIMEOUT = 30.0
+
+# -----------------------------
+# Orientation Calculation
+# -----------------------------
+# Number of frames to average for orientation calculation (reduces noise)
+ORIENTATION_AVG_FRAMES = 5
