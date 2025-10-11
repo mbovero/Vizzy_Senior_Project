@@ -28,8 +28,7 @@ PI_PORT = 65432
 
 
 def send_json(sock: socket.socket, obj: dict) -> None:
-    sock.sendall((json.dumps(obj, separators=(",", ":")) + "
-").encode("utf-8"))
+    sock.sendall((json.dumps(obj, separators=(",", ":")) + "").encode("utf-8"))
 
 
 def recv_one(sock: socket.socket, *, timeout_s: float = 2.0) -> dict:
@@ -40,10 +39,8 @@ def recv_one(sock: socket.socket, *, timeout_s: float = 2.0) -> dict:
         if not chunk:
             raise RuntimeError("connection closed")
         buf += chunk
-        if b"
-" in buf:
-            ln, buf = buf.split(b"
-", 1)
+        if b"" in buf:
+            ln, buf = buf.split(b"", 1)
             return json.loads(ln.decode("utf-8"))
 
 

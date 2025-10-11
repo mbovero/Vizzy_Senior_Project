@@ -85,8 +85,7 @@ init_servos(pi)
 # ---------------------------- JSONL helpers -----------------------------
 
 def send_json(sock: socket.socket, obj: dict) -> None:
-    data = (json.dumps(obj, separators=(",", ":")) + "
-").encode("utf-8")
+    data = (json.dumps(obj, separators=(",", ":")) + "").encode("utf-8")
     sock.sendall(data)
 
 
@@ -105,8 +104,7 @@ def recv_lines(sock: socket.socket, buf: bytes) -> tuple[list[dict], bytes, bool
     except ConnectionResetError:
         return [], buf, True
 
-    lines = buf.split(b"
-")
+    lines = buf.split(b"")
     buf = lines.pop()  # remainder (possibly partial)
 
     msgs: list[dict] = []
