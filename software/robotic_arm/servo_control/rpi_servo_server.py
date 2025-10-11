@@ -238,22 +238,22 @@ class ArmServer:
             self.current_pwm = pwm
 
     async def control_loop(self):
-        """Main control loop: applies targets, enforces thermal policy, 50 Hz-ish."""
+        """Main control loop: applies targets, enforces thermal policy, ~50 Hz."""
         next_temp = time.monotonic()
         try:
             while not self._stop.is_set():
                 async with self._lock:
-                    # Move motors (synchronized) or hold
-                    group = []
-                    if True:  # always try to converge to targets
-                        group.append((self.m1, self.c1, self.t1))
-                        group.append((self.m2, self.c2, self.t2))
-                        group.append((self.m3, self.c3, self.t3))
+                    # ---- Apply servo FIRST so it never waits on motor motion ----
+                    await self.servo_set(self.target_pwm)
+
+                    # Then schedule/await the synchronized motor move
+                    group = [
+                        (self.m1, self.c1, self.t1),
+                        (self.m2, self.c2, self.t2),
+                        (self.m3, self.c3, self.t3),
+                    ]
                     finals = await move_group_sync_time(group)
                     self.c1, self.c2, self.c3 = finals
-
-                    # Apply servo every cycle to ensure it's set
-                    await self.servo_set(self.target_pwm)
 
                 # Temp check ~1 Hz
                 now = time.monotonic()
@@ -308,6 +308,8 @@ class ArmServer:
                     break
 
                 if cmd == "rest":
+                    # Apply servo immediately for responsiveness
+                    await self.servo_set(SERVO_CENTER)
                     async with self._lock:
                         self.t1, self.t2, self.t3 = REST1, REST2, REST3
                         self.target_pwm = SERVO_CENTER
@@ -324,9 +326,12 @@ class ArmServer:
                         writer.write(b"ERR bad numbers\n"); await writer.drain()
                         continue
 
+                    # ---- Apply servo immediately so it never waits on motor motion ----
+                    await self.servo_set(p4)
+
                     async with self._lock:
-                        # During cooldown we still allow servo; motors hold at REST
                         self.target_pwm = p4
+                        # During cooldown we still allow servo; motors hold at REST
                         if not self.cooling:
                             self.t1, self.t2, self.t3 = p1, p2, p3
                     writer.write(b"ACK set\n"); await writer.drain()
