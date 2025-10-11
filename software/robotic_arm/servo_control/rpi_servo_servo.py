@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+"""
+Raspberry Pi Servo Server (TCP JSON, newline-delimited)
+- Start pigpio daemon first: sudo systemctl enable --now pigpiod
+- Run: python3 rpi_servo_server.py
+- Default port: 5005
+Commands (JSON per line):
+  {"cmd":"center"}
+  {"cmd":"stop"}
+  {"cmd":"get"}
+  {"cmd":"set","target":"btm|mid|top","us":1500}
+Optional auth: set AUTH_TOKEN below and include {"token":"..."} in every command.
+"""
+
 import json
 import socket
 import threading
@@ -6,15 +19,15 @@ import pigpio
 from typing import Dict, Any
 
 # -----------------------------
-# USER SETTINGS (match your wiring)
+# USER SETTINGS — edit to match your wiring
 # -----------------------------
 SERVO_PINS = {
-    "btm": 12,   # BCM GPIO
-    "mid": 13,
-    "top": 18,
+    "btm": 0,   # BCM GPIO number
+    "mid": 5,
+    "top": 6,
 }
 
-# Pulse width bounds (microseconds)
+# Microsecond pulse bounds (typical hobby servo: 1000–2000, center 1500)
 SERVO_MIN_US    = 1000
 SERVO_MAX_US    = 2000
 SERVO_CENTER_US = 1500
@@ -23,7 +36,7 @@ SERVO_CENTER_US = 1500
 HOST = "0.0.0.0"
 PORT = 5005
 
-# Optional shared token (set to None to disable)
+# Optional simple auth token; set to None to disable
 AUTH_TOKEN = None  # e.g., "secret123"
 
 # -----------------------------
@@ -44,38 +57,37 @@ def set_servo(target: str, us: int) -> Dict[str, Any]:
     return {"ok": True, "target": target, "us": us}
 
 def center_all() -> Dict[str, Any]:
-    for name, gpio in SERVO_PINS.items():
+    for gpio in SERVO_PINS.values():
         pi.set_servo_pulsewidth(gpio, SERVO_CENTER_US)
     return {"ok": True, "center_us": SERVO_CENTER_US}
 
 def stop_all() -> Dict[str, Any]:
-    for name, gpio in SERVO_PINS.items():
-        pi.set_servo_pulsewidth(gpio, 0)  # 0 => servo off (no pulses)
+    for gpio in SERVO_PINS.values():
+        pi.set_servo_pulsewidth(gpio, 0)  # 0 = pulses off (servo unpowered)
     return {"ok": True}
+
+def get_state() -> Dict[str, Any]:
+    state = {name: pi.get_servo_pulsewidth(g) for name, g in SERVO_PINS.items()}
+    return {"ok": True, "state": state}
 
 def handle_cmd(cmd: Dict[str, Any]) -> Dict[str, Any]:
     if AUTH_TOKEN is not None and cmd.get("token") != AUTH_TOKEN:
         return {"ok": False, "err": "unauthorized"}
-
     op = cmd.get("cmd")
-    if op == "set":
-        # { "cmd":"set", "target":"btm|mid|top", "us":1500 }
-        return set_servo(cmd.get("target", ""), int(cmd.get("us", SERVO_CENTER_US)))
-    elif op == "center":
+    if op == "center":
         return center_all()
     elif op == "stop":
         return stop_all()
     elif op == "get":
-        # Return current pulsewidths
-        state = {name: pi.get_servo_pulsewidth(g) for name, g in SERVO_PINS.items()}
-        return {"ok": True, "state": state}
+        return get_state()
+    elif op == "set":
+        return set_servo(cmd.get("target", ""), int(cmd.get("us", SERVO_CENTER_US)))
     else:
         return {"ok": False, "err": f"unknown cmd '{op}'"}
 
 def client_thread(conn: socket.socket, addr):
     try:
         buf = b""
-        # Protocol: newline-delimited JSON per command
         while True:
             data = conn.recv(4096)
             if not data:
@@ -92,16 +104,12 @@ def client_thread(conn: socket.socket, addr):
                     continue
                 resp = handle_cmd(cmd)
                 conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
-    except Exception as e:
-        # Basic safety: stop nothing on error; keep servos as-is
-        pass
     finally:
         conn.close()
 
 def main():
-    # Power servos to center on boot
+    # Center servos on startup for safety
     center_all()
-
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((HOST, PORT))
@@ -116,6 +124,6 @@ if __name__ == "__main__":
     try:
         main()
     finally:
-        # Optional: leave servos powered at last command; or stop:
+        # Optionally stop all pulses on exit:
         # stop_all()
         pass
