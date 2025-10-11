@@ -42,7 +42,7 @@ class C:
     # Pulse width bounds (µs)
     SERVO_MIN    = 1000
     SERVO_MAX    = 2000
-    SERVO_CENTER = 2000
+    SERVO_CENTER = 1500
 
     # Networking (Laptop connects to the Pi at this host/port)
     PI_IP   = "10.120.39.241"
