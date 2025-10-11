@@ -85,7 +85,7 @@ init_servos(pi)
 # ---------------------------- JSONL helpers -----------------------------
 
 def send_json(sock: socket.socket, obj: dict) -> None:
-    data = (json.dumps(obj, separators=(",", ":")) + "").encode("utf-8")
+    data = (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
     sock.sendall(data)
 
 
