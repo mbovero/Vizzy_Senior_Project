@@ -17,6 +17,7 @@ import time
 from typing import Dict, Optional, Any, Callable
 
 import cv2
+import numpy as np
 from ultralytics import YOLO
 
 from ..shared import config as C
@@ -25,6 +26,7 @@ from .memory import ObjectMemory
 from .scanning import run_scan_window, build_search_path
 from .centering import center_on_class
 from .motion import Motion
+from .orientation import calculate_grasp_angle
 
 
 FrameSink = Optional[Callable[[Any], None]]
@@ -139,6 +141,124 @@ class ScanWorker(threading.Thread):
                 self.cap.grab()
         except Exception:
             pass
+    
+    def _calculate_averaged_orientation(self, cls_id: int, num_frames: int = 5) -> dict:
+        """
+        Calculate grasp orientation using PCA, averaged over multiple frames.
+        
+        This improves stability by reducing noise from single-frame calculations.
+        
+        Args:
+            cls_id: Class ID of the object (for filtering YOLO detections)
+            num_frames: Number of frames to average over (default: 5)
+        
+        Returns:
+            Dictionary with orientation data:
+                - yaw_deg: Average yaw angle in degrees
+                - confidence: Average confidence score
+                - method: "pca_averaged"
+                - num_samples: Number of successful measurements
+        """
+        print(f"[ScanWorker] Calculating orientation over {num_frames} frames...")
+        
+        angles = []
+        confidences = []
+        
+        for i in range(num_frames):
+            try:
+                # Capture frame
+                ok, frame = self.cap.read()
+                if not ok:
+                    print(f"[ScanWorker] Frame {i+1}/{num_frames}: Failed to capture")
+                    continue
+                
+                # Run YOLO inference
+                results = self.model.predict(
+                    frame,
+                    imgsz=C.YOLO_IMGSZ,
+                    conf=C.YOLO_CONF_THRESH,
+                    iou=C.YOLO_IOU_THRESH,
+                    verbose=False,
+                    device=self.device,
+                )
+                
+                if not results or len(results) == 0:
+                    print(f"[ScanWorker] Frame {i+1}/{num_frames}: No detections")
+                    continue
+                
+                result = results[0]
+                
+                # Find the object with matching class_id
+                found_mask = None
+                if result.masks is not None:
+                    for idx, box in enumerate(result.boxes):
+                        if int(box.cls[0]) == cls_id:
+                            # Get the mask for this detection
+                            mask_data = result.masks.data[idx].cpu().numpy()
+                            # Resize mask to frame size
+                            mask_resized = cv2.resize(
+                                mask_data,
+                                (frame.shape[1], frame.shape[0]),
+                                interpolation=cv2.INTER_NEAREST
+                            )
+                            # Convert to uint8
+                            found_mask = (mask_resized * 255).astype(np.uint8)
+                            break
+                
+                if found_mask is None:
+                    print(f"[ScanWorker] Frame {i+1}/{num_frames}: Class {cls_id} not found")
+                    continue
+                
+                # Calculate orientation using PCA
+                orientation = calculate_grasp_angle(found_mask, method="pca")
+                
+                if orientation.get("success", False):
+                    angle = orientation["yaw_angle"]
+                    conf = orientation["confidence"]
+                    angles.append(angle)
+                    confidences.append(conf)
+                    print(f"[ScanWorker] Frame {i+1}/{num_frames}: angle={angle:.1f}°, conf={conf:.2f}")
+                else:
+                    print(f"[ScanWorker] Frame {i+1}/{num_frames}: Orientation calc failed")
+                
+                # Small delay between frames for stability
+                time.sleep(0.05)
+                
+            except Exception as e:
+                print(f"[ScanWorker] Frame {i+1}/{num_frames}: Error: {e}")
+                continue
+        
+        # Calculate averaged results
+        if len(angles) == 0:
+            print("[ScanWorker] WARNING: No successful orientation measurements")
+            return {
+                "yaw_deg": 0.0,
+                "confidence": 0.0,
+                "method": "pca_averaged",
+                "num_samples": 0,
+                "error": "No successful measurements"
+            }
+        
+        # Use circular mean for angles (handles wraparound at -90/+90)
+        angles_rad = np.deg2rad(angles)
+        mean_sin = np.mean(np.sin(angles_rad))
+        mean_cos = np.mean(np.cos(angles_rad))
+        avg_angle = np.rad2deg(np.arctan2(mean_sin, mean_cos))
+        
+        # Average confidence
+        avg_confidence = np.mean(confidences)
+        
+        print(f"[ScanWorker] Orientation result: {len(angles)} samples, "
+              f"angle={avg_angle:.1f}°, confidence={avg_confidence:.2f}")
+        
+        return {
+            "yaw_deg": float(avg_angle),
+            "confidence": float(avg_confidence),
+            "method": "pca_averaged",
+            "num_samples": len(angles),
+            "individual_angles": [float(a) for a in angles],
+            "individual_confidences": [float(c) for c in confidences]
+        }
 
     # ------------------------------- main run --------------------------------
 
@@ -248,6 +368,12 @@ class ScanWorker(threading.Thread):
                         # While still centered, ask for PWMs and create object in memory
                         pwms = self.motion.get_pwms(timeout_s=0.3)
                         if pwms:
+                            # Calculate grasp orientation using PCA (averaged over multiple frames)
+                            orientation_data = self._calculate_averaged_orientation(
+                                cls_id, 
+                                num_frames=getattr(C, "ORIENTATION_AVG_FRAMES", 5)
+                            )
+                            
                             # Create object entry with unique ID (returns the object_id)
                             object_id = self.memory.update_entry(
                                 cls_id=cls_id,
@@ -257,6 +383,7 @@ class ScanWorker(threading.Thread):
                                 x=0.0,  # TODO: Calculate from IK
                                 y=0.0,  # TODO: Calculate from IK
                                 z=0.0,  # TODO: Read from laser sensor
+                                orientation=orientation_data,  # Add orientation data
                             )
                             
                             # Capture image and submit for LLM enrichment (non-blocking)

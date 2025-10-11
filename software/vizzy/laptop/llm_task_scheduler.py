@@ -20,53 +20,78 @@ TASK_SCHEDULER_MODEL = os.getenv("TASK_SCHEDULER_MODEL", "gpt-5")
 
 
 # Task command types
+# Note: LLM outputs simple command names (e.g., "PICK" not "CMD_PICK")
 COMMANDS = {
-    # Low-level commands
-    "PICK": "Pick up the target object and move to resting position",
-    "MOVE_TO": "Move arm to destination (may or may not have object in claw)",
-    "ROTATE": "Rotate end-effector in roll/yaw directions",
-    "RELEASE": "Open claw to drop object or just open the claw",
+    # High-level commands (expanded by laptop into primitives)
+    "PICK": "Pick up target object and return to rest position (expanded by system)",
+    "PLACE": "Place object at destination with optional offset (expanded by system)",
     
-    # High-level commands
-    "PLACE_TO": "Move to destination and release (assumes object already in claw)",
-    "RELOCATE": "Pick up target and place at destination (combines PICK + PLACE_TO)",
+    # Low-level primitive commands (sent directly to RPi)
+    "GRAB": "Close claw/gripper",
+    "RELEASE": "Open claw/gripper",
+    "MOVE_TO": "Move end-effector to XYZ position (millimeters) with optional offset",
+    "ROT_YAW": "Rotate yaw axis by specified angle (degrees)",
+    "ROT_PITCH": "Rotate pitch axis by specified angle (degrees)",
 }
 
 
-TASK_SCHEDULER_PROMPT = """You are a task planning system for a 5-axis robotic arm with an end-effector claw.
+TASK_SCHEDULER_PROMPT = """You are a task planning system for a 5-axis robotic arm with a gripper.
 
 The user will provide a natural language request. You must parse it into a structured list of tasks.
 
+IMPORTANT: All coordinates are in MILLIMETERS.
+
 Available command types:
-- PICK: Pick up target object and return to resting position
-- MOVE_TO: Move arm to destination (with or without object)
-- ROTATE: Rotate end-effector in roll/yaw directions
-- RELEASE: Open claw to drop object or open claw
-- PLACE_TO: Move to destination and release object (assumes object in claw)
-- RELOCATE: Pick target and place at destination (high-level: PICK + PLACE_TO)
 
-Each task must be a JSON object. Task format:
-- command: PICK, MOVE_TO, ROTATE, RELEASE, PLACE_TO, or RELOCATE
-- target: object ID like 0xA1B2C3D4 or coordinate array like [1.5, 2.0, 0.3]
-- destination: object ID or coordinates (for commands that need it)
-- parameters: dict with extra params (for ROTATE: roll and yaw angles in degrees)
+HIGH-LEVEL COMMANDS (automatically expanded by the system):
+1. PICK
+   - Picks up an object and returns to rest position
+   - System expands to: RELEASE → MOVE_TO → ROT_YAW → GRAB → MOVE_TO(rest) → ROT_YAW(rest)
+   - Required field: "target" (object ID or [x_mm, y_mm, z_mm])
+   - Example: {{"command": "PICK", "target": "0xA1B2C3D4"}}
 
-Rules:
-1. Use unique object IDs (like 0xA1B2C3D4) when referring to known objects from memory
-2. Use coordinate arrays [x, y, z] for absolute positions
-3. PICK requires only target
-4. MOVE_TO requires destination
-5. PLACE_TO requires destination (assumes object already held)
-6. RELOCATE requires both target and destination
-7. RELEASE takes no target or destination
-8. ROTATE requires parameters dict with roll and/or yaw keys
+2. PLACE
+   - Places held object at destination and returns to rest position
+   - System expands to: MOVE_TO → RELEASE → MOVE_TO(rest) → ROT_YAW(rest)
+   - Required field: "destination" (object ID or [x_mm, y_mm, z_mm])
+   - Optional field: "offset" ([x_mm, y_mm, z_mm] - relative displacement)
+   - Example: {{"command": "PLACE", "destination": [1200, 800, 500], "offset": [0, 0, 50]}}
+
+LOW-LEVEL PRIMITIVES (use only when high-level commands don't apply):
+3. GRAB - Close gripper
+   - Example: {{"command": "GRAB"}}
+
+4. RELEASE - Open gripper
+   - Example: {{"command": "RELEASE"}}
+
+5. MOVE_TO - Move to XYZ position (millimeters)
+   - Required field: "destination" (object ID or [x_mm, y_mm, z_mm])
+   - Optional field: "offset" ([x_mm, y_mm, z_mm])
+   - Example: {{"command": "MOVE_TO", "destination": [1200, 800, 500]}}
+
+6. ROT_YAW - Rotate yaw axis
+   - Required field: "angle" (degrees)
+   - Example: {{"command": "ROT_YAW", "angle": 45.0}}
+
+7. ROT_PITCH - Rotate pitch axis
+   - Required field: "angle" (degrees)
+   - Example: {{"command": "ROT_PITCH", "angle": 30.0}}
+
+CRITICAL RULES:
+- Use object IDs (like "0xA1B2C3D4") when referring to known objects from memory
+- Use coordinate arrays [x, y, z] for absolute positions (in millimeters!)
+- For picking and placing: use PICK and PLACE commands (they're easier and automatic)
+- Only use primitives when you need fine control
+- Offset is always optional and relative (e.g., [0, 0, 50] means 50mm above)
+- Command names must be exact: "PICK", "PLACE", "GRAB", "RELEASE", "MOVE_TO", "ROT_YAW", "ROT_PITCH"
 
 Memory context (objects currently in the workspace):
 {memory_context}
 
 User request: {user_request}
 
-Return ONLY a JSON array of task objects. No extra text.
+Return ONLY a JSON array of task objects. No markdown, no extra text, just the JSON array.
+Example format: [{{"command": "PICK", "target": "0xA1B2C3D4"}}, {{"command": "PLACE", "destination": [1200, 800, 500]}}]
 """
 
 

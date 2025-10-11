@@ -207,6 +207,7 @@ class ObjectMemory:
         y: float = 0.0,
         z: float = 0.0,
         image_path: Optional[str] = None,
+        orientation: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Create a new object entry (backward compatible with old API).
@@ -214,6 +215,10 @@ class ObjectMemory:
         
         Returns the generated unique ID.
         """
+        extra = {}
+        if orientation:
+            extra["orientation"] = orientation
+        
         return self.create_object(
             cls_id=cls_id,
             cls_name=cls_name,
@@ -223,6 +228,7 @@ class ObjectMemory:
             y=y,
             z=z,
             image_path=image_path,
+            extra=extra if extra else None,
         )
 
     def update_semantics(self, object_id: str, semantics: Dict[str, Any]) -> None:

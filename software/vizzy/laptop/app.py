@@ -47,7 +47,6 @@ class Events:
         # TODO LLM task scheduler return event
 
 # Used by scan cycle and execution
-# TODO add execution networking interactions
 class Mailboxes:
     """Network mailboxes the ReceiverThread fills."""
     def __init__(self):
@@ -55,6 +54,9 @@ class Mailboxes:
         self.pose_ready_q: "Queue[int]" = Queue(maxsize=8)
         self.pwms_event = threading.Event()
         self.pwms_payload: dict = {}
+        
+        # NEW: For task execution primitive commands
+        self.cmd_complete_q: "Queue[dict]" = Queue(maxsize=8)  # Receives CMD_COMPLETE messages
 
 
 class StateManager:
@@ -232,6 +234,18 @@ class StateManager:
                             self.mail.pwms_event.set()
                         except Exception:
                             pass
+                    
+                    elif mtype == P.TYPE_CMD_COMPLETE:
+                        # NEW: Route primitive command completion to dispatcher queue
+                        try:
+                            self.mail.cmd_complete_q.put_nowait(msg)
+                        except Exception:
+                            # Queue full, drop oldest and try again
+                            try:
+                                self.mail.cmd_complete_q.get_nowait()
+                            except Empty:
+                                pass
+                            self.mail.cmd_complete_q.put_nowait(msg)
 
             except Exception:
                 # Reconnect path (simple)
@@ -298,6 +312,15 @@ class StateManager:
         print("[StateManager] Starting LLM worker...")
         self.llm_worker.start()
         print("[StateManager] LLM worker started")
+        
+        # Initialize command dispatcher for task execution
+        print("[StateManager] Initializing command dispatcher...")
+        from .dispatch import CommandDispatcher
+        self.dispatcher = CommandDispatcher(
+            sock=self.sock,
+            cmd_complete_queue=self.mail.cmd_complete_q
+        )
+        print("[StateManager] Command dispatcher initialized")
         
         # Start receiver (network)
         print("[StateManager] Starting receiver thread...")

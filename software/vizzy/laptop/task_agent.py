@@ -164,12 +164,8 @@ class TaskAgent(threading.Thread):
             try:
                 tasks.execute_plan(
                     plan=plan,
-                    motion=self.motion,
+                    dispatcher=self.state_mgr.dispatcher,
                     memory=self._memory,
-                    model=self.model,
-                    camera=self.cap,
-                    config=C,
-                    frame_sink=self.state_mgr.frame_bus.publish,
                 )
             except Exception as e:
                 print(f"[TaskAgent] Execution error: {e}")
