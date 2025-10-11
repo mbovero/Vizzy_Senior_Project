@@ -40,7 +40,7 @@ class C:
     SERVO_TOP = 6   # was 17
 
     # Pulse width bounds (µs)
-    SERVO_MIN    = 500
+    SERVO_MIN    = 600
     SERVO_MAX    = 2500
     SERVO_CENTER = 1500
 
