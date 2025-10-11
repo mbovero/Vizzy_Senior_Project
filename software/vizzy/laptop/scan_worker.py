@@ -89,7 +89,50 @@ class ScanWorker(threading.Thread):
         except Exception:
             return str(cid)
 
+    def _save_and_enrich(self, object_id: str, frame: np.ndarray) -> Optional[str]:
+        """
+        Save a captured frame and submit it for LLM enrichment.
+        Uses a frame that was already captured (avoiding duplicate capture).
+        
+        Args:
+            object_id: The unique object ID to enrich
+            frame: Pre-captured frame to save and enrich
+        
+        Returns:
+            Path to the saved image, or None on failure
+        """
+        if self.llm_worker is None:
+            return None
+        
+        import os
+        from .llm_semantics import upload_image
+        
+        try:
+            # Save image to disk with timestamp
+            timestamp = int(time.time() * 1000)
+            image_filename = f"{object_id}_{timestamp}.jpg"
+            image_path = os.path.join(self.image_dir, image_filename)
+            cv2.imwrite(image_path, frame)
+            print(f"[ScanWorker] Saved frame: {image_path}")
+            
+            # Upload to OpenAI
+            file_id = upload_image(image_path)
+            print(f"[ScanWorker] Uploaded image {image_path} -> file_id={file_id}")
+            
+            # Submit to LLM worker for semantic enrichment (async)
+            self.llm_worker.submit_task(object_id, file_id)
+            print(f"[ScanWorker] Submitted {object_id} for semantic enrichment")
+            
+            return image_path
+        
+        except Exception as e:
+            print(f"[ScanWorker] Error saving/enriching image for {object_id}: {e}")
+            return None
+    
     def _capture_and_enrich(self, object_id: str) -> Optional[str]:
+        """
+        DEPRECATED: Use _save_and_enrich() with pre-captured frames instead.
+        """
         """
         Capture the current centered frame, save it, upload to OpenAI, and submit to LLM worker.
         This is non-blocking - the LLM processing happens asynchronously in the worker pool.
@@ -142,27 +185,21 @@ class ScanWorker(threading.Thread):
         except Exception:
             pass
     
-    def _calculate_averaged_orientation(self, cls_id: int, num_frames: int = 5) -> dict:
+    def _capture_frames_with_masks(self, cls_id: int, num_frames: int = 5) -> list:
         """
-        Calculate grasp orientation using PCA, averaged over multiple frames.
-        
-        This improves stability by reducing noise from single-frame calculations.
+        Capture multiple frames with YOLO inference and extract masks.
+        These frames are reused for both orientation calculation and semantic enrichment.
         
         Args:
-            cls_id: Class ID of the object (for filtering YOLO detections)
-            num_frames: Number of frames to average over (default: 5)
+            cls_id: Class ID of the object to find in each frame
+            num_frames: Number of frames to capture
         
         Returns:
-            Dictionary with orientation data:
-                - yaw_deg: Average yaw angle in degrees
-                - confidence: Average confidence score
-                - method: "pca_averaged"
-                - num_samples: Number of successful measurements
+            List of dicts with keys: "frame", "mask", "angle", "confidence"
         """
-        print(f"[ScanWorker] Calculating orientation over {num_frames} frames...")
+        print(f"[ScanWorker] Capturing {num_frames} frames for orientation + enrichment...")
         
-        angles = []
-        confidences = []
+        captured = []
         
         for i in range(num_frames):
             try:
@@ -173,14 +210,7 @@ class ScanWorker(threading.Thread):
                     continue
                 
                 # Run YOLO inference
-                results = self.model.predict(
-                    frame,
-                    imgsz=C.YOLO_IMGSZ,
-                    conf=C.YOLO_CONF_THRESH,
-                    iou=C.YOLO_IOU_THRESH,
-                    verbose=False,
-                    device=self.device,
-                )
+                results = self.model(frame, verbose=C.YOLO_VERBOSE)
                 
                 if not results or len(results) == 0:
                     print(f"[ScanWorker] Frame {i+1}/{num_frames}: No detections")
@@ -215,9 +245,16 @@ class ScanWorker(threading.Thread):
                 if orientation.get("success", False):
                     angle = orientation["yaw_angle"]
                     conf = orientation["confidence"]
-                    angles.append(angle)
-                    confidences.append(conf)
-                    print(f"[ScanWorker] Frame {i+1}/{num_frames}: angle={angle:.1f}°, conf={conf:.2f}")
+                    
+                    # Store frame, mask, and orientation data
+                    captured.append({
+                        "frame": frame.copy(),  # Copy to avoid reference issues
+                        "mask": found_mask,
+                        "angle": angle,
+                        "confidence": conf
+                    })
+                    
+                    print(f"[ScanWorker] Frame {i+1}/{num_frames}: captured, angle={angle:.1f}°, conf={conf:.2f}")
                 else:
                     print(f"[ScanWorker] Frame {i+1}/{num_frames}: Orientation calc failed")
                 
@@ -228,16 +265,32 @@ class ScanWorker(threading.Thread):
                 print(f"[ScanWorker] Frame {i+1}/{num_frames}: Error: {e}")
                 continue
         
-        # Calculate averaged results
-        if len(angles) == 0:
-            print("[ScanWorker] WARNING: No successful orientation measurements")
+        print(f"[ScanWorker] Successfully captured {len(captured)}/{num_frames} frames")
+        return captured
+    
+    def _calculate_orientation_from_frames(self, frames_and_masks: list) -> dict:
+        """
+        Calculate averaged orientation from previously captured frames.
+        
+        Args:
+            frames_and_masks: List of dicts from _capture_frames_with_masks()
+        
+        Returns:
+            Dictionary with orientation data
+        """
+        if not frames_and_masks:
+            print("[ScanWorker] WARNING: No frames for orientation calculation")
             return {
                 "yaw_deg": 0.0,
                 "confidence": 0.0,
                 "method": "pca_averaged",
                 "num_samples": 0,
-                "error": "No successful measurements"
+                "error": "No frames captured"
             }
+        
+        # Extract angles and confidences
+        angles = [item["angle"] for item in frames_and_masks]
+        confidences = [item["confidence"] for item in frames_and_masks]
         
         # Use circular mean for angles (handles wraparound at -90/+90)
         angles_rad = np.deg2rad(angles)
@@ -365,14 +418,15 @@ class ScanWorker(threading.Thread):
 
                     if success:
                         successes += 1
-                        # While still centered, ask for PWMs and create object in memory
+                        # While still centered, capture multiple frames for orientation + enrichment
                         pwms = self.motion.get_pwms(timeout_s=0.3)
                         if pwms:
-                            # Calculate grasp orientation using PCA (averaged over multiple frames)
-                            orientation_data = self._calculate_averaged_orientation(
-                                cls_id, 
-                                num_frames=getattr(C, "ORIENTATION_AVG_FRAMES", 5)
-                            )
+                            # Capture frames for orientation calculation and semantic enrichment
+                            num_frames = getattr(C, "ORIENTATION_AVG_FRAMES", 5)
+                            frames_and_masks = self._capture_frames_with_masks(cls_id, num_frames)
+                            
+                            # Calculate averaged orientation from captured frames
+                            orientation_data = self._calculate_orientation_from_frames(frames_and_masks)
                             
                             # Create object entry with unique ID (returns the object_id)
                             object_id = self.memory.update_entry(
@@ -386,19 +440,21 @@ class ScanWorker(threading.Thread):
                                 orientation=orientation_data,  # Add orientation data
                             )
                             
-                            # Capture image and submit for LLM enrichment (non-blocking)
+                            # Use one of the captured frames for semantic enrichment
                             # Skip if SKIP_SEMANTIC_ENRICHMENT is enabled
                             if not getattr(C, "SKIP_SEMANTIC_ENRICHMENT", False):
-                                # The LLM worker will process this asynchronously and update semantics
-                                image_path = self._capture_and_enrich(object_id)
-                                
-                                # Update object with image path if capture succeeded
-                                if image_path and object_id:
-                                    obj = self.memory.get_object(object_id)
-                                    if obj:
-                                        obj["image_path"] = image_path
-                                        self.memory.data["objects"][object_id] = obj
-                                        self.memory.save()
+                                if frames_and_masks:
+                                    # Use the middle frame (most stable)
+                                    best_frame = frames_and_masks[len(frames_and_masks) // 2]["frame"]
+                                    image_path = self._save_and_enrich(object_id, best_frame)
+                                    
+                                    # Update object with image path if capture succeeded
+                                    if image_path and object_id:
+                                        obj = self.memory.get_object(object_id)
+                                        if obj:
+                                            obj["image_path"] = image_path
+                                            self.memory.data["objects"][object_id] = obj
+                                            self.memory.save()
                             else:
                                 print(f"[ScanWorker] Skipping semantic enrichment (SKIP_SEMANTIC_ENRICHMENT enabled)")
                     else:
