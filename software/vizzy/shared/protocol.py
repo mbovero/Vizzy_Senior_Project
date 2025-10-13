@@ -10,10 +10,6 @@ TYPE_STOP         = "TYPE_STOP"           # Laptop -> RPi; shutdown/close
 TYPE_CMD_COMPLETE = "CMD_COMPLETE"        # RPi -> Laptop; primitive command completed
 TYPE_CMD_ERROR    = "CMD_ERROR"           # RPi -> Laptop; primitive command failed
 
-# TODO Deprecated (kept for compatibility during transition; will be removed)
-TYPE_SEARCH       = "TYPE_SEARCH"         # (deprecated) start/complete search cycle
-TYPE_POSE_DONE    = "TYPE_POSE_DONE"      # (deprecated) per-pose status
-
 # -----------------------------
 # Commands (requests) - Scan System
 # -----------------------------

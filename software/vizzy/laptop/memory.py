@@ -2,8 +2,7 @@ from __future__ import annotations
 import json, os, time, threading, uuid
 from typing import Dict, Any, List, Optional
 
-# TODO: remove pwm positions and replace with object XYZ coordinates and claw grasping orientation; 
-# also remove avg_conf as I don't see us using this in the future
+
 class ObjectMemory:
     """
     Unified persistent memory combining JSONStore and ObjectMemory functionality.

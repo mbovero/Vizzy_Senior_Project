@@ -42,9 +42,7 @@ class Events:
         self.scan_active = threading.Event()
         self.scan_abort = threading.Event()       # reserved for future interrupt
         self.scan_finished = threading.Event()
-        self.search_completed_from_rpi = threading.Event()  # ReceiverThread sets on SEARCH {active:false}
         self.query_ready = threading.Event()
-        # TODO LLM task scheduler return event
 
 # Used by scan cycle and execution
 class Mailboxes:
@@ -218,12 +216,6 @@ class StateManager:
                                 pass
                             self.mail.pose_ready_q.put_nowait(int(msg.get("pose_id", 0)))
 
-                    elif mtype == P.TYPE_SEARCH:
-                        # RPi default completion
-                        if msg.get("active") is False:
-                            self.search_mode = False
-                            self.events.search_completed_from_rpi.set()
-
                     elif mtype == P.TYPE_PWMS:
                         try:
                             self.mail.pwms_payload.clear()
@@ -379,12 +371,6 @@ class StateManager:
                 # Kick off search if requested and not active
                 if self.events.search_requested.is_set() and not self.events.scan_active.is_set():
                     self.start_search()
-
-                # If RPi completed the sweep, ScanWorker should end; finish when we see it
-                if self.events.search_completed_from_rpi.is_set() and self.events.scan_active.is_set():
-                    if self.events.scan_finished.is_set():
-                        self.finish_search()
-                        self.events.search_completed_from_rpi.clear()
 
                 # If a scan ended (via interrupt) TODO
                 if self.events.scan_finished.is_set() and self.events.scan_active.is_set():

@@ -59,7 +59,8 @@ def center_on_class(
     display_scale: float,
     label: str,
     frame_sink: Callable[[np.ndarray], None],
-) -> bool:
+    collect_frames: bool = False,
+) -> Tuple[bool, list]:
     """
     Closed-loop centering on a class for up to config.CENTER_DURATION_MS.
 
@@ -72,13 +73,15 @@ def center_on_class(
         display_scale: Scale factor for displayed frames.
         label: HUD label prefix.
         frame_sink: Callback to publish frames to main/UI thread.
+        collect_frames: If True, collect stable frames with masks for orientation calculation.
 
     Returns:
-        success (bool)
+        (success, collected_frames): success is bool, collected_frames is list of dicts with "frame" and "mask"
     """
     t0 = time.time()
     good_frames = 0
     success = False
+    captured_frames = []
 
     # Loop until time budget is exhausted
     while (time.time() - t0) < (config.CENTER_DURATION_MS / 1000.0):
@@ -144,6 +147,17 @@ def center_on_class(
                 # Count stable frames toward quota
                 if conf_ok and err_ok and move_ok:
                     good_frames += 1
+                    
+                    # Collect frames with masks if requested
+                    if collect_frames and good_frames <= config.CENTER_FRAMES:
+                        # Find the mask tensor for this detection
+                        mask_tensor = mask_list[i] if mask_list is not None and i < len(mask_list) else None
+                        if mask_tensor is not None:
+                            captured_frames.append({
+                                "frame": frame.copy(),
+                                "mask": mask_tensor
+                            })
+                    
                     if good_frames >= config.CENTER_FRAMES:
                         success = True
 
@@ -174,4 +188,4 @@ def center_on_class(
     # Clear any class filter set during this centering attempt
     clear_class_filter(model)
 
-    return success
+    return success, captured_frames

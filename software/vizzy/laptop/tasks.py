@@ -139,7 +139,7 @@ def expand_high_level_commands(plan: List[Dict], memory: ObjectMemory) -> List[D
     
     return expanded
 
-# TODO: Ensure that orientation is added to memory before this function is called
+
 def get_grasp_orientation(target: Any, memory: ObjectMemory) -> float:
     """
     Get the grasp orientation (yaw angle) for a target object.
@@ -156,14 +156,9 @@ def get_grasp_orientation(target: Any, memory: ObjectMemory) -> float:
         if obj:
             # Check if object has orientation data
             orientation = obj.get("orientation", {})
-            if orientation:
-                yaw = orientation.get("yaw_deg", 0.0)
-                conf = orientation.get("confidence", 0.0)
-                print(f"[Tasks] Object {target} grasp angle: {yaw:.1f}° (confidence: {conf:.2f})")
-                return yaw
-            else:
-                print(f"[Tasks] Object {target} has no orientation data, using default (0.0°)")
-                return 0.0
+            yaw = orientation.get("grasp_yaw", 0.0)
+            print(f"[Tasks] Object {target} grasp angle: {yaw:.1f}°")
+            return yaw
         else:
             print(f"[Tasks] Warning: Object {target} not found in memory, using default angle (0.0°)")
             return 0.0
@@ -266,7 +261,7 @@ def _resolve_to_xyz(target: Any, memory: ObjectMemory) -> Optional[List[float]]:
 # ============================================================================
 # Step 3: Convert to Protocol Format
 # ============================================================================
-# TODO: Remove later (not needed anymore)
+
 def convert_to_protocol_format(plan: List[Dict]) -> List[Dict]:
     """
     Convert resolved commands to protocol format using P.CMD_* constants.

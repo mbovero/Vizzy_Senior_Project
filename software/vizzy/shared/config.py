@@ -87,11 +87,6 @@ POSE_SETTLE_S = 0.30
 # Idle/auto-search behavior (laptop)
 IDLE_TIMEOUT_S = 20.0   # seconds of inactivity before auto SEARCH
 
-# Rest position and orientation for arm
-REST_POSITION = [0.0, 0.0, 10.0]  # TODO: Configure based on actual robot home position
-REST_YAW_ANGLE = 0.0              # Resting yaw orientation (degrees)
-REST_PITCH_ANGLE = 0.0            # Resting pitch orientation (degrees)
-
 # -----------------------------
 # LLM / Semantic Enrichment
 # -----------------------------
@@ -133,5 +128,5 @@ PRIMITIVE_CMD_TIMEOUT = 30.0
 # -----------------------------
 # Orientation Calculation
 # -----------------------------
-# Number of frames to average for orientation calculation (reduces noise)
-ORIENTATION_AVG_FRAMES = 5
+# Note: Orientation is calculated from frames collected during centering (CENTER_FRAMES)
+# No additional frame capture needed - reuses centering frames for efficiency
