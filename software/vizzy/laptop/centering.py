@@ -83,8 +83,8 @@ def center_on_class(
     success = False
     captured_frames = []
 
-    # Loop until time budget is exhausted
-    while (time.time() - t0) < (config.CENTER_DURATION_MS / 1000.0):
+    # Loop until time budget is exhausted or success achieved
+    while (time.time() - t0) < (config.CENTER_DURATION_MS / 1000.0) and not success:
         ok, frame = cap.read()
         if not ok:
             break
@@ -148,8 +148,8 @@ def center_on_class(
                 if conf_ok and err_ok and move_ok:
                     good_frames += 1
                     
-                    # Collect frames with masks if requested
-                    if collect_frames and good_frames <= config.CENTER_FRAMES:
+                    # Collect frames with masks if requested (only up to CENTER_FRAMES)
+                    if collect_frames and len(captured_frames) < config.CENTER_FRAMES:
                         # Find the mask tensor for this detection
                         mask_tensor = mask_list[i] if mask_list is not None and i < len(mask_list) else None
                         if mask_tensor is not None:
@@ -160,6 +160,7 @@ def center_on_class(
                     
                     if good_frames >= config.CENTER_FRAMES:
                         success = True
+                        break  # Exit immediately when quota reached
 
                 # ---------------- HUD ----------------
                 # Object center (red)
