@@ -142,6 +142,7 @@ class ScanWorker(threading.Thread):
         except Exception:
             pass
     
+    # TODO: Remove all irrelevant information and only return the average yaw degrees. Remove this TODO when done...
     def _calculate_averaged_orientation(self, cls_id: int, num_frames: int = 5) -> dict:
         """
         Calculate grasp orientation using PCA, averaged over multiple frames.
@@ -288,7 +289,6 @@ class ScanWorker(threading.Thread):
                     time.sleep(C.POSE_SETTLE_S)
 
                 # Per-pose repeat: try to find and center multiple distinct classes
-                successes = 0
                 attempts = 0
                 fails_at_pose: Dict[int, int] = {}
                 print(f"[ScanWorker] Starting scan loop at pose {pid}...")
@@ -341,7 +341,7 @@ class ScanWorker(threading.Thread):
 
                     # Centering loop; this owns the HUD during SEARCH
                     self._centering_active = True
-                    success = bool(
+                    center_success = bool(
                         center_on_class(
                             cap=self.cap,
                             model=self.model,
@@ -356,44 +356,44 @@ class ScanWorker(threading.Thread):
                     )
                     self._centering_active = False
 
-                    if success:
-                        successes += 1
-                        # While still centered, ask for PWMs and create object in memory
+                    # When success centering, get grasp orientation and create object
+                    if center_success:
+                        # Request position data 
                         pwms = self.motion.get_pwms(timeout_s=0.3)
-                        if pwms:
-                            # Calculate grasp orientation using PCA (averaged over multiple frames)
-                            orientation_data = self._calculate_averaged_orientation(
-                                cls_id, 
-                                num_frames=getattr(C, "ORIENTATION_AVG_FRAMES", 5)
-                            )
+                        
+                        # Calculate grasp orientation using PCA (averaged over multiple frames)
+                        orientation_data = self._calculate_averaged_orientation(
+                            cls_id, 
+                            num_frames=getattr(C, "ORIENTATION_AVG_FRAMES", 5)
+                        )
+                        
+                        # Create object entry with unique ID (returns the object_id)
+                        object_id = self.memory.update_entry(
+                            cls_id=cls_id,
+                            cls_name=candidate.get("cls_name", self._get_name(cls_id)),
+                            pwm_btm=int(pwms["pwm_btm"]),
+                            pwm_top=int(pwms["pwm_top"]),
+                            x=0.0,  # TODO: Calculate from IK
+                            y=0.0,  # TODO: Calculate from IK
+                            z=0.0,  # TODO: Read from laser sensor
+                            orientation=orientation_data,  # Add orientation data
+                        )
+                        
+                        # Capture image and submit for LLM enrichment (non-blocking)
+                        # Skip if SKIP_SEMANTIC_ENRICHMENT is enabled
+                        if not getattr(C, "SKIP_SEMANTIC_ENRICHMENT", False):
+                            # The LLM worker will process this asynchronously and update semantics
+                            image_path = self._capture_and_enrich(object_id)
                             
-                            # Create object entry with unique ID (returns the object_id)
-                            object_id = self.memory.update_entry(
-                                cls_id=cls_id,
-                                cls_name=candidate.get("cls_name", self._get_name(cls_id)),
-                                pwm_btm=int(pwms["pwm_btm"]),
-                                pwm_top=int(pwms["pwm_top"]),
-                                x=0.0,  # TODO: Calculate from IK
-                                y=0.0,  # TODO: Calculate from IK
-                                z=0.0,  # TODO: Read from laser sensor
-                                orientation=orientation_data,  # Add orientation data
-                            )
-                            
-                            # Capture image and submit for LLM enrichment (non-blocking)
-                            # Skip if SKIP_SEMANTIC_ENRICHMENT is enabled
-                            if not getattr(C, "SKIP_SEMANTIC_ENRICHMENT", False):
-                                # The LLM worker will process this asynchronously and update semantics
-                                image_path = self._capture_and_enrich(object_id)
-                                
-                                # Update object with image path if capture succeeded
-                                if image_path and object_id:
-                                    obj = self.memory.get_object(object_id)
-                                    if obj:
-                                        obj["image_path"] = image_path
-                                        self.memory.data["objects"][object_id] = obj
-                                        self.memory.save()
-                            else:
-                                print(f"[ScanWorker] Skipping semantic enrichment (SKIP_SEMANTIC_ENRICHMENT enabled)")
+                            # Update object with image path if capture succeeded
+                            if image_path and object_id:
+                                obj = self.memory.get_object(object_id)
+                                if obj:
+                                    obj["image_path"] = image_path
+                                    self.memory.data["objects"][object_id] = obj
+                                    self.memory.save()
+                        else:
+                            print(f"[ScanWorker] Skipping semantic enrichment (SKIP_SEMANTIC_ENRICHMENT enabled)")
                     else:
                         # Track failures to avoid infinite loops on hard cases
                         fails_at_pose[cls_id] = fails_at_pose.get(cls_id, 0) + 1
