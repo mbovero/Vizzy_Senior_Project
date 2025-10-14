@@ -23,7 +23,6 @@ def calculate_grasp_angle(mask: np.ndarray) -> Dict[str, Any]:
             - success: bool, whether calculation succeeded
             - yaw_angle: float, rotation angle in degrees [-90, 90]
             - confidence: float, confidence score based on elongation (0-1)
-            - grasp_width_px: always None (not available from PCA)
             - center: (x, y) centroid of the mask
             - elongation: float, ratio between major/minor axes
             - error: str (only if success=False)
@@ -59,7 +58,6 @@ def calculate_grasp_angle(mask: np.ndarray) -> Dict[str, Any]:
         "success": True,
         "yaw_angle": angle,
         "confidence": float(confidence),
-        "grasp_width_px": None,
         "center": (float(mean[0]), float(mean[1])),
         "elongation": elongation,
     }
