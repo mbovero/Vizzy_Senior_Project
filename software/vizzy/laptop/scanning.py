@@ -130,6 +130,7 @@ def run_scan_window(
     *,
     frame_sink: FrameSink,                 # REQUIRED: main-thread renderer
     display_scale: float = None,
+    allowed_class_ids: Optional[Iterable[int]] = None,
 ) -> dict:
     """
     Run a short scan window and aggregate per-class stats while continuously
@@ -150,6 +151,8 @@ def run_scan_window(
     hud_text = f"SCANNING ~{window_ms} ms"
     duration_s = float(window_ms) / 1000.0
 
+    allowed_ids = list(allowed_class_ids) if allowed_class_ids is not None else None
+
     while (time.time() - t0) < duration_s:
         ok, frame = cap.read()
         if not ok:
@@ -158,7 +161,7 @@ def run_scan_window(
         h, w = frame.shape[:2]
 
         # Run YOLO and get an annotated image to display
-        results = model(frame, verbose = C.YOLO_VERBOSE)
+        results = model(frame, classes=allowed_ids, verbose = C.YOLO_VERBOSE)
 
         annotated = frame  # fallback if no results object behaves oddly
         for r in results:

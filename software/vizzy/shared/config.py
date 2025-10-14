@@ -17,6 +17,14 @@ YOLO_MODEL = str(LAPTOP_DIR / "yolo11m-seg.engine")
 CAM_INDEX = 4
 DISPLAY_SCALE = 1.3
 YOLO_VERBOSE = False
+OBJ_BLACKLIST = [
+    "person",
+    "chair",
+    "tv",
+    "laptop",
+    "keyboard",
+    "dining table",
+]
 
 # Duration knobs (ms)
 SCAN_DURATION_MS   = 1750   # Per-pose scan window
