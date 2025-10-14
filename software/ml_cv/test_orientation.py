@@ -6,26 +6,41 @@ Runs YOLO on camera feed and displays orientation angles for detected objects.
 Press 'q' to quit.
 
 Usage:
-    python test_orientation.py              # Use minrect (default)
-    python test_orientation.py --method pca # Use PCA
-    python test_orientation.py -m moments   # Use moments
+    python test_orientation.py                          # Use minrect (default)
+    python test_orientation.py --method pca             # Use PCA
+    python test_orientation.py -m moments               # Use moments
+    python test_orientation.py --engine /path/to/model  # Custom engine
 """
+
+import argparse
+from pathlib import Path
+from typing import Union
 
 import cv2
 import numpy as np
-import argparse
 from ultralytics import YOLO
+
 from orientation import calculate_grasp_angle, visualize_orientation
 
-def main(method="minrect"):
+SCRIPT_DIR = Path(__file__).resolve().parent
+SOFTWARE_DIR = SCRIPT_DIR.parent
+DEFAULT_ENGINE = SOFTWARE_DIR / "vizzy" / "laptop" / "yolo11m-seg.engine"
+CAM_INDEX = 0
+
+def main(method="minrect", engine_path: Union[Path, str] = DEFAULT_ENGINE):
+    engine_path = Path(engine_path)
     print("[Orientation Test] Starting...")
     print(f"[Orientation Test] Using method: {method}")
+    print(f"[Orientation Test] Loading engine: {engine_path}")
+
+    if not engine_path.exists():
+        print(f"[Orientation Test] WARNING: Engine file not found: {engine_path}")
     
     # Load YOLO model
-    model = YOLO("yolo11m-seg.engine")
+    model = YOLO(str(engine_path))
     
     # Open camera
-    cap = cv2.VideoCapture(4)
+    cap = cv2.VideoCapture(CAM_INDEX)
     if not cap.isOpened():
         print(f"[Orientation Test] ERROR: Cannot open camera ")
         return
@@ -145,7 +160,12 @@ if __name__ == "__main__":
         choices=["minrect", "pca", "moments"],
         help="Orientation calculation method (default: minrect)"
     )
+    parser.add_argument(
+        "--engine",
+        type=str,
+        default=str(DEFAULT_ENGINE),
+        help="Path to YOLO engine file (default: vizzy/laptop/yolo11m-seg.engine)"
+    )
     
     args = parser.parse_args()
-    main(method=args.method)
-
+    main(method=args.method, engine_path=args.engine)

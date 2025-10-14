@@ -172,8 +172,7 @@ class ScanWorker(threading.Thread):
                 mask_u8 = (mask_resized * 255).astype(np.uint8)
                 
                 # Calculate orientation using PCA
-                from .orientation import calculate_grasp_angle
-                orientation = calculate_grasp_angle(mask_u8, method="pca")
+                orientation = calculate_grasp_angle(mask_u8)
                 
                 if orientation.get("success", False):
                     angle = orientation["yaw_angle"]
