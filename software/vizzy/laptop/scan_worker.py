@@ -46,7 +46,6 @@ class ScanWorker(threading.Thread):
         frame_sink: FrameSink = None,
         llm_worker=None,  # NEW: LLM WorkerManager for semantic enrichment
         memory=None,  # NEW: Shared ObjectMemory instance
-        terminal_ui=None,  # NEW: Terminal UI for logging
     ):
         super().__init__(name="ScanWorker")
         self.sock = sock
@@ -58,7 +57,6 @@ class ScanWorker(threading.Thread):
         self.display_scale = float(display_scale)
         self.frame_sink = frame_sink
         self.llm_worker = llm_worker  # NEW: LLM worker pool for semantic enrichment
-        self.terminal_ui = terminal_ui  # NEW: Terminal UI for logging
 
         # names map for labels
         self._names = model.names
@@ -112,8 +110,7 @@ class ScanWorker(threading.Thread):
             # Capture current centered frame
             ok, frame = self.cap.read()
             if not ok:
-                if self.terminal_ui:
-                    self.terminal_ui.debug(f"[ScanWorker] Failed to capture image for {object_id}")
+                print(f"[ScanWorker] Failed to capture image for {object_id}")
                 return None
             
             # Save image to disk with timestamp
@@ -121,24 +118,20 @@ class ScanWorker(threading.Thread):
             image_filename = f"{object_id}_{timestamp}.jpg"
             image_path = os.path.join(self.image_dir, image_filename)
             cv2.imwrite(image_path, frame)
-            if self.terminal_ui:
-                self.terminal_ui.debug(f"[ScanWorker] Captured image: {image_path}")
+            print(f"[ScanWorker] Captured image: {image_path}")
             
             # Upload to OpenAI
             file_id = upload_image(image_path)
-            if self.terminal_ui:
-                self.terminal_ui.debug(f"[ScanWorker] Uploaded image {image_path} -> file_id={file_id}")
+            print(f"[ScanWorker] Uploaded image {image_path} -> file_id={file_id}")
             
             # Submit to LLM worker pool (non-blocking - returns immediately)
             uid, fut = self.llm_worker.submit(object_id=object_id, file_id=file_id)
-            if self.terminal_ui:
-                self.terminal_ui.debug(f"[ScanWorker] Submitted enrichment task {uid[:8]} for {object_id}")
+            print(f"[ScanWorker] Submitted enrichment task {uid[:8]} for {object_id}")
             
             return image_path
         
         except Exception as e:
-            if self.terminal_ui:
-                self.terminal_ui.debug(f"[ScanWorker] Error capturing/enriching image for {object_id}: {e}")
+            print(f"[ScanWorker] Error capturing/enriching image for {object_id}: {e}")
             return None
 
     def _flush_capture(self, frames: int = 5) -> None:
@@ -160,12 +153,10 @@ class ScanWorker(threading.Thread):
             Dictionary with orientation data: {"grasp_yaw": float}
         """
         if not frames_list:
-            if self.terminal_ui:
-                self.terminal_ui.debug("[ScanWorker] WARNING: No frames collected for orientation calculation")
+            print("[ScanWorker] WARNING: No frames collected for orientation calculation")
             return {"grasp_yaw": 0.0}
         
-        if self.terminal_ui:
-            self.terminal_ui.debug(f"[ScanWorker] Calculating orientation from {len(frames_list)} collected frames...")
+        print(f"[ScanWorker] Calculating orientation from {len(frames_list)} collected frames...")
         
         angles = []
         
@@ -187,21 +178,17 @@ class ScanWorker(threading.Thread):
                 if orientation.get("success", False):
                     angle = orientation["yaw_angle"]
                     angles.append(angle)
-                    if self.terminal_ui:
-                        self.terminal_ui.debug(f"[ScanWorker] Frame {i+1}/{len(frames_list)}: angle={angle:.1f}°")
+                    print(f"[ScanWorker] Frame {i+1}/{len(frames_list)}: angle={angle:.1f}°")
                 else:
-                    if self.terminal_ui:
-                        self.terminal_ui.debug(f"[ScanWorker] Frame {i+1}/{len(frames_list)}: Orientation calc failed")
+                    print(f"[ScanWorker] Frame {i+1}/{len(frames_list)}: Orientation calc failed")
                 
             except Exception as e:
-                if self.terminal_ui:
-                    self.terminal_ui.debug(f"[ScanWorker] Frame {i+1}/{len(frames_list)}: Error: {e}")
+                print(f"[ScanWorker] Frame {i+1}/{len(frames_list)}: Error: {e}")
                 continue
         
         # Calculate averaged results
         if len(angles) == 0:
-            if self.terminal_ui:
-                self.terminal_ui.debug("[ScanWorker] WARNING: No successful orientation measurements")
+            print("[ScanWorker] WARNING: No successful orientation measurements")
             return {"grasp_yaw": 0.0}
         
         # Use circular mean for angles (handles wraparound at -90/+90)
@@ -210,30 +197,25 @@ class ScanWorker(threading.Thread):
         mean_cos = np.mean(np.cos(angles_rad))
         avg_angle = np.rad2deg(np.arctan2(mean_sin, mean_cos))
         
-        if self.terminal_ui:
-            self.terminal_ui.debug(f"[ScanWorker] Orientation result: {len(angles)} samples, angle={avg_angle:.1f}°")
+        print(f"[ScanWorker] Orientation result: {len(angles)} samples, angle={avg_angle:.1f}°")
         
         return {"grasp_yaw": round(float(avg_angle), 2)}
 
     # ------------------------------- main run --------------------------------
 
     def run(self) -> None:
-        if self.terminal_ui:
-            self.terminal_ui.debug("[ScanWorker] Thread started, initializing scan...")
+        print("[ScanWorker] Thread started, initializing scan...")
         # Mark entries as not updated for this session
         self.memory.reset_session_flags()
         self.events.scan_finished.clear()
 
-        if self.terminal_ui:
-            self.terminal_ui.debug("[ScanWorker] Building search path...")
+        print("[ScanWorker] Building search path...")
         path = build_search_path()  # [{"pose_id","pwm_btm","pwm_top","slew_ms"}, ...]
-        if self.terminal_ui:
-            self.terminal_ui.debug(f"[ScanWorker] Search path has {len(path)} poses")
+        print(f"[ScanWorker] Search path has {len(path)} poses")
 
         try:
             # Iterate poses locally; RPi just executes gotos & nudges.
-            if self.terminal_ui:
-                self.terminal_ui.debug("[ScanWorker] Starting pose iteration...")
+            print("[ScanWorker] Starting pose iteration...")
             for pose in path:
                 if self.events.scan_abort.is_set():
                     break
@@ -241,27 +223,22 @@ class ScanWorker(threading.Thread):
                 pid = int(pose["pose_id"])
                 btm = int(pose["pwm_btm"])
                 top = int(pose["pwm_top"])
-                if self.terminal_ui:
-                    self.terminal_ui.debug(f"[ScanWorker] Pose {pid}: BTM={btm}, TOP={top}, SLEW={pose.get('slew_ms')}")
+                print(f"[ScanWorker] Pose {pid}: BTM={btm}, TOP={top}, SLEW={pose.get('slew_ms')}")
 
                 # Go to baseline pose for this grid point
-                if self.terminal_ui:
-                    self.terminal_ui.debug(f"[ScanWorker] Sending GOTO_POSE to RPi...")
+                print(f"[ScanWorker] Sending GOTO_POSE to RPi...")
                 ok = self.motion.goto_pose_pwm(btm, top, pose_id=pid)
                 if ok:
-                    if self.terminal_ui:
-                        self.terminal_ui.debug(f"[ScanWorker] POSE_READY received")
+                    print(f"[ScanWorker] POSE_READY received")
                 else:
                     # If ack missing, proceed cautiously after an extra dwell
-                    if self.terminal_ui:
-                        self.terminal_ui.debug(f"[ScanWorker] No POSE_READY received, settling...")
+                    print(f"[ScanWorker] No POSE_READY received, settling...")
                     time.sleep(C.POSE_SETTLE_S)
 
                 # Per-pose repeat: try to find and center multiple distinct classes
                 attempts = 0
                 fails_at_pose: Dict[int, int] = {}
-                if self.terminal_ui:
-                    self.terminal_ui.debug(f"[ScanWorker] Starting scan loop at pose {pid}...")
+                print(f"[ScanWorker] Starting scan loop at pose {pid}...")
 
                 # Ensure we start each scan loop with fresh frames from the baseline pose
                 self._flush_capture()
@@ -359,8 +336,7 @@ class ScanWorker(threading.Thread):
                                     self.memory.data["objects"][object_id] = obj
                                     self.memory.save()
                         else:
-                            if self.terminal_ui:
-                                self.terminal_ui.debug(f"[ScanWorker] Skipping semantic enrichment (SKIP_SEMANTIC_ENRICHMENT enabled)")
+                            print(f"[ScanWorker] Skipping semantic enrichment (SKIP_SEMANTIC_ENRICHMENT enabled)")
                     else:
                         # Track failures to avoid infinite loops on hard cases
                         fails_at_pose[cls_id] = fails_at_pose.get(cls_id, 0) + 1
@@ -368,8 +344,7 @@ class ScanWorker(threading.Thread):
                     # --- Always return to the baseline pose before next attempt ---
                     returned = self.motion.goto_pose_pwm(btm, top, pose_id=pid)
                     if not returned:
-                        if self.terminal_ui:
-                            self.terminal_ui.debug("[ScanWorker] RETURN pose ack missing or aborted; continuing after settle...")
+                        print("[ScanWorker] RETURN pose ack missing or aborted; continuing after settle...")
                     time.sleep(C.RETURN_TO_POSE_DWELL_S)
                     self._flush_capture()
 

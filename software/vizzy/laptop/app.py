@@ -32,9 +32,6 @@ from .display_bus import FrameBus
 from .llm_worker import WorkerManager
 from .memory import ObjectMemory
 
-# NEW: Dual terminal UI
-from .terminal_ui import TerminalUI
-
 StateName = Literal["IDLE", "SEARCH", "PROCESS_QUERY", "EXECUTE_TASK", "INTERRUPT"]
 
 
@@ -58,9 +55,6 @@ class Mailboxes:
         
         # NEW: For task execution primitive commands
         self.cmd_complete_q: "Queue[dict]" = Queue(maxsize=8)  # Receives CMD_COMPLETE messages
-        
-        # NEW: Terminal UI for dual-panel display
-        self.terminal_ui = TerminalUI()
 
 
 class StateManager:
@@ -157,7 +151,7 @@ class StateManager:
             )
 
         # Hand off the camera to the worker directly; worker pushes frames to frame_bus
-        self.mail.terminal_ui.debug("[StateManager] Creating ScanWorker thread...")
+        print("[StateManager] Creating ScanWorker thread...")
         worker = ScanWorker(
             sock=self.sock,
             cap=self.cap,
@@ -169,15 +163,14 @@ class StateManager:
             frame_sink=self.frame_bus.publish,   # NEW: push frames to main thread
             llm_worker=self.llm_worker,          # NEW: LLM worker pool for enrichment
             memory=self.memory,                  # NEW: Share same memory instance!
-            terminal_ui=self.mail.terminal_ui,   # NEW: Terminal UI for logging
         )
         worker.daemon = True
-        self.mail.terminal_ui.debug("[StateManager] Starting ScanWorker thread...")
+        print("[StateManager] Starting ScanWorker thread...")
         worker.start()
         self.scan_worker = worker
         self.events.scan_active.set()
         self._switch_state("SEARCH")
-        self.mail.terminal_ui.user("Scan started - searching for objects...")
+        print("[StateManager] Entered SEARCH state, ScanWorker is running")
 
     def finish_search(self) -> None:
         """Handle end-of-grid or manual stop; return to IDLE and reset idle timer."""
@@ -305,57 +298,55 @@ class StateManager:
 
     def start(self) -> None:
         """Start background threads and enter the FSM main loop."""
-        # Start terminal UI first
-        self.mail.terminal_ui.start()
-        self.mail.terminal_ui.debug("[StateManager] Starting background threads...")
+        print("[StateManager] Starting background threads...")
         
         # Start LLM worker manager
-        self.mail.terminal_ui.debug("[StateManager] Starting LLM worker...")
+        print("[StateManager] Starting LLM worker...")
         self.llm_worker.start()
-        self.mail.terminal_ui.debug("[StateManager] LLM worker started")
+        print("[StateManager] LLM worker started")
         
         # Initialize command dispatcher for task execution
-        self.mail.terminal_ui.debug("[StateManager] Initializing command dispatcher...")
+        print("[StateManager] Initializing command dispatcher...")
         from .dispatch import CommandDispatcher
         self.dispatcher = CommandDispatcher(
             sock=self.sock,
             cmd_complete_queue=self.mail.cmd_complete_q
         )
-        self.mail.terminal_ui.debug("[StateManager] Command dispatcher initialized")
+        print("[StateManager] Command dispatcher initialized")
         
         # Start receiver (network)
-        self.mail.terminal_ui.debug("[StateManager] Starting receiver thread...")
+        print("[StateManager] Starting receiver thread...")
         self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self.receiver_thread.start()
-        self.mail.terminal_ui.debug("[StateManager] Receiver thread started")
+        print("[StateManager] Receiver thread started")
 
         # Start TaskAgent (user input -> plan -> execute)
-        self.mail.terminal_ui.debug("[StateManager] Starting TaskAgent...")
+        print("[StateManager] Starting TaskAgent...")
         from .task_agent import TaskAgent
         agent = TaskAgent(state_mgr=self, events=self.events)
         agent.daemon = True
         agent.start()
         self.task_agent = agent
-        self.mail.terminal_ui.debug("[StateManager] TaskAgent started")
+        print("[StateManager] TaskAgent started")
 
-        self.mail.terminal_ui.debug(f"[Laptop] StateManager started on device={self.device}")
-        self.mail.terminal_ui.user("System initialized. Starting main loop...")
+        print(f"[Laptop] StateManager started on device={self.device}")
+        print("[StateManager] Entering main loop...")
 
         self.run()
 
     def run(self) -> None:
         """Small FSM: IDLE preview + timers; kicks off SEARCH when requested."""
-        self.mail.terminal_ui.debug("[StateManager] Main loop started, entering IDLE state")
+        print("[StateManager] Main loop started, entering IDLE state")
         
         # Check if SKIP_TO_TASK_SCHEDULER or SKIP_SCAN_CYCLE is enabled
         if getattr(C, "SKIP_TO_TASK_SCHEDULER", False) or getattr(C, "SKIP_SCAN_CYCLE", False):
             skip_mode = "TASK_SCHEDULER_ONLY" if getattr(C, "SKIP_TO_TASK_SCHEDULER", False) else "SKIP_SCAN"
-            self.mail.terminal_ui.user("="*70)
-            self.mail.terminal_ui.user(f"[StateManager] {skip_mode} MODE")
-            self.mail.terminal_ui.user("[StateManager] Bypassing scan cycle - using existing object memory")
-            self.mail.terminal_ui.user("[StateManager] Memory will NOT be cleared")
-            self.mail.terminal_ui.user("[StateManager] Ready for user queries...")
-            self.mail.terminal_ui.user("="*70)
+            print("="*70)
+            print(f"[StateManager] {skip_mode} MODE")
+            print("[StateManager] Bypassing scan cycle - using existing object memory")
+            print("[StateManager] Memory will NOT be cleared")
+            print("[StateManager] Ready for user queries...")
+            print("="*70)
             # Skip scan cycle, just wait for user input - memory persists
             while True:
                 time.sleep(0.1)
