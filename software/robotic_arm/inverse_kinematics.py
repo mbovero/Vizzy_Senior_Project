@@ -6,6 +6,18 @@ from typing import Optional, Tuple, Dict
 # ========================= USER SETUP CHECKLIST =========================
 # Fill these in before using IK:
 # 1) ArmParams (geometry): L1, L2, L3, L4  [meters]
+#    Provided by user (converted from mm):
+#      L1 = 176.932 mm  -> 0.176932 m
+#      L2 = 162.737 mm  -> 0.162737 m
+#      L3 = 226.991 mm  -> 0.226991 m
+#      L4 = 120.47  mm  -> 0.12047  m
+#    Notes: you also provided horizontal offsets:
+#      Base horizontal offset ≈ 60.633 mm
+#      Forearm horizontal offset sum ≈ 57.78 mm
+#    The current analytic solver treats links in a single vertical plane after yaw.
+#    These horizontal (in-plane) offsets are typically already reflected in your
+#    measured center-to-center distances (L2, L3). If you need an explicit base
+#    X-offset from the yaw axis to shoulder axis, we can add a parameter later.
 # 2) JointCalib for q1..q4: theta0 [rad], sign (+1 or -1), limits [rad]
 #    Optional PWM mapping per joint: pwm_m (rad/µs), pwm_b (rad)
 # 3) prefer_elbow_up: True/False (your default elbow branch)
@@ -26,36 +38,50 @@ class JointCalib:
     sign: +1 if increasing hardware command increases the positive geometric angle; else -1.
     min_rad, max_rad: joint safety limits in *geometric* radians (after applying theta0 & sign).
 
-    Optional PWM mapping: angle (rad) <-> PWM microseconds via linear map.
-      angle(rad) = pwm_m * PWM(µs) + pwm_b
-      If you don't use PWM (e.g., FOC position loop), leave m/b as None.
+    Gear/command mapping options:
+      - If pwm_m/pwm_b are provided, we map angle(rad) <-> PWM microseconds via linear map:
+            angle(rad) = pwm_m * PWM(µs) + pwm_b
+      - Otherwise, we assume the motor command is in **motor turns**, where 1.0 = one full motor revolution.
+        Use `gear_ratio` to convert joint angle <-> motor turns.
+          gear_ratio = (motor turns) / (joint turns). Example: 9:1 gearbox -> gear_ratio = 9.0
     """
     theta0: float = 0.0
     sign: int = 1
     min_rad: float = -pi
     max_rad: float = pi
 
+    # Option A: direct PWM mapping (optional)
     pwm_m: Optional[float] = None
     pwm_b: Optional[float] = None
+
+    # Option B: gear mapping to motor turns when PWM mapping is not used
+    gear_ratio: float = 1.0  # motor_turns / joint_turn
 
     def clamp(self, q: float) -> float:
         return max(self.min_rad, min(self.max_rad, q))
 
     def rad_to_cmd(self, q: float) -> float:
-        """Convert geometric angle (rad) to hardware command (PWM µs) if mapping provided; else returns angle."""
+        """Convert geometric angle (rad) to hardware command.
+        If PWM mapping is set -> returns PWM µs. Else -> returns **motor turns**.
+        """
         # Convert to joint's hardware-native angle first (invert zero and sign)
-        hw_angle = self.sign * (q - self.theta0)
-        if self.pwm_m is None or self.pwm_b is None:
-            return hw_angle
-        return (hw_angle - self.pwm_b) / self.pwm_m
+        hw_angle_joint = self.sign * (q - self.theta0)  # radians at the joint
+        if self.pwm_m is not None and self.pwm_b is not None:
+            return (hw_angle_joint - self.pwm_b) / self.pwm_m
+        # No PWM mapping: return motor turns (1.0 = one motor revolution)
+        motor_turns = (self.gear_ratio * hw_angle_joint) / (2.0 * pi)
+        return motor_turns
 
     def cmd_to_rad(self, cmd: float) -> float:
-        """Convert hardware command (PWM µs) to geometric angle (rad) if mapping provided; cmd may be angle if no mapping."""
-        if self.pwm_m is None or self.pwm_b is None:
-            hw_angle = cmd
+        """Convert hardware command to geometric angle (rad).
+        If PWM mapping is set, `cmd` is PWM µs. Else, `cmd` is **motor turns**.
+        """
+        if self.pwm_m is not None and self.pwm_b is not None:
+            hw_angle_joint = self.pwm_m * cmd + self.pwm_b
         else:
-            hw_angle = self.pwm_m * cmd + self.pwm_b
-        return self.theta0 + self.sign * hw_angle
+            # cmd is motor turns
+            hw_angle_joint = (cmd * 2.0 * pi) / self.gear_ratio
+        return self.theta0 + self.sign * hw_angle_joint
 
 @dataclass
 class ArmParams:
@@ -72,6 +98,10 @@ class ArmParams:
       E3: lateral offset of wrist axis relative to elbow->wrist plane (mm)
 
     prefer_elbow_up: True for elbow-up branch, False for elbow-down
+
+    base_offset_x, base_offset_y: fixed lateral offset (meters) of the shoulder axis relative to the base yaw axis.
+      If your shoulder axis is not directly above the base origin, set these and then (x,y,z) targets can still be
+      specified in the base frame; the solver compensates internally.
     """
     L1: float
     L2: float
@@ -83,7 +113,14 @@ class ArmParams:
 
     prefer_elbow_up: bool = True
 
+    base_offset_x: float = 0.0
+    base_offset_y: float = 0.0
+
     # Joint calibrations q1..q4 (yaw, shoulder, elbow, wrist)
+    q1: JointCalib = JointCalib()
+    q2: JointCalib = JointCalib()
+    q3: JointCalib = JointCalib()
+    q4: JointCalib = JointCalib() #(yaw, shoulder, elbow, wrist)
     q1: JointCalib = JointCalib()
     q2: JointCalib = JointCalib()
     q3: JointCalib = JointCalib()
@@ -117,8 +154,9 @@ def ik_yppp(
     """
     x, y, z = target_xyz
 
-    # 1) Base yaw
-    q1 = atan2(y, x)
+    # 1) Base yaw (compensate for fixed shoulder offset if any)
+    bx, by = arm.base_offset_x, arm.base_offset_y
+    q1 = atan2(y - by, x - bx)
 
     # 2) Compute wrist position by pulling back L4 along tool direction
     # Tool forward direction in world: [cos(q1)*cos(pitch), sin(q1)*cos(pitch), sin(pitch)]
@@ -127,7 +165,7 @@ def ik_yppp(
     wz = z - arm.L4 * sin(target_pitch_rad)
 
     # 3) Reduce to planar 2-link in yawed plane
-    r = hypot(wx, wy)  # horizontal distance from base axis to wrist point
+    r = hypot(wx - bx, wy - by)  # horizontal distance from shoulder projection to wrist point
     px = r  # in-plane horizontal
     pz = wz - arm.L1  # in-plane vertical relative to shoulder axis
 
@@ -199,43 +237,50 @@ def ik_yppp(
     }
 
 
+def max_height(arm: ArmParams) -> float:
+    """Maximum vertical TCP height when the pitch stack is straight up."""
+    return arm.L1 + arm.L2 + arm.L3 + arm.L4
+
+
 def example_usage():
     # Fill these with YOUR measurements/calibration
     arm = ArmParams(
-        L1=0.080,   # meters  <<< EDIT: base height (table -> shoulder axis) in meters
-        L2=0.160,   # <<< EDIT: shoulder -> elbow planar distance (m)
-        L3=0.160,   # <<< EDIT: elbow -> wrist planar distance (m)
-        L4=0.050,   # <<< EDIT: wrist -> TCP along wrist-forward when pitch=0 (m)
-        prefer_elbow_up=True,  # <<< EDIT: True for elbow-up branch, False for elbow-down
-        q1=JointCalib(theta0=0.0,  # <<< EDIT: yaw zero-offset [rad]
-                     sign=+1,     # <<< EDIT: +1 or -1 so positive yaw matches your convention
-                     min_rad=-pi, # <<< EDIT: yaw min limit [rad]
-                     max_rad= pi, # <<< EDIT: yaw max limit [rad]
-                     pwm_m=None,  # (optional) set if using PWM: angle(rad) = m*PWM(µs)+b
-                     pwm_b=None),
-        q2=JointCalib(theta0=0.0,           # <<< EDIT: shoulder zero-offset [rad]
-                     sign=+1,              # <<< EDIT
-                     min_rad=-100*DEG2RAD, # <<< EDIT: shoulder min [rad]
-                     max_rad= 100*DEG2RAD, # <<< EDIT: shoulder max [rad]
-                     pwm_m=None, pwm_b=None),
-        q3=JointCalib(theta0=0.0,           # <<< EDIT: elbow zero-offset [rad]
-                     sign=+1,              # <<< EDIT
-                     min_rad=-135*DEG2RAD, # <<< EDIT: elbow min [rad]
-                     max_rad= 135*DEG2RAD, # <<< EDIT: elbow max [rad]
-                     pwm_m=None, pwm_b=None),
-        q4=JointCalib(theta0=0.0,           # <<< EDIT: wrist zero-offset [rad]
-                     sign=+1,              # <<< EDIT
-                     min_rad=-135*DEG2RAD, # <<< EDIT: wrist min [rad]
-                     max_rad= 135*DEG2RAD, # <<< EDIT: wrist max [rad]
-                     pwm_m=None, pwm_b=None),
+        L1=0.176932,   # meters  (from 176.932 mm)
+        L2=0.162737,   # m (from 162.737 mm) shoulder -> elbow planar distance
+        L3=0.226991,   # m (from 226.991 mm) elbow -> wrist planar distance
+        L4=0.12047,    # m (from 120.47 mm) wrist -> TCP along wrist-forward when pitch=0
+        prefer_elbow_up=True,  # True for elbow-up branch (change if you prefer elbow-down)
+        base_offset_x=0.0,     # set to 0 so (0,0,z_max) is straight above base
+        base_offset_y=0.0,
+        q1=JointCalib(theta0=0.0,  # yaw zero-offset [rad]
+                     sign=+1,
+                     min_rad=-pi,
+                     max_rad= pi,
+                     gear_ratio=9.0),
+        q2=JointCalib(theta0=pi/2,           # shoulder zero-offset [rad] so straight-up -> cmd 0
+                     sign=+1,
+                     min_rad=-100*DEG2RAD,
+                     max_rad= 100*DEG2RAD,
+                     gear_ratio=9.0),
+        q3=JointCalib(theta0=0.0,           # elbow zero-offset [rad]
+                     sign=+1,
+                     min_rad=-135*DEG2RAD,
+                     max_rad= 135*DEG2RAD,
+                     gear_ratio=9.0),
+        q4=JointCalib(theta0=0.0,           # wrist zero-offset [rad]
+                     sign=+1,
+                     min_rad=-135*DEG2RAD,
+                     max_rad= 135*DEG2RAD,
+                     gear_ratio=9.0),
     )
 
-    target_xyz = (0.20, 0.10, 0.10)   # <<< EDIT: target (x,y,z) in meters, world frame
-    target_pitch = 10 * DEG2RAD       # <<< EDIT: desired tool pitch [rad] (relative to your pitch=0°)
+    # Command the vertical straight-up pose at max height using world coords
+    target_xyz = (0.0, 0.0, max_height(arm))
+    target_pitch = pi/2  # tool pointing straight up
 
     sol = ik_yppp(arm, target_xyz, target_pitch)
     print("Angles (deg):", sol['angles_deg'])
-    print("Commands:", sol['cmds'])
+    print("Commands (motor turns):", sol['cmds'])
 
 
 if __name__ == "__main__":
