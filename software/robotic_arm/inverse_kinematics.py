@@ -3,6 +3,19 @@ from dataclasses import dataclass
 from math import atan2, cos, sin, sqrt, acos, hypot, isfinite, pi
 from typing import Optional, Tuple, Dict
 
+# --- Rounding helpers ---
+def _round_val(v, ndp: int):
+    return round(v, ndp) if isinstance(v, float) else v
+
+def _round_nested(obj, ndp: int):
+    if isinstance(obj, dict):
+        return {k: _round_nested(v, ndp) for k, v in obj.items()}
+    if isinstance(obj, tuple):
+        return tuple(_round_val(v, ndp) for v in obj)
+    if isinstance(obj, list):
+        return [_round_nested(v, ndp) for v in obj]
+    return _round_val(obj, ndp)
+
 # ========================= USER SETUP CHECKLIST =========================
 # Fill these in before using IK:
 # 1) ArmParams (geometry): L1, L2, L3, L4  [meters]
@@ -116,11 +129,7 @@ class ArmParams:
     base_offset_x: float = 0.0
     base_offset_y: float = 0.0
 
-    # Joint calibrations q1..q4 (yaw, shoulder, elbow, wrist)
-    q1: JointCalib = JointCalib()
-    q2: JointCalib = JointCalib()
-    q3: JointCalib = JointCalib()
-    q4: JointCalib = JointCalib() #(yaw, shoulder, elbow, wrist)
+    # Joint calibrations q1..q4 (yaw, shoulder, elbow, wrist)  # (yaw, shoulder, elbow, wrist)
     q1: JointCalib = JointCalib()
     q2: JointCalib = JointCalib()
     q3: JointCalib = JointCalib()
@@ -140,6 +149,7 @@ def ik_yppp(
     target_pitch_rad: float,
     *,
     clamp_to_limits: bool = True,
+    round_to: Optional[int] = None,
 ) -> Dict[str, Dict[str, float]]:
     """
     Analytic IK for a yaw–pitch–pitch–pitch arm controlling (x,y,z,pitch).
@@ -222,7 +232,7 @@ def ik_yppp(
         'q4': arm.q4.rad_to_cmd(q_geom[3]),
     }
 
-    return {
+    result = {
         'angles_rad': angles_rad,
         'angles_deg': angles_deg,
         'cmds': cmds,
@@ -233,8 +243,12 @@ def ik_yppp(
             'D': D,
             'k1': k1,
             'k2': k2,
-        }
+                }
     }
+
+    if round_to is not None:
+        result = _round_nested(result, round_to)
+    return result
 
 
 def max_height(arm: ArmParams) -> float:
@@ -275,10 +289,11 @@ def example_usage():
     )
 
     # Command the vertical straight-up pose at max height using world coords
-    target_xyz = (0.0, 0.0, max_height(arm))
+    #target_xyz = (0.0, 0.0, max_height(arm))
+    target_xyz = (0.0, 0.15, 0.2)
     target_pitch = pi/2  # tool pointing straight up
 
-    sol = ik_yppp(arm, target_xyz, target_pitch)
+    sol = ik_yppp(arm, target_xyz, target_pitch, round_to=2)
     print("Angles (deg):", sol['angles_deg'])
     print("Commands (motor turns):", sol['cmds'])
 
