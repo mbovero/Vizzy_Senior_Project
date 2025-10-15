@@ -27,6 +27,7 @@ from ..shared import protocol as P
 
 # NEW: frame bus for cross-thread rendering
 from .display_bus import FrameBus
+from .yolo_runner import build_allowed_class_ids
 
 # NEW: LLM worker manager for semantic enrichment
 from .llm_worker import WorkerManager
@@ -81,6 +82,10 @@ class StateManager:
             self.cap.release()
             raise RuntimeError("Failed to read an initial frame from the camera.")
         self.h0, self.w0 = frame0.shape[:2]
+        self.allowed_class_ids = build_allowed_class_ids(
+            self.model.names,
+            C.OBJ_BLACKLIST,
+        )
 
         # Networking
         import socket
@@ -163,6 +168,7 @@ class StateManager:
             frame_sink=self.frame_bus.publish,   # NEW: push frames to main thread
             llm_worker=self.llm_worker,          # NEW: LLM worker pool for enrichment
             memory=self.memory,                  # NEW: Share same memory instance!
+            allowed_class_ids=self.allowed_class_ids,
         )
         worker.daemon = True
         print("[StateManager] Starting ScanWorker thread...")
@@ -268,10 +274,11 @@ class StateManager:
             return
 
         #print("[StateManager] Running YOLO inference on IDLE frame...") TODO
+        verbose = C.YOLO_VERBOSE
         try:
-            results = self.model(frame, verbose=getattr(C, "YOLO_VERBOSE", False))
+            results = self.model(frame, classes=self.allowed_class_ids, verbose=verbose)
         except TypeError:
-            results = self.model(frame)
+            results = self.model(frame, classes=self.allowed_class_ids)
         except Exception as e:
             print(f"[StateManager] WARNING: YOLO inference failed: {e}")
             results = []

@@ -14,14 +14,18 @@ if os.environ.get("QT_QPA_PLATFORM", "").lower() == "wayland" or "QT_QPA_PLATFOR
 
 import argparse
 import json
+import signal
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import signal
 import cv2
 import numpy as np
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+SCRIPT_DIR = Path(__file__).resolve().parent
+SOFTWARE_DIR = SCRIPT_DIR.parent
+DEFAULT_IMAGES_DIR = SOFTWARE_DIR / "vizzy" / "laptop" / "captured_images"
+DEFAULT_MEMORY_PATH = SOFTWARE_DIR / "vizzy" / "laptop" / "object_memory.json"
 
 def on_sigint(signum, frame):
     print("\n[info] Ctrl+C — closing viewer.")
@@ -93,8 +97,18 @@ def show_with_grasps(img_path: Path, grasps: List[Tuple[int, int]] | None, scale
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--images", type=str, default="captured_images", help="Folder containing images")
-    ap.add_argument("--memory", type=str, default="object_memory.json", help="Path to object memory JSON")
+    ap.add_argument(
+        "--images",
+        type=str,
+        default=str(DEFAULT_IMAGES_DIR),
+        help="Folder containing images (default: vizzy/laptop/captured_images)"
+    )
+    ap.add_argument(
+        "--memory",
+        type=str,
+        default=str(DEFAULT_MEMORY_PATH),
+        help="Path to object memory JSON (default: vizzy/laptop/object_memory.json)"
+    )
     ap.add_argument("--scale", type=float, default=1.0, help="Display scale (e.g., 0.75)")
     ap.add_argument("--hud-scale", type=float, default=0.55, help="HUD text scale (smaller default)")
     ap.add_argument("--hud-thick", type=int, default=1, help="HUD text thickness")
