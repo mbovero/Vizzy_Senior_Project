@@ -22,7 +22,7 @@ import contextlib
 # ---------- Servo -----------
 SERVO_MIN    = 500
 SERVO_MAX    = 2500
-SERVO_CENTER = 1000
+SERVO_CENTER = 1500
 
 try:
     import pigpio
