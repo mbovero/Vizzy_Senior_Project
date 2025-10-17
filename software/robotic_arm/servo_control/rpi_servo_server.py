@@ -61,8 +61,8 @@ def build_transport(kind: str):
 ID1, ID2, ID3      = 1, 2, 3
 
 REST1               = 0.0
-REST2               = 0.5
-REST3               = 2.0
+REST2               = 1.0
+REST3               = 3.25
 
 STEP_SIZE_RAD       = 0.08
 STEP_DELAY_S        = 0.02
