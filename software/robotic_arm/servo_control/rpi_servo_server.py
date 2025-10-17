@@ -22,7 +22,7 @@ import contextlib
 # ---------- Servo -----------
 SERVO_MIN    = 500
 SERVO_MAX    = 2500
-SERVO_CENTER = 1000
+SERVO_CENTER = 830
 
 try:
     import pigpio
@@ -68,13 +68,13 @@ STEP_SIZE_RAD       = 0.08
 STEP_DELAY_S        = 0.02
 
 IDLE_SLEEP          = 0.02
-ACCEL_LIMIT         = 5.0
-VEL_LIMIT           = 10.0
+ACCEL_LIMIT         = 2.0
+VEL_LIMIT           = 4.0
 WATCHDOG            = 10.0
 
 GROUP_SPEED_RAD_S   = 0.8
-ACCEL_MULT          = 6.0
-MIN_SPEED           = 0.05
+ACCEL_MULT          = 1.2
+MIN_SPEED           = 0.01
 POS_TOL             = 0.01
 SYNC_POLL_S         = 0.05
 SYNC_TIMEOUT_EXTRA  = 1.0
