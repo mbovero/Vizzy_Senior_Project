@@ -5,9 +5,9 @@ import pigpio
 import time
 
 # GPIO pins for Vizzy servos
-SERVO_TOP = 17
-SERVO_MID = 27
-SERVO_BTM = 22
+SERVO_TOP = 4
+SERVO_MID = 17
+SERVO_BTM = 27
 
 # Servo pulse width limits (µs)
 SERVO_MIN = 1000
