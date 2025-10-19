@@ -1,22 +1,8 @@
 #!/usr/bin/env python3
 # rpi_arm_server.py — Pi-side control of 3 moteus motors + 1 GPIO hobby servo
-#
-# Usage (Pi):
-#   sudo apt-get update && sudo apt-get install -y pigpio
-#   sudo systemctl enable pigpiod --now
-#   python3 rpi_arm_server.py --host 0.0.0.0 --port 65432 \
-#       --transport pi3hat --servo-pin 18
-#
-# Client (laptop):
-#   python3 laptop_cmd_client.py --host <pi-ip> --port 65432
-#
-# Input lines from client:
-#   "<p1> <p2> <p3> <p4>"  (radians, radians, radians, pwm-µs)
-#   "rest"
-#   "quit"
 
 from __future__ import annotations
-import argparse, asyncio, math, time, socket, sys
+import argparse, asyncio, math, time, sys
 import contextlib
 
 # ---------- Servo -----------
@@ -35,26 +21,22 @@ import moteus
 
 # Optional transports (choose one at startup)
 def build_transport(kind: str):
-    """Return a moteus transport for 'pi3hat' or 'socketcan:<ifname>' or 'auto'."""
     kind = (kind or "pi3hat").lower()
     if kind == "pi3hat":
         try:
             import moteus_pi3hat
             return moteus_pi3hat.Pi3HatRouter()  # shared router
-        except Exception as e:
+        except Exception:
             print("WARN: pi3hat not available, falling back to default moteus transport.")
             return None
     if kind.startswith("socketcan"):
-        # e.g. --transport socketcan:can0
         parts = kind.split(":", 1)
         iface = parts[1] if len(parts) > 1 else "can0"
         try:
-            import moteus
             return moteus.SocketcanRouter(channel=iface)
-        except Exception as e:
+        except Exception:
             print(f"WARN: socketcan {iface} not available, using default.", file=sys.stderr)
             return None
-    # 'auto' or anything else → default (let moteus pick)
     return None
 
 # ---- Tunables (motors) ----
@@ -207,15 +189,16 @@ class ArmServer:
         self.m3 = moteus.Controller(id=ID3, transport=router)
 
         # Targets/state
-        self.t1 = 0.0
-        self.t2 = 0.0
-        self.t3 = 0.0
-        self.c1 = 0.0
-        self.c2 = 0.0
-        self.c3 = 0.0
+        self.t1 = self.t2 = self.t3 = 0.0
+        self.c1 = self.c2 = self.c3 = 0.0
         self.target_pwm = SERVO_CENTER
-        self.cooling = False
+
+        # Cooling state (separate flags for m2 and m3)
+        self.cooling2 = False
+        self.cooling3 = False
         self.last_temp2 = None
+        self.last_temp3 = None
+
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
 
@@ -243,7 +226,7 @@ class ArmServer:
         try:
             while not self._stop.is_set():
                 async with self._lock:
-                    # ---- Apply servo FIRST so it never waits on motor motion ----
+                    # Apply servo first so it never waits on motor motion
                     await self.servo_set(self.target_pwm)
 
                     # Then schedule/await the synchronized motor move
@@ -259,29 +242,54 @@ class ArmServer:
                 now = time.monotonic()
                 if now >= next_temp:
                     try:
-                        s2 = await self.m2.query()
+                        s2, s3 = await asyncio.gather(self.m2.query(), self.m3.query())
                         self.last_temp2 = extract_temperature(s2.values)
+                        self.last_temp3 = extract_temperature(s3.values)
                     except Exception:
-                        self.last_temp2 = None
+                        # If either query fails, keep previous value; don't crash loop
+                        pass
                     next_temp = now + 1.0
 
-                # Thermal policy
-                if self.last_temp2 is not None:
-                    if (not self.cooling) and (self.last_temp2 > TEMP_LIMIT):
-                        print(f"[rpi] WARN: m2 > {TEMP_LIMIT:.1f} °C → return to REST; enter cooldown.")
-                        finals = await move_group_sync_time([
-                            (self.m1, self.c1, REST1),
-                            (self.m2, self.c2, REST2),
-                            (self.m3, self.c3, REST3),
-                        ])
-                        self.c1, self.c2, self.c3 = finals
-                        self.t1, self.t2, self.t3 = REST1, REST2, REST3
-                        self.cooling = True
-                    elif self.cooling and self.last_temp2 <= COOL_RESUME_TEMP:
-                        print(f"[rpi] COOL: m2 <= {COOL_RESUME_TEMP:.1f} °C → wiggle + resume.")
-                        self.c2 = await wiggle(self.m2, REST2, self.c2)
-                        self.t2 = REST2
-                        self.cooling = False
+                # Thermal policy (independent for m2 and m3). If either overheats, hold all at REST.
+                any_cooling = (self.cooling2 or self.cooling3)
+
+                # Enter cooldown conditions
+                if (self.last_temp2 is not None) and (not self.cooling2) and (self.last_temp2 > TEMP_LIMIT):
+                    print(f"[rpi] WARN: m2 > {TEMP_LIMIT:.1f} °C → return to REST; enter cooldown2.")
+                    finals = await move_group_sync_time([
+                        (self.m1, self.c1, REST1),
+                        (self.m2, self.c2, REST2),
+                        (self.m3, self.c3, REST3),
+                    ])
+                    self.c1, self.c2, self.c3 = finals
+                    self.t1, self.t2, self.t3 = REST1, REST2, REST3
+                    self.cooling2 = True
+                    any_cooling = True
+
+                if (self.last_temp3 is not None) and (not self.cooling3) and (self.last_temp3 > TEMP_LIMIT):
+                    print(f"[rpi] WARN: m3 > {TEMP_LIMIT:.1f} °C → return to REST; enter cooldown3.")
+                    finals = await move_group_sync_time([
+                        (self.m1, self.c1, REST1),
+                        (self.m2, self.c2, REST2),
+                        (self.m3, self.c3, REST3),
+                    ])
+                    self.c1, self.c2, self.c3 = finals
+                    self.t1, self.t2, self.t3 = REST1, REST2, REST3
+                    self.cooling3 = True
+                    any_cooling = True
+
+                # Resume conditions (wiggle the motor that cooled)
+                if self.cooling2 and (self.last_temp2 is not None) and (self.last_temp2 <= COOL_RESUME_TEMP):
+                    print(f"[rpi] COOL: m2 <= {COOL_RESUME_TEMP:.1f} °C → wiggle2 + resume check.")
+                    self.c2 = await wiggle(self.m2, REST2, self.c2)
+                    self.t2 = REST2
+                    self.cooling2 = False
+
+                if self.cooling3 and (self.last_temp3 is not None) and (self.last_temp3 <= COOL_RESUME_TEMP):
+                    print(f"[rpi] COOL: m3 <= {COOL_RESUME_TEMP:.1f} °C → wiggle3 + resume check.")
+                    self.c3 = await wiggle(self.m3, REST3, self.c3)
+                    self.t3 = REST3
+                    self.cooling3 = False
 
                 await asyncio.sleep(IDLE_SLEEP)
         finally:
@@ -331,8 +339,8 @@ class ArmServer:
 
                     async with self._lock:
                         self.target_pwm = p4
-                        # During cooldown we still allow servo; motors hold at REST
-                        if not self.cooling:
+                        # During cooldown (either motor), motors hold at REST
+                        if not (self.cooling2 or self.cooling3):
                             self.t1, self.t2, self.t3 = p1, p2, p3
                     writer.write(b"ACK set\n"); await writer.drain()
                 else:
