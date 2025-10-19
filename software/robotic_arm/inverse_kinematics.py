@@ -15,7 +15,7 @@ from typing import Optional, Tuple, Dict
 RAD2DEG = 180.0 / pi
 DEG2RAD = pi / 180.0
 
-# --- q4 servo mapping (270°, 500–2500 µs, center 1500 µs) ---
+# --- q4 servo mapping (270°, 500–2500 µs, center 1750 µs) ---
 Q4_PWM_CENTER_US   = 1750
 Q4_PWM_MIN_US      = 800.0
 Q4_PWM_MAX_US      = 2500.0
@@ -99,36 +99,43 @@ def ik_yppp(
     """
     Analytic IK for a yaw–pitch–pitch–pitch arm controlling (x, y, z, pitch).
     No joint-limit clamping; q1 is NOT wrapped.
+
+    IMPORTANT: Use a signed planar wrist radius so small x motions near r=L4·cos(pitch)
+    don't reverse due to |r - L4 cos(pitch)|.
     """
     x, y, z = target_xyz
+    bx, by = arm.base_offset_x, arm.base_offset_y
 
     # 1) Base yaw from base (bx,by) toward (x,y)
-    bx, by = arm.base_offset_x, arm.base_offset_y
     q1 = atan2(y - by, x - bx)  # [-pi, pi], y changes base rotation
 
-    # 2) Wrist position by pulling back L4 along tool direction
-    wx = x - arm.L4 * cos(q1) * cos(target_pitch_rad)
-    wy = y - arm.L4 * sin(q1) * cos(target_pitch_rad)
-    wz = z - arm.L4 * sin(target_pitch_rad)
+    # TCP planar radius from base and vertical offset relative to shoulder
+    r_tcp = hypot(x - bx, y - by)         # >= 0
+    z_tcp = z
 
-    # 3) Planar reduction in the yawed plane
-    r = hypot(wx - bx, wy - by)
-    px = r
-    pz = wz - arm.L1
+    # 2) Signed planar reduction directly in the yawed plane:
+    #    px can be negative when r_tcp < L4*cos(pitch) — and that's OK.
+    px = (r_tcp - arm.L4 * cos(target_pitch_rad))
+    pz = (z_tcp - arm.L4 * sin(target_pitch_rad)) - arm.L1
 
-    # 4) Elbow via law of cosines (numeric clamp on D only)
+    # Reconstruct wrist coordinates (for debugging/telemetry)
+    wx = bx + px * cos(q1)
+    wy = by + px * sin(q1)
+    wz = arm.L1 + pz
+
+    # 3) Elbow via law of cosines (numeric clamp on D only)
     D = (px*px + pz*pz - arm.L2*arm.L2 - arm.L3*arm.L3) / (2.0 * arm.L2 * arm.L3)
     D = max(-1.0, min(1.0, D))
 
     s = sqrt(max(0.0, 1.0 - D*D))
     q3 = atan2(+s, D) if arm.prefer_elbow_up else atan2(-s, D)
 
-    # 5) Shoulder (two-atan form)
+    # 4) Shoulder (two-atan form)
     k1 = arm.L2 + arm.L3 * cos(q3)
     k2 = arm.L3 * sin(q3)
     q2 = atan2(pz, px) - atan2(k2, k1)
 
-    # 6) Wrist pitch to achieve desired tool pitch
+    # 5) Wrist pitch to achieve desired tool pitch
     q4 = target_pitch_rad - (q2 + q3)
 
     # Outputs
@@ -157,12 +164,13 @@ def ik_yppp(
             'D': D,
             'k1': k1,
             'k2': k2,
+            'r_tcp': r_tcp,
         }
     }
 
 
 def max_height(arm: ArmParams) -> float:
-    """Maximum vertical TCP height when the pitch stack is straight up."""
+    """Maximum vertical TCP height when the pitch stack is straight up (pitch = +pi/2)."""
     return arm.L1 + arm.L2 + arm.L3 + arm.L4
 
 
@@ -185,8 +193,10 @@ def example_usage():
     )
 
     # Example target (change y to test base rotation)
-    target_xyz = (0.0, -0.2, 0.40)
-    target_pitch = pi / 2  # tool pointing straight up
+    target_xyz = (0.2, 0, 0.4)
+    # NOTE: pitch = 0 means tool is horizontal along radial direction.
+    #       pitch = +pi/2 means tool points straight up.
+    target_pitch = 0.0
 
     sol = ik_yppp(arm, target_xyz, target_pitch)
 
