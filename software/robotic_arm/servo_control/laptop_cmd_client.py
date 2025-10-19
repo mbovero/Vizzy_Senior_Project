@@ -5,7 +5,7 @@ import argparse, socket, sys
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="10.120.39.241")
+    ap.add_argument("--host", default="10.120.40.160")
     ap.add_argument("--port", type=int, default=65432)
     args = ap.parse_args()
 
