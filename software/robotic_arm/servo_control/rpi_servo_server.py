@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # rpi_arm_server.py — Pi-side control of 3 moteus motors + 1 GPIO hobby servo
-# IK-integrated version: accepts `ik <x> <y> <z> <wrist>` and maps to q1,q2,q3 + servo PWM (q4)
+# IK protocol: accepts `ik <x> <y> <z> <wrist>` and maps to q1,q2,q3 + servo PWM (q4)
 
 from __future__ import annotations
 import argparse, asyncio, math, time, sys
@@ -28,6 +28,15 @@ from ik_callable import make_default_arm, ik_cmds_bounded
 IK_RADIUS_M = 0.15
 IK_Z_MIN    = 0.0
 IK_Z_MAX    = 0.4
+
+# ---- q2 linear scaling (map ±2.25 -> ±2.10, 0 -> 0) ----
+Q2_MAX_IN   = 2.25
+Q2_MAX_OUT  = 2.10
+Q2_SCALE    = (Q2_MAX_OUT / Q2_MAX_IN)  # 2.1 / 2.25 = 0.933333...
+
+# ---- Comm fault handling ----
+COMM_FAIL_THRESHOLD = 3      # consecutive exceptions before recovering
+RECOVER_SLEEP_S     = 0.5    # short dwell before re-issuing queries
 
 # Optional transports (choose one at startup)
 def build_transport(kind: str):
@@ -193,6 +202,7 @@ class ArmServer:
         self.pi.set_servo_pulsewidth(self.servo_pin, SERVO_CENTER)
 
         # moteus controllers
+        self._transport_kind = transport_kind
         router = build_transport(transport_kind)
         self.m1 = moteus.Controller(id=ID1, transport=router)
         self.m2 = moteus.Controller(id=ID2, transport=router)
@@ -211,6 +221,9 @@ class ArmServer:
         self.cooling3 = False
         self.last_temp2 = None
         self.last_temp3 = None
+
+        # Comm fault tracking
+        self._comm_failures = 0
 
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
@@ -233,6 +246,38 @@ class ArmServer:
             self.pi.set_servo_pulsewidth(self.servo_pin, pwm)
             self.current_pwm = pwm
 
+    async def _recover_bus(self):
+        """Rebuild the transport and controllers, re-init positions, and clear failure count."""
+        print("[rpi] COMM: attempting bus recovery...", file=sys.stderr)
+        with contextlib.suppress(Exception):
+            await asyncio.gather(self.m1.set_stop(), self.m2.set_stop(), self.m3.set_stop())
+
+        # Rebuild transport + controllers (preserve original transport kind)
+        router = build_transport(self._transport_kind)
+        self.m1 = moteus.Controller(id=ID1, transport=router)
+        self.m2 = moteus.Controller(id=ID2, transport=router)
+        self.m3 = moteus.Controller(id=ID3, transport=router)
+
+        # Keep wrist safe/neutral during recovery
+        await self.servo_set(SERVO_CENTER)
+        self.target_pwm = SERVO_CENTER
+
+        # Give the bus a moment to settle
+        await asyncio.sleep(RECOVER_SLEEP_S)
+
+        # Try to re-sync to actual positions; fall back to zeros
+        try:
+            s1, s2, s3 = await asyncio.gather(self.m1.query(), self.m2.query(), self.m3.query())
+            self.t1 = self.c1 = float(s1.values.get('position', 0.0))
+            self.t2 = self.c2 = float(s2.values.get('position', 0.0))
+            self.t3 = self.c3 = float(s3.values.get('position', 0.0))
+        except Exception:
+            self.t1 = self.t2 = self.t3 = 0.0
+            self.c1 = self.c2 = self.c3 = 0.0
+
+        self._comm_failures = 0
+        print("[rpi] COMM: recovery complete.")
+
     async def control_loop(self):
         """Main control loop: applies targets, enforces thermal policy, ~50 Hz."""
         next_temp = time.monotonic()
@@ -242,31 +287,41 @@ class ArmServer:
                     # Apply servo first so it never waits on motor motion
                     await self.servo_set(self.target_pwm)
 
-                    # Then schedule/await the synchronized motor move
+                    # Then schedule/await the synchronized motor move (fault-aware)
                     group = [
                         (self.m1, self.c1, self.t1),
                         (self.m2, self.c2, self.t2),
                         (self.m3, self.c3, self.t3),
                     ]
-                    finals = await move_group_sync_time(group)
-                    self.c1, self.c2, self.c3 = finals
+                    try:
+                        finals = await move_group_sync_time(group)
+                        self.c1, self.c2, self.c3 = finals
+                        self._comm_failures = 0  # success resets the counter
+                    except Exception as e:
+                        self._comm_failures += 1
+                        print(f"[rpi] COMM: move_group exception ({self._comm_failures}/{COMM_FAIL_THRESHOLD}): {e}", file=sys.stderr)
+                        if self._comm_failures >= COMM_FAIL_THRESHOLD:
+                            await self._recover_bus()
 
-                # Temp check ~1 Hz
+                # Temp check ~1 Hz (fault-aware)
                 now = time.monotonic()
                 if now >= next_temp:
                     try:
                         s2, s3 = await asyncio.gather(self.m2.query(), self.m3.query())
                         self.last_temp2 = extract_temperature(s2.values)
                         self.last_temp3 = extract_temperature(s3.values)
-                    except Exception:
-                        # If either query fails, keep previous value; don't crash loop
-                        pass
+                        # success: leave failure counter as-is (move path already clears)
+                    except Exception as e:
+                        self._comm_failures += 1
+                        print(f"[rpi] COMM: temp query exception ({self._comm_failures}/{COMM_FAIL_THRESHOLD}): {e}", file=sys.stderr)
+                        if self._comm_failures >= COMM_FAIL_THRESHOLD:
+                            await self._recover_bus()
                     next_temp = now + 1.0
 
                 # Thermal policy (independent for m2 and m3). If either overheats, hold all at REST.
                 any_cooling = (self.cooling2 or self.cooling3)
 
-                # Enter cooldown conditions
+                # Enter cooldown conditions (also center wrist)
                 if (self.last_temp2 is not None) and (not self.cooling2) and (self.last_temp2 > TEMP_LIMIT):
                     print(f"[rpi] WARN: m2 > {TEMP_LIMIT:.1f} °C → return to REST; enter cooldown2.")
                     await self.servo_set(SERVO_CENTER)
@@ -343,7 +398,7 @@ class ArmServer:
                     writer.write(b"ACK rest\n"); await writer.drain()
                     continue
 
-                # New IK command: ik <x> <y> <z> <wrist>
+                # IK command: ik <x> <y> <z> <wrist>
                 if cmd.startswith("ik "):
                     parts = cmd_raw.split()
                     if len(parts) != 5:
@@ -367,7 +422,7 @@ class ArmServer:
                             z_max=IK_Z_MAX
                         )
                         q1 = float(cmds["q1"])
-                        q2 = float(cmds["q2"]) * 0.933333
+                        q2 = float(cmds["q2"]) * Q2_SCALE   # symmetric linear scaling
                         q3 = float(cmds["q3"])
                         q4_pwm = int(round(cmds["q4"]))
                     except Exception as e:
