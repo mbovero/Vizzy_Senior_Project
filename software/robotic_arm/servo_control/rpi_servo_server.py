@@ -29,7 +29,7 @@ IK_Z_MAX    = 0.4
 
 # ---- q2 linear scaling (map ±2.25 -> ±2.10, 0 -> 0) ----
 Q2_MAX_IN   = 2.25
-Q2_MAX_OUT  = 2.10
+Q2_MAX_OUT  = 2.15
 Q2_SCALE    = (Q2_MAX_OUT / Q2_MAX_IN)  # 0.933333...
 
 # ---- Comm fault handling ----
