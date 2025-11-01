@@ -52,7 +52,7 @@ STEP_DELAY_S        = 0.02
 IDLE_SLEEP          = 0.02
 ACCEL_LIMIT         = 2.0
 VEL_LIMIT           = 4.0
-WATCHDOG            = 10.0
+WATCHDOG            = 15.0
 
 GROUP_SPEED_RAD_S   = 0.8
 ACCEL_MULT          = 1.2
