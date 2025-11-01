@@ -1,5 +1,6 @@
 from ik_callable import make_default_arm, ik_cmds_bounded
 arm = make_default_arm()
+# Arm instance, (x,y,z), target wrist orientation, restriced area radius, restricted area z start, restricted area z end 
 cmds = ik_cmds_bounded(arm, (0.0, 0.0, 0.4), 0.0, radius_m=0.15, z_min=0.0, z_max=0.4)
 
 

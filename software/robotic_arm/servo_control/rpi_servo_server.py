@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # rpi_arm_server.py — Pi-side control of 3 moteus motors + 1 GPIO hobby servo
+# IK-integrated version: accepts `ik <x> <y> <z> <wrist>` and maps to q1,q2,q3 + servo PWM (q4)
 
 from __future__ import annotations
 import argparse, asyncio, math, time, sys
@@ -19,6 +20,15 @@ except Exception as e:
 # ---------- Moteus ----------
 import moteus
 
+# ---------- IK ----------
+# Uses the provided IK interface. q1,q2,q3 are motor angles (rad), q4 is a wrist PWM (us).
+from ik_callable import make_default_arm, ik_cmds_bounded
+
+# ---- IK Tunables ----
+IK_RADIUS_M = 0.15
+IK_Z_MIN    = 0.0
+IK_Z_MAX    = 0.4
+
 # Optional transports (choose one at startup)
 def build_transport(kind: str):
     kind = (kind or "pi3hat").lower()
@@ -27,7 +37,7 @@ def build_transport(kind: str):
             import moteus_pi3hat
             return moteus_pi3hat.Pi3HatRouter()  # shared router
         except Exception:
-            print("WARN: pi3hat not available, falling back to default moteus transport.")
+            print("WARN: pi3hat not available, falling back to default moteus transport.", file=sys.stderr)
             return None
     if kind.startswith("socketcan"):
         parts = kind.split(":", 1)
@@ -188,6 +198,9 @@ class ArmServer:
         self.m2 = moteus.Controller(id=ID2, transport=router)
         self.m3 = moteus.Controller(id=ID3, transport=router)
 
+        # IK arm instance
+        self.ik_arm = make_default_arm()
+
         # Targets/state
         self.t1 = self.t2 = self.t3 = 0.0
         self.c1 = self.c2 = self.c3 = 0.0
@@ -306,9 +319,11 @@ class ArmServer:
                 line = await reader.readline()
                 if not line:
                     break
-                cmd = line.decode("utf-8").strip().lower()
-                if not cmd:
+                cmd_raw = line.decode("utf-8").strip()
+                if not cmd_raw:
                     continue
+
+                cmd = cmd_raw.lower()
 
                 if cmd in ("quit", "q"):
                     writer.write(b"ACK bye\n"); await writer.drain()
@@ -324,28 +339,53 @@ class ArmServer:
                     writer.write(b"ACK rest\n"); await writer.drain()
                     continue
 
-                # Expect 4 tokens: p1 p2 p3 p4
-                parts = cmd.split()
-                if len(parts) == 4:
+                # New IK command: ik <x> <y> <z> <wrist>
+                if cmd.startswith("ik "):
+                    parts = cmd_raw.split()
+                    if len(parts) != 5:
+                        writer.write(b"ERR ik usage: 'ik <x> <y> <z> <wrist>'\n")
+                        await writer.drain()
+                        continue
                     try:
-                        p1, p2, p3 = map(float, parts[:3])
-                        p4 = int(parts[3])
+                        _, sx, sy, sz, sw = parts
+                        x = float(sx); y = float(sy); z = float(sz); wrist = float(sw)
                     except ValueError:
-                        writer.write(b"ERR bad numbers\n"); await writer.drain()
+                        writer.write(b"ERR ik parse\n"); await writer.drain()
                         continue
 
-                    # ---- Apply servo immediately so it never waits on motor motion ----
-                    await self.servo_set(p4)
+                    try:
+                        cmds = ik_cmds_bounded(
+                            self.ik_arm,
+                            (x, y, z),
+                            wrist,
+                            radius_m=IK_RADIUS_M,
+                            z_min=IK_Z_MIN,
+                            z_max=IK_Z_MAX
+                        )
+                        q1 = float(cmds["q1"])
+                        q2 = float(cmds["q2"])
+                        q3 = float(cmds["q3"])
+                        q4_pwm = int(round(cmds["q4"]))
+                    except Exception as e:
+                        print(f"[rpi] IK error: {e}", file=sys.stderr)
+                        writer.write(b"ERR ik failed\n"); await writer.drain()
+                        continue
+
+                    # Apply servo immediately so it never waits on motor motion
+                    await self.servo_set(q4_pwm)
 
                     async with self._lock:
-                        self.target_pwm = p4
+                        self.target_pwm = q4_pwm
                         # During cooldown (either motor), motors hold at REST
                         if not (self.cooling2 or self.cooling3):
-                            self.t1, self.t2, self.t3 = p1, p2, p3
-                    writer.write(b"ACK set\n"); await writer.drain()
-                else:
-                    writer.write(b"ERR expected: '<p1> <p2> <p3> <p4>' or 'rest' or 'quit'\n")
-                    await writer.drain()
+                            self.t1, self.t2, self.t3 = q1, q2, q3
+                    writer.write(b"ACK ik\n"); await writer.drain()
+                    continue
+
+                # Unknown command
+                writer.write(b"ERR expected: 'ik <x> <y> <z> <wrist>' or 'rest' or 'quit'\n")
+                await writer.drain()
+
         finally:
             try:
                 writer.close()
