@@ -114,7 +114,6 @@ def ik_yppp(
     z_tcp = z
 
     # 2) Signed planar reduction directly in the yawed plane:
-    #    px can be negative when r_tcp < L4*cos(pitch) — and that's OK.
     px = (r_tcp - arm.L4 * cos(target_pitch_rad))
     pz = (z_tcp - arm.L4 * sin(target_pitch_rad)) - arm.L1
 
@@ -174,11 +173,22 @@ def max_height(arm: ArmParams) -> float:
     return arm.L1 + arm.L2 + arm.L3 + arm.L4
 
 
-def example_usage():
-    # All geared joints are 9:1
-    GR = 9.0
+# -------------------- IMPORT-FRIENDLY WRAPPERS (NO IK LOGIC CHANGED) --------------------
 
-    arm = ArmParams(
+def ik_solve(arm: ArmParams, target_xyz: Tuple[float, float, float], target_pitch_rad: float) -> Dict[str, Dict[str, float]]:
+    """Return full IK solution dict."""
+    return ik_yppp(arm, target_xyz, target_pitch_rad)
+
+
+def ik_cmds(arm: ArmParams, target_xyz: Tuple[float, float, float], target_pitch_rad: float) -> Dict[str, float]:
+    """Return only the 'cmds' dictionary."""
+    return ik_yppp(arm, target_xyz, target_pitch_rad)['cmds']
+
+
+def make_default_arm() -> ArmParams:
+    """Build the same ArmParams used in example_usage()."""
+    GR = 9.0
+    return ArmParams(
         L1=0.176932,   # m
         L2=0.162737,   # m
         L3=0.226991,   # m
@@ -192,17 +202,96 @@ def example_usage():
         q4=JointCalib(theta0=0.0,    sign=+1, gear_ratio=GR),
     )
 
-    # Example target (change y to test base rotation)
-    target_xyz = (0.11, .11, .3)
-    # NOTE: pitch = 0 means tool is horizontal along radial direction.
-    #       pitch = +pi/2 means tool points straight up.
+
+# -------------------- BOUNDING CYLINDER GUARD (IK LOGIC UNCHANGED) --------------------
+
+def _inside_cylinder(target_xyz: Tuple[float, float, float], radius_m: float,
+                     z_min: Optional[float] = None, z_max: Optional[float] = None) -> bool:
+    """
+    Returns True if (x,y,z) is inside a vertical cylinder centered on the origin, radius=radius_m.
+    - If z_min/z_max are None, height is unbounded (infinite cylinder).
+    """
+    x, y, z = target_xyz
+    in_rad = (x*x + y*y) <= (radius_m * radius_m)
+    if z_min is None and z_max is None:
+        return in_rad
+    if z_min is None:
+        return in_rad and (z <= z_max)
+    if z_max is None:
+        return in_rad and (z >= z_min)
+    return in_rad and (z_min <= z <= z_max)
+
+
+def ik_cmds_bounded(
+    arm: ArmParams,
+    target_xyz: Tuple[float, float, float],
+    target_pitch_rad: float,
+    radius_m: float,
+    z_min: Optional[float] = None,
+    z_max: Optional[float] = None,
+) -> Dict[str, float]:
+    """
+    If target lies inside the cylinder, return a safe zero command:
+      q1=q2=q3=0.0 (motor turns), q4=servo center (1750 µs).
+    Otherwise, return normal IK cmds.
+    """
+    if _inside_cylinder(target_xyz, radius_m, z_min, z_max):
+        return {'q1': 0.0, 'q2': 0.0, 'q3': 0.0, 'q4': int(Q4_PWM_CENTER_US)}
+    return ik_cmds(arm, target_xyz, target_pitch_rad)
+
+
+def ik_solve_bounded(
+    arm: ArmParams,
+    target_xyz: Tuple[float, float, float],
+    target_pitch_rad: float,
+    radius_m: float,
+    z_min: Optional[float] = None,
+    z_max: Optional[float] = None,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Full solution with a 'bounded' flag.
+    If inside cylinder, returns a fabricated zero-pose solution (angles_rad all 0, cmds as above).
+    Otherwise, returns normal IK solution.
+    """
+    bounded = _inside_cylinder(target_xyz, radius_m, z_min, z_max)
+    if not bounded:
+        sol = ik_solve(arm, target_xyz, target_pitch_rad)
+        sol['bounded'] = False
+        return sol
+
+    # Fabricate a zero-pose solution without touching IK internals.
+    angles_rad = {'q1': 0.0, 'q2': 0.0, 'q3': 0.0, 'q4': 0.0}
+    angles_deg = {k: v * RAD2DEG for k, v in angles_rad.items()}
+    cmds = {'q1': 0.0, 'q2': 0.0, 'q3': 0.0, 'q4': int(Q4_PWM_CENTER_US)}
+    return {
+        'angles_rad': angles_rad,
+        'angles_deg': angles_deg,
+        'cmds': cmds,
+        'intermediate': {
+            'wrist_xyz': (0.0, 0.0, 0.0),
+            'planar_px': 0.0,
+            'planar_pz': 0.0,
+            'D': 0.0,
+            'k1': 0.0,
+            'k2': 0.0,
+            'r_tcp': 0.0,
+        },
+        'bounded': True,
+    }
+
+
+# ----------------------------------- EXAMPLE / CLI -----------------------------------
+
+def example_usage():
+    arm = make_default_arm()
+
+    # Example target
+    target_xyz = (0.05, 0.02, 0.10)  # inside a 0.1 m cylinder
     target_pitch = 0.0
 
-    sol = ik_yppp(arm, target_xyz, target_pitch)
-
-    # PRINT EXACTLY: "q1 q2 q3 q4" (q1-3 two decimals, q4 int)
-    c = sol['cmds']
-    print(f"{c['q1']:.2f} {c['q2']:.2f} {c['q3']:.2f} {c['q4']}")
+    # Bounded call: radius 0.1 m, infinite height
+    cmds = ik_cmds_bounded(arm, target_xyz, target_pitch, radius_m=0.1)
+    print(f"{cmds['q1']:.2f} {cmds['q2']:.2f} {cmds['q3']:.2f} {cmds['q4']}")
 
 if __name__ == "__main__":
     example_usage()

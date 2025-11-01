@@ -24,7 +24,7 @@ IDLE_SLEEP          = 0.02
 # Default caps (used for simple holds)
 ACCEL_LIMIT         = 1.0
 VEL_LIMIT           = 10
-WATCHDOG            = 10
+WATCHDOG            = 15
 
 # Group sync motion tunables
 GROUP_SPEED_RAD_S   = 0.8   # target group speed (rad/s) used to compute shared duration
