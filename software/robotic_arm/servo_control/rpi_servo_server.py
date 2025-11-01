@@ -276,6 +276,8 @@ class ArmServer:
                     ])
                     self.c1, self.c2, self.c3 = finals
                     self.t1, self.t2, self.t3 = REST1, REST2, REST3
+                    await self.servo_set(SERVO_CENTER)
+                    self.target_pwm = SERVO_CENTER
                     self.cooling2 = True
                     any_cooling = True
 
@@ -288,6 +290,8 @@ class ArmServer:
                     ])
                     self.c1, self.c2, self.c3 = finals
                     self.t1, self.t2, self.t3 = REST1, REST2, REST3
+                    await self.servo_set(SERVO_CENTER)
+                    self.target_pwm = SERVO_CENTER
                     self.cooling3 = True
                     any_cooling = True
 
