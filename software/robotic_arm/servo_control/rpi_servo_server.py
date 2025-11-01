@@ -367,7 +367,7 @@ class ArmServer:
                             z_max=IK_Z_MAX
                         )
                         q1 = float(cmds["q1"])
-                        q2 = float(cmds["q2"])
+                        q2 = float(cmds["q2"]) * 0.933333
                         q3 = float(cmds["q3"])
                         q4_pwm = int(round(cmds["q4"]))
                     except Exception as e:
