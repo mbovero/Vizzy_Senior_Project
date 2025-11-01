@@ -412,7 +412,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=65432)
-    ap.add_argument("--servo-pin", type=int, default=4, help="BCM GPIO pin for servo signal")
+    ap.add_argument("--servo-pin", type=int, default=27, help="BCM GPIO pin for servo signal")
     ap.add_argument("--transport", default="pi3hat",
                     help="pi3hat | socketcan:can0 | auto")
     args = ap.parse_args()
