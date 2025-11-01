@@ -269,6 +269,8 @@ class ArmServer:
                 # Enter cooldown conditions
                 if (self.last_temp2 is not None) and (not self.cooling2) and (self.last_temp2 > TEMP_LIMIT):
                     print(f"[rpi] WARN: m2 > {TEMP_LIMIT:.1f} °C → return to REST; enter cooldown2.")
+                    await self.servo_set(SERVO_CENTER)
+                    self.target_pwm = SERVO_CENTER
                     finals = await move_group_sync_time([
                         (self.m1, self.c1, REST1),
                         (self.m2, self.c2, REST2),
@@ -276,13 +278,13 @@ class ArmServer:
                     ])
                     self.c1, self.c2, self.c3 = finals
                     self.t1, self.t2, self.t3 = REST1, REST2, REST3
-                    await self.servo_set(SERVO_CENTER)
-                    self.target_pwm = SERVO_CENTER
                     self.cooling2 = True
                     any_cooling = True
 
                 if (self.last_temp3 is not None) and (not self.cooling3) and (self.last_temp3 > TEMP_LIMIT):
                     print(f"[rpi] WARN: m3 > {TEMP_LIMIT:.1f} °C → return to REST; enter cooldown3.")
+                    await self.servo_set(SERVO_CENTER)
+                    self.target_pwm = SERVO_CENTER
                     finals = await move_group_sync_time([
                         (self.m1, self.c1, REST1),
                         (self.m2, self.c2, REST2),
@@ -290,8 +292,6 @@ class ArmServer:
                     ])
                     self.c1, self.c2, self.c3 = finals
                     self.t1, self.t2, self.t3 = REST1, REST2, REST3
-                    await self.servo_set(SERVO_CENTER)
-                    self.target_pwm = SERVO_CENTER
                     self.cooling3 = True
                     any_cooling = True
 
