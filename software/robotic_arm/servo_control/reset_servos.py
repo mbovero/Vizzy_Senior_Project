@@ -7,9 +7,9 @@ import time
 import threading
 
 # GPIO pins for Vizzy servos
-SERVO_TOP = 4
-SERVO_MID = 17
-SERVO_BTM = 27
+SERVO_TOP = 4       # Wrist
+SERVO_MID = 17      # Claw (1300-1650 closed to open)
+SERVO_BTM = 27      # Yaw (1740 mid)
 
 # Servo pulse width limits (µs)
 SERVO_MIN = 1250
