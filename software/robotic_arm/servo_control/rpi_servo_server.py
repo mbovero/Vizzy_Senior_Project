@@ -3,8 +3,7 @@
 # IK protocol: accepts `ik <x> <y> <z> <wrist>` and maps to q1,q2,q3 + servo PWM (q4)
 
 from __future__ import annotations
-import argparse, asyncio, math, time, sys
-import contextlib
+import argparse, asyncio, math, time, sys, contextlib, pprint
 
 # ---------- Servo -----------
 SERVO_MIN    = 500
@@ -21,7 +20,6 @@ except Exception as e:
 import moteus
 
 # ---------- IK ----------
-# Uses the provided IK interface. q1,q2,q3 are motor angles (rad), q4 is a wrist PWM (us).
 from ik_callable import make_default_arm, ik_cmds_bounded
 
 # ---- IK Tunables ----
@@ -32,14 +30,18 @@ IK_Z_MAX    = 0.4
 # ---- q2 linear scaling (map ±2.25 -> ±2.10, 0 -> 0) ----
 Q2_MAX_IN   = 2.25
 Q2_MAX_OUT  = 2.10
-Q2_SCALE    = (Q2_MAX_OUT / Q2_MAX_IN)  # 2.1 / 2.25 = 0.933333...
+Q2_SCALE    = (Q2_MAX_OUT / Q2_MAX_IN)  # 0.933333...
 
 # ---- Comm fault handling ----
-COMM_FAIL_THRESHOLD = 3      # consecutive exceptions before recovering
-RECOVER_SLEEP_S     = 0.5    # short dwell before re-issuing queries
+COMM_FAIL_THRESHOLD = 3
+RECOVER_SLEEP_S     = 0.5
 
 # ---- Heartbeat ----
-HEARTBEAT_S         = 2.0    # how often to print status lines
+HEARTBEAT_S         = 2.0
+
+# ---- Servo reconnect tunables ----
+PIGPIO_RETRY_DELAY_S = 0.2
+PIGPIO_MAX_RETRIES   = 2
 
 # Optional transports (choose one at startup)
 def build_transport(kind: str):
@@ -47,7 +49,7 @@ def build_transport(kind: str):
     if kind == "pi3hat":
         try:
             import moteus_pi3hat
-            return moteus_pi3hat.Pi3HatRouter()  # shared router
+            return moteus_pi3hat.Pi3HatRouter()
         except Exception:
             print("WARN: pi3hat not available, falling back to default moteus transport.", file=sys.stderr)
             return None
@@ -83,8 +85,8 @@ POS_TOL             = 0.01
 SYNC_POLL_S         = 0.05
 SYNC_TIMEOUT_EXTRA  = 1.0
 
-TEMP_LIMIT          = 50.0       # °C — enter cooldown when >
-COOL_RESUME_TEMP    = 40.0       # °C — resume when <=
+TEMP_LIMIT          = 50.0
+COOL_RESUME_TEMP    = 40.0
 
 WIGGLE_AMPLITUDE    = 0.5
 WIGGLE_REPS         = 2
@@ -117,9 +119,6 @@ async def move_ramped(ctrl: moteus.Controller, current: float, target: float) ->
     return target
 
 async def move_group_sync_time(items):
-    """
-    items: list[(ctrl, current_pos, target_pos)]
-    """
     if not items:
         return []
     deltas = [ang_err(t, c) for (_, c, t) in items]
@@ -179,36 +178,31 @@ def extract_temperature(vals: dict):
     return float(temp) if isinstance(temp, (int, float)) else None
 
 def extract_voltage(vals: dict):
-    # Try well-known keys first; fall back to common names/ids.
-    for k in ("voltage", "motor_voltage", "bus_voltage", moteus.Register.VOLTAGE if hasattr(moteus, "Register") else None, 0x010, 16):
+    for k in ("voltage", "motor_voltage", "bus_voltage",
+              getattr(moteus, "Register", object()).__dict__.get("VOLTAGE") if hasattr(moteus, "Register") else None,
+              0x010, 16):
         if k in vals and isinstance(vals[k], (int, float)):
             return float(vals[k])
     return None
 
 def has_fault(vals: dict) -> bool:
-    # Consider non-zero 'fault' or presence of any 'fault*'/'error*' fields with truthy values as faulted
     f = vals.get("fault", 0)
     if isinstance(f, (int, float)) and f != 0:
         return True
     for k, v in vals.items():
         kn = str(k).lower()
         if kn.startswith("fault") or kn.startswith("error"):
-            try:
-                if isinstance(v, (int, float)) and v != 0:
-                    return True
-                if isinstance(v, str) and v.strip():
-                    return True
-            except Exception:
-                pass
+            if isinstance(v, (int, float)) and v != 0:
+                return True
+            if isinstance(v, str) and v.strip():
+                return True
     return False
 
 def collect_fault_fields(vals: dict) -> dict:
     out = {}
-    # Always show a few basics if present
     for key in ("fault", "fault_state", "fault_code", "fault_information", "error", "last_error"):
         if key in vals:
             out[key] = vals[key]
-    # Also grab any other fault*/error* keys
     for k, v in vals.items():
         kn = str(k).lower()
         if (kn.startswith("fault") or kn.startswith("error")) and (k not in out):
@@ -216,7 +210,6 @@ def collect_fault_fields(vals: dict) -> dict:
     return out
 
 async def gentle_clear_fault(ctrl: moteus.Controller, name: str):
-    """Attempt a gentle clear via stop, then re-query."""
     try:
         await ctrl.set_stop()
         await asyncio.sleep(0.05)
@@ -235,11 +228,12 @@ class ArmServer:
         self.port = port
         self.servo_pin = servo_pin
 
-        # Servo driver
+        # Servo driver (robust)
         self.pi = pigpio.pi()
         if not self.pi.connected:
             raise RuntimeError("pigpio daemon not running. Start with: sudo systemctl start pigpiod")
         self.current_pwm = SERVO_CENTER
+        self.target_pwm  = SERVO_CENTER
         self.pi.set_servo_pulsewidth(self.servo_pin, SERVO_CENTER)
 
         # moteus controllers
@@ -252,12 +246,11 @@ class ArmServer:
         # IK arm instance
         self.ik_arm = make_default_arm()
 
-        # Targets/state
+        # Targets/state (motors)
         self.t1 = self.t2 = self.t3 = 0.0
         self.c1 = self.c2 = self.c3 = 0.0
-        self.target_pwm = SERVO_CENTER
 
-        # Cooling state (separate flags for m2 and m3)
+        # Cooling state
         self.cooling2 = False
         self.cooling3 = False
         self.last_temp2 = None
@@ -269,6 +262,57 @@ class ArmServer:
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
 
+    # ===== SERVO ROBUSTNESS =====
+    async def _reconnect_pigpio(self) -> bool:
+        try:
+            if self.pi is not None:
+                with contextlib.suppress(Exception):
+                    self.pi.stop()
+        except Exception:
+            pass
+
+        try:
+            self.pi = pigpio.pi()
+            if not self.pi.connected:
+                print("[rpi] SERVO: pigpio reconnect failed (not connected).", file=sys.stderr)
+                return False
+            self.pi.set_servo_pulsewidth(self.servo_pin, int(self.target_pwm))
+            self.current_pwm = int(self.target_pwm)
+            print("[rpi] SERVO: pigpio reconnected.")
+            return True
+        except Exception as e:
+            print(f"[rpi] SERVO: pigpio reconnect exception: {e}", file=sys.stderr)
+            return False
+
+    async def servo_set(self, pwm_us: int):
+        pwm = int(max(SERVO_MIN, min(SERVO_MAX, pwm_us)))
+        self.target_pwm = pwm
+
+        if self.pi is None or not getattr(self.pi, "connected", False):
+            print("[rpi] SERVO: pigpio disconnected, attempting reconnect...", file=sys.stderr)
+            if not await self._reconnect_pigpio():
+                return
+
+        for attempt in range(PIGPIO_MAX_RETRIES + 1):
+            try:
+                self.pi.set_servo_pulsewidth(self.servo_pin, pwm)
+                self.current_pwm = pwm
+                return
+            except Exception as e:
+                print(f"[rpi] SERVO: write error (attempt {attempt+1}): {e}", file=sys.stderr)
+                try:
+                    with contextlib.suppress(Exception):
+                        self.pi.stop()
+                except Exception:
+                    pass
+                self.pi = None
+                if attempt < PIGPIO_MAX_RETRIES:
+                    await asyncio.sleep(PIGPIO_RETRY_DELAY_S)
+                    await self._reconnect_pigpio()
+                else:
+                    return
+
+    # ===== MOTEUS & SYSTEM =====
     async def init_positions(self):
         await asyncio.gather(self.m1.set_stop(), self.m2.set_stop(), self.m3.set_stop())
         try:
@@ -276,7 +320,6 @@ class ArmServer:
             self.t1 = self.c1 = float(s1.values.get('position', 0.0))
             self.t2 = self.c2 = float(s2.values.get('position', 0.0))
             self.t3 = self.c3 = float(s3.values.get('position', 0.0))
-            # Surface any existing faults immediately
             await self._report_fault_if_any("m1", s1.values); await self._report_fault_if_any("m2", s2.values); await self._report_fault_if_any("m3", s3.values)
         except Exception as e:
             print(f"[rpi] init: query error: {e}", file=sys.stderr)
@@ -284,32 +327,19 @@ class ArmServer:
             self.c1 = self.c2 = self.c3 = 0.0
         print(f"[rpi] init: ID1={self.c1:.3f}, ID2={self.c2:.3f}, ID3={self.c3:.3f}")
 
-    async def servo_set(self, pwm_us: int):
-        pwm = int(max(SERVO_MIN, min(SERVO_MAX, pwm_us)))
-        if pwm != self.current_pwm:
-            self.pi.set_servo_pulsewidth(self.servo_pin, pwm)
-            self.current_pwm = pwm
-
     async def _recover_bus(self):
-        """Rebuild the transport and controllers, re-init positions, and clear failure count."""
         print("[rpi] COMM: attempting bus recovery...", file=sys.stderr)
         with contextlib.suppress(Exception):
             await asyncio.gather(self.m1.set_stop(), self.m2.set_stop(), self.m3.set_stop())
 
-        # Rebuild transport + controllers (preserve original transport kind)
         router = build_transport(self._transport_kind)
         self.m1 = moteus.Controller(id=ID1, transport=router)
         self.m2 = moteus.Controller(id=ID2, transport=router)
         self.m3 = moteus.Controller(id=ID3, transport=router)
 
-        # Keep wrist safe/neutral during recovery
         await self.servo_set(SERVO_CENTER)
-        self.target_pwm = SERVO_CENTER
-
-        # Give the bus a moment to settle
         await asyncio.sleep(RECOVER_SLEEP_S)
 
-        # Try to re-sync to actual positions; fall back to zeros
         try:
             s1, s2, s3 = await asyncio.gather(self.m1.query(), self.m2.query(), self.m3.query())
             self.t1 = self.c1 = float(s1.values.get('position', 0.0))
@@ -328,19 +358,15 @@ class ArmServer:
         if has_fault(vals):
             ff = collect_fault_fields(vals)
             print(f"[rpi] FAULT: {name}: {ff}", file=sys.stderr)
-            # Try a gentle clear once so the operator sees whether it resolves
             await gentle_clear_fault(getattr(self, name), name)
 
     async def control_loop(self):
-        """Main control loop: applies targets, enforces thermal policy, ~50 Hz."""
         next_temp = time.monotonic()
         try:
             while not self._stop.is_set():
                 async with self._lock:
-                    # Apply servo first so it never waits on motor motion
                     await self.servo_set(self.target_pwm)
 
-                    # Then schedule/await the synchronized motor move (fault-aware)
                     group = [
                         (self.m1, self.c1, self.t1),
                         (self.m2, self.c2, self.t2),
@@ -349,24 +375,21 @@ class ArmServer:
                     try:
                         finals = await move_group_sync_time(group)
                         self.c1, self.c2, self.c3 = finals
-                        self._comm_failures = 0  # success resets the counter
+                        self._comm_failures = 0
                     except Exception as e:
                         self._comm_failures += 1
                         print(f"[rpi] COMM: move_group exception ({self._comm_failures}/{COMM_FAIL_THRESHOLD}): {e}", file=sys.stderr)
                         if self._comm_failures >= COMM_FAIL_THRESHOLD:
                             await self._recover_bus()
 
-                # Temp check ~1 Hz (fault-aware)
                 now = time.monotonic()
                 if now >= next_temp:
                     try:
                         s2, s3 = await asyncio.gather(self.m2.query(), self.m3.query())
                         self.last_temp2 = extract_temperature(s2.values)
                         self.last_temp3 = extract_temperature(s3.values)
-                        # Surface faults immediately during periodic check
                         await self._report_fault_if_any("m2", s2.values)
                         await self._report_fault_if_any("m3", s3.values)
-                        # success: leave failure counter as-is (move path already clears)
                     except Exception as e:
                         self._comm_failures += 1
                         print(f"[rpi] COMM: temp query exception ({self._comm_failures}/{COMM_FAIL_THRESHOLD}): {e}", file=sys.stderr)
@@ -374,14 +397,9 @@ class ArmServer:
                             await self._recover_bus()
                     next_temp = now + 1.0
 
-                # Thermal policy (independent for m2 and m3). If either overheats, hold all at REST.
-                any_cooling = (self.cooling2 or self.cooling3)
-
-                # Enter cooldown conditions (also center wrist)
                 if (self.last_temp2 is not None) and (not self.cooling2) and (self.last_temp2 > TEMP_LIMIT):
                     print(f"[rpi] WARN: m2 > {TEMP_LIMIT:.1f} °C → return to REST; enter cooldown2.")
                     await self.servo_set(SERVO_CENTER)
-                    self.target_pwm = SERVO_CENTER
                     finals = await move_group_sync_time([
                         (self.m1, self.c1, REST1),
                         (self.m2, self.c2, REST2),
@@ -390,12 +408,10 @@ class ArmServer:
                     self.c1, self.c2, self.c3 = finals
                     self.t1, self.t2, self.t3 = REST1, REST2, REST3
                     self.cooling2 = True
-                    any_cooling = True
 
                 if (self.last_temp3 is not None) and (not self.cooling3) and (self.last_temp3 > TEMP_LIMIT):
                     print(f"[rpi] WARN: m3 > {TEMP_LIMIT:.1f} °C → return to REST; enter cooldown3.")
                     await self.servo_set(SERVO_CENTER)
-                    self.target_pwm = SERVO_CENTER
                     finals = await move_group_sync_time([
                         (self.m1, self.c1, REST1),
                         (self.m2, self.c2, REST2),
@@ -404,9 +420,7 @@ class ArmServer:
                     self.c1, self.c2, self.c3 = finals
                     self.t1, self.t2, self.t3 = REST1, REST2, REST3
                     self.cooling3 = True
-                    any_cooling = True
 
-                # Resume conditions (wiggle the motor that cooled)
                 if self.cooling2 and (self.last_temp2 is not None) and (self.last_temp2 <= COOL_RESUME_TEMP):
                     print(f"[rpi] COOL: m2 <= {COOL_RESUME_TEMP:.1f} °C → wiggle2 + resume check.")
                     self.c2 = await wiggle(self.m2, REST2, self.c2)
@@ -423,15 +437,22 @@ class ArmServer:
         finally:
             with contextlib.suppress(Exception):
                 await asyncio.gather(self.m1.set_stop(), self.m2.set_stop(), self.m3.set_stop())
-            self.pi.set_servo_pulsewidth(self.servo_pin, 0)
-            self.pi.stop()
+            try:
+                if self.pi is not None and getattr(self.pi, "connected", False):
+                    self.pi.set_servo_pulsewidth(self.servo_pin, 0)
+                    self.pi.stop()
+            except Exception:
+                pass
 
     async def heartbeat_loop(self):
-        """Periodic status lines + immediate fault surfacing."""
+        """Periodic status: prints FULL query dict for each motor."""
         names = [("m1", self.m1), ("m2", self.m2), ("m3", self.m3)]
         while not self._stop.is_set():
+            # Servo status
+            servo_state = "connected" if (self.pi is not None and getattr(self.pi, "connected", False)) else "DISCONNECTED"
+            print(f"[rpi] HB: servo={servo_state} target_pwm={self.target_pwm}", flush=True)
+
             try:
-                # Query all, but don't modify the shared comm failure counter here
                 results = await asyncio.gather(*(ctrl.query() for _, ctrl in names), return_exceptions=True)
                 for (name, ctrl), res in zip(names, results):
                     if isinstance(res, Exception):
@@ -439,17 +460,19 @@ class ArmServer:
                         continue
 
                     vals = res.values
-                    pos   = vals.get('position')
+                    # ---- FULL DICT PRINT HERE ----
+                    print(f"[rpi] HB FULL {name} values:")
+                    pprint.pprint(vals, width=100, compact=False, sort_dicts=False)
+
+                    # Optional: still surface summarized fields & faults
                     temp  = extract_temperature(vals)
                     volts = extract_voltage(vals)
-
-                    # One-liner status
+                    pos   = vals.get('position')
                     ps = f"{pos:.3f}" if isinstance(pos, (int, float)) else "n/a"
                     ts = f"{temp:.1f}°C" if isinstance(temp, (int, float)) else "n/a"
                     vs = f"{volts:.2f}V" if isinstance(volts, (int, float)) else "n/a"
-                    print(f"[rpi] HB: {name} pos={ps} temp={ts} bus={vs}")
+                    print(f"[rpi] HB SUM {name} pos={ps} temp={ts} bus={vs}")
 
-                    # Surface faults loudly + try a gentle clear
                     if has_fault(vals):
                         ff = collect_fault_fields(vals)
                         print(f"[rpi] FAULT: {name}: {ff}", file=sys.stderr)
@@ -480,15 +503,18 @@ class ArmServer:
                     break
 
                 if cmd == "rest":
-                    # Apply servo immediately for responsiveness
-                    await self.servo_set(SERVO_CENTER)
-                    async with self._lock:
-                        self.t1, self.t2, self.t3 = REST1, REST2, REST3
-                        self.target_pwm = SERVO_CENTER
-                    writer.write(b"ACK rest\n"); await writer.drain()
+                    try:
+                        await self.servo_set(SERVO_CENTER)
+                        async with self._lock:
+                            self.t1, self.t2, self.t3 = REST1, REST2, REST3
+                            self.target_pwm = SERVO_CENTER
+                        writer.write(b"ACK rest\n")
+                        await writer.drain()
+                    except Exception as e:
+                        print(f"[rpi] REST: error: {e}", file=sys.stderr)
+                        writer.write(b"ERR rest failed\n"); await writer.drain()
                     continue
 
-                # IK command: ik <x> <y> <z> <wrist>
                 if cmd.startswith("ik "):
                     parts = cmd_raw.split()
                     if len(parts) != 5:
@@ -512,7 +538,7 @@ class ArmServer:
                             z_max=IK_Z_MAX
                         )
                         q1 = float(cmds["q1"])
-                        q2 = float(cmds["q2"]) * Q2_SCALE   # symmetric linear scaling
+                        q2 = float(cmds["q2"]) * Q2_SCALE
                         q3 = float(cmds["q3"])
                         q4_pwm = int(round(cmds["q4"]))
                     except Exception as e:
@@ -520,18 +546,18 @@ class ArmServer:
                         writer.write(b"ERR ik failed\n"); await writer.drain()
                         continue
 
-                    # Apply servo immediately so it never waits on motor motion
-                    await self.servo_set(q4_pwm)
-
-                    async with self._lock:
-                        self.target_pwm = q4_pwm
-                        # During cooldown (either motor), motors hold at REST
-                        if not (self.cooling2 or self.cooling3):
-                            self.t1, self.t2, self.t3 = q1, q2, q3
-                    writer.write(b"ACK ik\n"); await writer.drain()
+                    try:
+                        await self.servo_set(q4_pwm)
+                        async with self._lock:
+                            self.target_pwm = q4_pwm
+                            if not (self.cooling2 or self.cooling3):
+                                self.t1, self.t2, self.t3 = q1, q2, q3
+                        writer.write(b"ACK ik\n"); await writer.drain()
+                    except Exception as e:
+                        print(f"[rpi] IK: servo error: {e}", file=sys.stderr)
+                        writer.write(b"ERR ik servo\n"); await writer.drain()
                     continue
 
-                # Unknown command
                 writer.write(b"ERR expected: 'ik <x> <y> <z> <wrist>' or 'rest' or 'quit'\n")
                 await writer.drain()
 
@@ -557,6 +583,19 @@ class ArmServer:
         ctrl_task.cancel(); hb_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await ctrl_task; await hb_task
+
+# ---- wiggle helper ----
+async def wiggle(ctrl: moteus.Controller, center: float, start_pos: float) -> float:
+    left  = center - WIGGLE_AMPLITUDE
+    right = center + WIGGLE_AMPLITUDE
+    pos = start_pos
+    for _ in range(WIGGLE_REPS):
+        pos = await move_ramped(ctrl, pos, left)
+        await asyncio.sleep(WIGGLE_DWELL_S)
+        pos = await move_ramped(ctrl, pos, right)
+        await asyncio.sleep(WIGGLE_DWELL_S)
+    pos = await move_ramped(ctrl, pos, center)
+    return pos
 
 def main():
     ap = argparse.ArgumentParser()
