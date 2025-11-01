@@ -193,7 +193,7 @@ def example_usage():
     )
 
     # Example target (change y to test base rotation)
-    target_xyz = (0.2, 0, 0.4)
+    target_xyz = (0.3, -.3, 0.1)
     # NOTE: pitch = 0 means tool is horizontal along radial direction.
     #       pitch = +pi/2 means tool points straight up.
     target_pitch = 0.0

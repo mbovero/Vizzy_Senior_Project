@@ -13,8 +13,8 @@ ID1, ID2, ID3      = 1, 2, 3
 
 # Per-motor rest positions
 REST1               = 0.0
-REST2               = 0.5
-REST3               = 2.0
+REST2               = 1
+REST3               = 3.25
 
 # Legacy stepper tunables (kept for wiggle / hold)
 STEP_SIZE_RAD       = 0.08
@@ -22,15 +22,15 @@ STEP_DELAY_S        = 0.02
 IDLE_SLEEP          = 0.02
 
 # Default caps (used for simple holds)
-ACCEL_LIMIT         = 5
+ACCEL_LIMIT         = 1.0
 VEL_LIMIT           = 10
 WATCHDOG            = 10
 
 # Group sync motion tunables
 GROUP_SPEED_RAD_S   = 0.8   # target group speed (rad/s) used to compute shared duration
-ACCEL_MULT          = 6.0   # accel_limit = ACCEL_MULT * per-motor velocity_limit
-MIN_SPEED           = 0.05  # floor to avoid 0 velocity_limit
-POS_TOL             = 0.01  # rad tolerance to consider "arrived"
+ACCEL_MULT          = 1.5   # accel_limit = ACCEL_MULT * per-motor velocity_limit
+MIN_SPEED           = 0.01  # floor to avoid 0 velocity_limit
+POS_TOL             = 0.005  # rad tolerance to consider "arrived"
 SYNC_POLL_S         = 0.05  # seconds between arrival checks
 SYNC_TIMEOUT_EXTRA  = 1.0   # extra slack beyond planned duration (s)
 
@@ -97,7 +97,7 @@ async def move_group_sync_time(items):
 
     # Shared duration from group speed
     group_speed = max(GROUP_SPEED_RAD_S, MIN_SPEED)
-    duration = 1.5
+    duration = 1
 
     # Command final positions with per-motor velocity/accel limits so time ~= duration
     cmds = []
