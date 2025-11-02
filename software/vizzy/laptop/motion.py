@@ -1,20 +1,20 @@
 # vizzy/laptop/motion.py
 # -----------------------------------------------------------------------------
 # Motion facade used by ScanWorker and TaskAgent/EXECUTE_TASK.
-# - nudge_scan(dx, dy): send normalized [-1, 1] deltas (RPi scales & clamps)
-# - goto_pose_pwm(pwm_btm, pwm_top, pose_id): absolute move (RPi echoes pose_id)
-# - get_pwms(timeout_s): request current PWM pose from the RPi
+# - nudge_scan(dx, dy): send normalized [-1, 1] deltas (RPi converts to mm offsets)
+# - move_to_target(x, y, z, pitch): absolute Cartesian move (waits for CMD_COMPLETE)
+# - request_obj_location(): fetch current commanded Cartesian target from the RPi
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
 
 import time
-from queue import Queue, Empty
+from queue import Empty, Queue
 from threading import Event
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
-from ..shared import protocol as P
 from ..shared import config as C
+from ..shared import protocol as P
 from ..shared.jsonl import send_json
 
 
@@ -22,9 +22,9 @@ class Motion:
     def __init__(
         self,
         sock,
-        pose_ready_q: Queue,
-        pwms_event: Event,
-        pwms_payload: dict,
+        cmd_complete_q: Queue,
+        obj_loc_event: Event,
+        obj_loc_payload: dict,
         *,
         abort_event: Optional[Event] = None,
     ):
@@ -33,19 +33,19 @@ class Motion:
         ----------
         sock : socket.socket
             Connected TCP socket to the RPi server.
-        pose_ready_q : queue.Queue
-            Queue of pose-ready acks populated by the receiver thread.
-        pwms_event : threading.Event
-            Event set by the receiver thread when a PWMS message arrives.
-        pwms_payload : dict
-            Dict updated by the receiver thread with keys 'pwm_btm', 'pwm_top'.
+        cmd_complete_q : queue.Queue
+            Queue populated by the receiver thread with TYPE_CMD_COMPLETE payloads.
+        obj_loc_event : threading.Event
+            Event set by the receiver thread when a TYPE_OBJ_LOC message arrives.
+        obj_loc_payload : dict
+            Dict updated by the receiver thread with keys 'x', 'y', 'z'.
         abort_event : threading.Event | None
-            Optional event to signal that waiting for pose ready should abort early.
+            Optional event to signal that waits should abort early.
         """
         self.sock = sock
-        self._pose_ready_q = pose_ready_q
-        self._pwms_event = pwms_event
-        self._pwms_payload = pwms_payload
+        self._cmd_complete_q = cmd_complete_q
+        self._obj_loc_event = obj_loc_event
+        self._obj_loc_payload = obj_loc_payload
         self._abort_event = abort_event
 
     # ------------------------------------------------------------------ utils
@@ -58,45 +58,45 @@ class Motion:
             # Don’t crash worker threads on transient socket errors.
             pass
 
-    def _drain_pose_ready(self) -> None:
-        """Remove any stale pose-ready acknowledgements."""
-        if self._pose_ready_q is None:
+    def _drain_cmd_queue(self) -> None:
+        """Remove any stale command completion acknowledgements."""
+        if self._cmd_complete_q is None:
             return
         try:
             while True:
-                self._pose_ready_q.get_nowait()
+                self._cmd_complete_q.get_nowait()
         except Empty:
             pass
         except Exception:
             pass
 
-    def _wait_pose_ready(self, expected_id: Optional[int], slew_ms: int) -> bool:
-        """
-        Wait for a TYPE_POSE_READY ack. If expected_id is provided, only
-        consider matching ids. Returns True on ack, False on timeout/abort.
-        """
-        if self._pose_ready_q is None:
-            raise RuntimeError("Motion.goto_pose_pwm requires a pose_ready queue")
+    def _wait_cmd_complete(self, expected_cmd: str, timeout_s: float) -> bool:
+        """Wait for TYPE_CMD_COMPLETE matching expected_cmd."""
+        if self._cmd_complete_q is None:
+            raise RuntimeError("Motion.move_to_target requires a cmd_complete queue")
 
-        settle = float(getattr(C, "POSE_SETTLE_S", 0.3))
-        deadline = time.monotonic() + (slew_ms / 1000.0) + settle + 1.5
+        deadline = time.monotonic() + float(timeout_s)
         while time.monotonic() < deadline:
             if self._abort_event is not None and getattr(self._abort_event, "is_set", lambda: False)():
                 return False
+            remaining = max(0.01, deadline - time.monotonic())
             try:
-                pose_id = self._pose_ready_q.get(timeout=0.05)
+                msg = self._cmd_complete_q.get(timeout=min(0.1, remaining))
             except Empty:
                 continue
             except Exception:
                 continue
 
-            try:
-                pose_id = int(pose_id)
-            except Exception:
+            if not isinstance(msg, dict):
                 continue
 
-            if expected_id is None or pose_id == int(expected_id):
-                return True
+            cmd = str(msg.get("cmd", "")).upper()
+            if cmd != expected_cmd:
+                # Unexpected completion (likely belongs to another flow); drop it.
+                continue
+
+            status = str(msg.get("status", "success")).lower()
+            return status == "success"
 
         return False
 
@@ -105,64 +105,64 @@ class Motion:
     def nudge_scan(self, dx: float, dy: float) -> None:
         """
         Send a SCAN_MOVE with normalized deltas in [-1, 1].
-        The RPi applies MOVE_SCALE_US and clamps to servo limits.
+        The RPi converts these values to millimetre offsets.
         """
-        # Clamp to [-1, 1]
         h = max(-1.0, min(1.0, float(dx)))
         v = max(-1.0, min(1.0, float(dy)))
         self._send({"type": P.TYPE_SCAN_MOVE, "horizontal": h, "vertical": v})
 
-    def goto_pose_pwm(
+    def move_to_target(
         self,
-        pwm_btm: int,
-        pwm_top: int,
-        pose_id: Optional[int] = None,
+        x: float,
+        y: float,
+        z: float,
+        pitch: float,
+        *,
+        timeout_s: Optional[float] = None,
     ) -> bool:
         """
-        Send an absolute PWM pose move to the RPi and block until POSE_READY.
-        Returns True if the acknowledgement arrives, False on timeout/abort.
+        Send a MOVE_TO command to the RPi and wait for TYPE_CMD_COMPLETE.
+        Returns True on success, False on timeout/abort/failure.
         """
-        slew_ms = int(C.GOTO_POSE_SLEW_MS)
+        timeout = float(timeout_s or C.PRIMITIVE_CMD_TIMEOUT)
 
-        if self._pose_ready_q is None:
-            raise RuntimeError("Motion.goto_pose_pwm requires a pose_ready queue")
-
-        self._drain_pose_ready()
-
+        self._drain_cmd_queue()
         payload: Dict[str, Any] = {
-            "cmd": P.CMD_GOTO_PWMS,
-            "pwm_btm": int(pwm_btm),
-            "pwm_top": int(pwm_top),
-            "slew_ms": int(slew_ms),
+            "cmd": P.CMD_MOVE_TO,
+            "x": float(x),
+            "y": float(y),
+            "z": float(z),
+            "pitch": float(pitch),
         }
-        if pose_id is not None:
-            payload["pose_id"] = int(pose_id)
-
         self._send(payload)
-        return self._wait_pose_ready(pose_id, slew_ms)
+        return self._wait_cmd_complete(P.CMD_MOVE_TO, timeout)
 
-    def get_pwms(self, timeout_s: float = 0.3) -> Optional[Dict[str, int]]:
+    def request_obj_location(self, timeout_s: float = 0.5) -> Optional[Dict[str, float]]:
         """
-        Request current PWM pose from the RPi and wait briefly for PWMS.
+        Request the current commanded Cartesian target from the RPi.
 
         Returns
         -------
         dict | None
-            {"pwm_btm": int, "pwm_top": int} on success, or None on timeout/parse error.
+            {"x": float, "y": float, "z": float} on success, or None on timeout/parse error.
         """
+        if self._obj_loc_event is None:
+            raise RuntimeError("Motion.request_obj_location requires an obj_loc_event")
+
         try:
-            self._pwms_event.clear()
+            self._obj_loc_event.clear()
         except Exception:
             pass
 
-        self._send({"cmd": P.CMD_GET_PWMS})
-        ok = self._pwms_event.wait(timeout_s)
+        self._send({"cmd": P.CMD_GET_OBJ_LOC})
+        ok = self._obj_loc_event.wait(timeout_s)
         if not ok:
             return None
         try:
             return {
-                "pwm_btm": int(self._pwms_payload["pwm_btm"]),
-                "pwm_top": int(self._pwms_payload["pwm_top"]),
+                "x": float(self._obj_loc_payload["x"]),
+                "y": float(self._obj_loc_payload["y"]),
+                "z": float(self._obj_loc_payload["z"]),
             }
         except Exception:
             return None

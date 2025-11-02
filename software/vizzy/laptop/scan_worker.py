@@ -2,10 +2,10 @@
 # -----------------------------------------------------------------------------
 # ScanWorker: laptop-driven SEARCH cycle.
 # For each pose from build_search_path():
-#   - GOTO baseline -> wait for POSE_READY
+#   - MOVE_TO baseline -> wait for CMD_COMPLETE
 #   - repeat at SAME pose:
-#       scan window -> pick unseen viable class -> center -> GET_PWMS -> memory
-#       -> return to baseline (GOTO) -> wait for POSE_READY -> dwell
+#       scan window -> pick unseen viable class -> center -> GET_OBJ_LOC -> memory
+#       -> return to baseline (MOVE_TO) -> wait for CMD_COMPLETE -> dwell
 #     until no new viable objects remain at that pose.
 # Exits when path is exhausted or scan_abort is set.
 # -----------------------------------------------------------------------------
@@ -211,7 +211,7 @@ class ScanWorker(threading.Thread):
         self.events.scan_finished.clear()
 
         print("[ScanWorker] Building search path...")
-        path = build_search_path()  # [{"pose_id","pwm_btm","pwm_top","slew_ms"}, ...]
+        path = build_search_path()  # [{"pose_id","x","y","z","pitch"}, ...]
         print(f"[ScanWorker] Search path has {len(path)} poses")
 
         try:
@@ -222,19 +222,19 @@ class ScanWorker(threading.Thread):
                     break
 
                 pid = int(pose["pose_id"])
-                btm = int(pose["pwm_btm"])
-                top = int(pose["pwm_top"])
-                print(f"[ScanWorker] Pose {pid}: BTM={btm}, TOP={top}, SLEW={pose.get('slew_ms')}")
+                x = float(pose["x"])
+                y = float(pose["y"])
+                z = float(pose["z"])
+                pitch = float(pose.get("pitch", C.SEARCH_PITCH_DEG))
+                print(f"[ScanWorker] Pose {pid}: x={x:.1f} y={y:.1f} z={z:.1f} pitch={pitch:.1f}")
 
                 # Go to baseline pose for this grid point
-                print(f"[ScanWorker] Sending GOTO_POSE to RPi...")
-                ok = self.motion.goto_pose_pwm(btm, top, pose_id=pid)
-                if ok:
-                    print(f"[ScanWorker] POSE_READY received")
-                else:
-                    # If ack missing, proceed cautiously after an extra dwell
-                    print(f"[ScanWorker] No POSE_READY received, settling...")
-                    time.sleep(C.POSE_SETTLE_S)
+                print("[ScanWorker] Sending MOVE_TO baseline...")
+                ok = self.motion.move_to_target(x, y, z, pitch)
+                if not ok:
+                    print("[ScanWorker] Warning: MOVE_TO baseline timed out or failed; continuing after settle")
+
+                time.sleep(float(getattr(C, "MOVE_SETTLE_S", 0.3)))
 
                 # Per-pose repeat: try to find and center multiple distinct classes
                 attempts = 0
@@ -306,8 +306,11 @@ class ScanWorker(threading.Thread):
 
                     # When success centering, get grasp orientation and create object
                     if center_success:
-                        # Request position data 
-                        pwms = self.motion.get_pwms(timeout_s=0.3)
+                        # Request current target location (Cartesian)
+                        loc = self.motion.request_obj_location(timeout_s=0.5)
+                        if loc is None:
+                            print("[ScanWorker] Warning: No TYPE_OBJ_LOC received; using baseline pose")
+                            loc = {"x": x, "y": y, "z": z}
                         
                         # Calculate grasp orientation from collected frames (no new YOLO inference needed!)
                         orientation_data = self._calculate_orientation_from_collected_frames(collected_frames)
@@ -316,11 +319,10 @@ class ScanWorker(threading.Thread):
                         object_id = self.memory.update_entry(
                             cls_id=cls_id,
                             cls_name=candidate.get("cls_name", self._get_name(cls_id)),
-                            pwm_btm=int(pwms["pwm_btm"]),
-                            pwm_top=int(pwms["pwm_top"]),
-                            x=0.0,  # TODO: Calculate from IK
-                            y=0.0,  # TODO: Calculate from IK
-                            z=0.0,  # TODO: Read from laser sensor
+                            x=float(loc["x"]),
+                            y=float(loc["y"]),
+                            z=float(loc["z"]),
+                            pitch=pitch,
                             orientation=orientation_data,  # Add orientation data
                         )
                         
@@ -344,9 +346,9 @@ class ScanWorker(threading.Thread):
                         fails_at_pose[cls_id] = fails_at_pose.get(cls_id, 0) + 1
 
                     # --- Always return to the baseline pose before next attempt ---
-                    returned = self.motion.goto_pose_pwm(btm, top, pose_id=pid)
+                    returned = self.motion.move_to_target(x, y, z, pitch)
                     if not returned:
-                        print("[ScanWorker] RETURN pose ack missing or aborted; continuing after settle...")
+                        print("[ScanWorker] Warning: Baseline MOVE_TO did not confirm; continuing after dwell")
                     time.sleep(C.RETURN_TO_POSE_DWELL_S)
                     self._flush_capture()
 

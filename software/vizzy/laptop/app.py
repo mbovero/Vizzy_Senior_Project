@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import threading
 import time
+from queue import Empty
 from typing import Optional, Literal
 
 import cv2
@@ -50,12 +51,9 @@ class Mailboxes:
     """Network mailboxes the ReceiverThread fills."""
     def __init__(self):
         from queue import Queue
-        self.pose_ready_q: "Queue[int]" = Queue(maxsize=8)
-        self.pwms_event = threading.Event()
-        self.pwms_payload: dict = {}
-        
-        # NEW: For task execution primitive commands
         self.cmd_complete_q: "Queue[dict]" = Queue(maxsize=8)  # Receives CMD_COMPLETE messages
+        self.obj_loc_event = threading.Event()
+        self.obj_loc_payload: dict = {}
 
 
 class StateManager:
@@ -149,9 +147,9 @@ class StateManager:
             print("[StateManager] Creating Motion facade...")
             self.motion = Motion(
                 self.sock,
-                self.mail.pose_ready_q,
-                self.mail.pwms_event,
-                self.mail.pwms_payload,
+                self.mail.cmd_complete_q,
+                self.mail.obj_loc_event,
+                self.mail.obj_loc_payload,
                 abort_event=self.events.scan_abort,
             )
 
@@ -212,28 +210,7 @@ class StateManager:
                     mtype = msg.get("type")
                     mcmd = msg.get("cmd")
 
-                    if mtype == P.TYPE_POSE_READY:
-                        try:
-                            self.mail.pose_ready_q.put_nowait(int(msg.get("pose_id", 0)))
-                        except Exception:
-                            try:
-                                self.mail.pose_ready_q.get_nowait()
-                            except Empty:
-                                pass
-                            self.mail.pose_ready_q.put_nowait(int(msg.get("pose_id", 0)))
-
-                    elif mtype == P.TYPE_PWMS:
-                        try:
-                            self.mail.pwms_payload.clear()
-                            self.mail.pwms_payload.update({
-                                "pwm_btm": int(msg["pwm_btm"]),
-                                "pwm_top": int(msg["pwm_top"]),
-                            })
-                            self.mail.pwms_event.set()
-                        except Exception:
-                            pass
-                    
-                    elif mtype == P.TYPE_CMD_COMPLETE:
+                    if mtype == P.TYPE_CMD_COMPLETE:
                         # NEW: Route primitive command completion to dispatcher queue
                         try:
                             self.mail.cmd_complete_q.put_nowait(msg)
@@ -244,6 +221,18 @@ class StateManager:
                             except Empty:
                                 pass
                             self.mail.cmd_complete_q.put_nowait(msg)
+
+                    elif mtype == P.TYPE_OBJ_LOC:
+                        try:
+                            self.mail.obj_loc_payload.clear()
+                            self.mail.obj_loc_payload.update({
+                                "x": float(msg["x"]),
+                                "y": float(msg["y"]),
+                                "z": float(msg["z"]),
+                            })
+                            self.mail.obj_loc_event.set()
+                        except Exception:
+                            pass
 
             except Exception:
                 # Reconnect path (simple)

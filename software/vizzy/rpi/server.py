@@ -11,13 +11,10 @@ import socket
 import time
 from typing import Optional, Tuple
 
-import pigpio
-
 from ..shared import config as C
 from ..shared.jsonl import recv_lines
 from . import state
 from .dispatch import process_messages
-from .servo import init_servos
 
 
 def _make_server_socket() -> socket.socket:
@@ -31,12 +28,7 @@ def _make_server_socket() -> socket.socket:
 
 def serve_forever(debug: bool = False) -> None:
     """Main server loop: accept one client and dispatch messages until STOP/close."""
-    pi = pigpio.pi()
-    if not pi.connected:
-        raise RuntimeError("[RPi] pigpio daemon not running or not reachable.")
-
-    init_servos(pi)
-    print("[RPi] Servos initialized to center.")
+    pi = None  # Placeholder for future IK/actuation backend
 
     server_sock = _make_server_socket()
 
@@ -48,9 +40,13 @@ def serve_forever(debug: bool = False) -> None:
 
             # Reset state on new connection
             state.centering_active.set()   # allow nudges when idle
-
-            # Re-center to a known safe pose on connect
-            init_servos(pi)
+            with state.target_lock:
+                state.current_target.update({
+                    "x": float(C.REST_POSITION[0]),
+                    "y": float(C.REST_POSITION[1]),
+                    "z": float(C.REST_POSITION[2]),
+                    "pitch": float(getattr(C, "REST_PITCH_ANGLE", 0.0)),
+                })
 
             # Per-connection receive buffer
             buf = b""
@@ -99,11 +95,6 @@ def serve_forever(debug: bool = False) -> None:
     finally:
         try:
             server_sock.close()
-        except Exception:
-            pass
-        try:
-            init_servos(pi)
-            pi.stop()
         except Exception:
             pass
         print("[RPi] Server shut down.")

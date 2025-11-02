@@ -15,11 +15,10 @@ class ObjectMemory:
           "id": "<unique_id>",           # Unique UUID-based ID (e.g., "0xA1B2C3D4")
           "cls_id": int,                 # YOLO class ID (for backward compatibility)
           "cls_name": str,               # Human-readable class name
-          "x": float,                    # X coordinate (from IK)
-          "y": float,                    # Y coordinate (from IK)
-          "z": float,                    # Z coordinate (laser sensor height)
-          "pwm_btm": int,                # Bottom servo PWM (to be removed later)
-          "pwm_top": int,                # Top servo PWM (to be removed later)
+          "x": float,                    # X coordinate (mm, IK target)
+          "y": float,                    # Y coordinate (mm, IK target)
+          "z": float,                    # Z coordinate (mm, IK target)
+          "pitch": float,                # Wrist pitch (degrees)
           "semantics": {...},            # LLM-enriched semantic data
           "last_seen_ts": float,         # UNIX timestamp
           "updated_this_session": int,   # 1 if updated in current session, else 0
@@ -140,11 +139,10 @@ class ObjectMemory:
         self,
         cls_id: int,
         cls_name: str,
-        pwm_btm: int,
-        pwm_top: int,
-        x: float = 0.0,
-        y: float = 0.0,
-        z: float = 0.0,
+        x: float,
+        y: float,
+        z: float,
+        pitch: float,
         image_path: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> str:
@@ -155,9 +153,8 @@ class ObjectMemory:
         Args:
             cls_id: YOLO class ID
             cls_name: Human-readable name
-            pwm_btm: Bottom servo PWM position
-            pwm_top: Top servo PWM position
-            x, y, z: Spatial coordinates
+            x, y, z: Spatial coordinates (mm)
+            pitch: Wrist pitch (degrees)
         
         Returns:
             The unique object ID (e.g., "0xA1B2C3D4")
@@ -173,8 +170,7 @@ class ObjectMemory:
                 "x": float(x),
                 "y": float(y),
                 "z": float(z),
-                "pwm_btm": int(pwm_btm),
-                "pwm_top": int(pwm_top),
+                "pitch": float(pitch),
                 "semantics": {},
                 "last_seen_ts": now,
                 "updated_this_session": 1,
@@ -200,20 +196,14 @@ class ObjectMemory:
         self,
         cls_id: int,
         cls_name: str,
-        pwm_btm: int,
-        pwm_top: int,
-        x: float = 0.0,
-        y: float = 0.0,
-        z: float = 0.0,
+        x: float,
+        y: float,
+        z: float,
+        pitch: float,
         image_path: Optional[str] = None,
         orientation: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """
-        Create a new object entry (backward compatible with old API).
-        Always creates a new unique object since we may have duplicate class_ids.
-        
-        Returns the generated unique ID.
-        """
+        """Create and persist a new object observation, returning its unique ID."""
         extra = {}
         if orientation:
             extra["orientation"] = orientation
@@ -221,11 +211,10 @@ class ObjectMemory:
         return self.create_object(
             cls_id=cls_id,
             cls_name=cls_name,
-            pwm_btm=pwm_btm,
-            pwm_top=pwm_top,
             x=x,
             y=y,
             z=z,
+            pitch=pitch,
             image_path=image_path,
             extra=extra if extra else None,
         )

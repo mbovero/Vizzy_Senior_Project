@@ -1,36 +1,91 @@
 # vizzy/rpi/dispatch.py
+# -----------------------------------------------------------------------------
+# Raspberry Pi message dispatcher for the Vizzy arm.
+# Handles laptop-issued protocol commands, maintains the current Cartesian
+# target (x, y, z, pitch), and emits acknowledgements. Physical motion will be
+# handled by a future IK-backed implementation; for now we log intent.
+# -----------------------------------------------------------------------------
+
 from __future__ import annotations
 
-import time
 from typing import Iterable
 
-from ..shared import protocol as P
 from ..shared import config as C
+from ..shared import protocol as P
 from ..shared.jsonl import send_json
 
 from . import state
-from .servo import move_servos, goto_pwms
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+
+def _sorted_bounds(a: float, b: float) -> tuple[float, float]:
+    return (a, b) if a <= b else (b, a)
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def _clamp_workspace(x: float, y: float, z: float) -> tuple[float, float, float]:
+    xmin, xmax = _sorted_bounds(C.SEARCH_X_MIN_MM, C.SEARCH_X_MAX_MM)
+    ymin, ymax = _sorted_bounds(C.SEARCH_Y_MIN_MM, C.SEARCH_Y_MAX_MM)
+    zmin, zmax = _sorted_bounds(C.SEARCH_Z_MIN_MM, C.SEARCH_Z_MAX_MM)
+    return (
+        _clamp(x, xmin, xmax),
+        _clamp(y, ymin, ymax),
+        _clamp(z, zmin, zmax),
+    )
+
+
+def _set_target(x: float, y: float, z: float, pitch: float) -> None:
+    with state.target_lock:
+        state.current_target.update({
+            "x": x,
+            "y": y,
+            "z": z,
+            "pitch": pitch,
+        })
+
+
+def _get_target() -> dict:
+    with state.target_lock:
+        return dict(state.current_target)
+
+
+# -----------------------------------------------------------------------------
 # Message Handler Functions
-# ============================================================================
+# -----------------------------------------------------------------------------
 
-def handle_scan_move(pi, msg: dict, debug: bool) -> None:
-    """Handle TYPE_SCAN_MOVE: Accept nudges only when centering is active."""
-    if state.centering_active.is_set():
-        dx = float(msg.get("horizontal", 0.0))
-        dy = float(msg.get("vertical", 0.0))
-        # Clamp to [-1, 1]
-        dx = -1.0 if dx < -1.0 else (1.0 if dx > 1.0 else dx)
-        dy = -1.0 if dy < -1.0 else (1.0 if dy > 1.0 else dy)
-        move_servos(pi, dx, dy, scale_us=C.MOVE_SCALE_US)
+def handle_scan_move(_pi, msg: dict, debug: bool) -> None:
+    """Handle TYPE_SCAN_MOVE: adjust stored target by small Cartesian offsets."""
+    if not state.centering_active.is_set():
         if debug:
-            print(f"[RPi] SCAN_MOVE dx={dx:.3f} dy={dy:.3f}  "
-                  f"btm={state.current_horizontal} top={state.current_vertical}")
-    else:
-        if debug:
-            print("[RPi] SCAN_MOVE ignored (slewing/settling)")
+            print("[RPi] SCAN_MOVE ignored (movement in progress)")
+        return
+
+    dx = float(msg.get("horizontal", 0.0))
+    dy = float(msg.get("vertical", 0.0))
+    dx = -1.0 if dx < -1.0 else (1.0 if dx > 1.0 else dx)
+    dy = -1.0 if dy < -1.0 else (1.0 if dy > 1.0 else dy)
+
+    step = float(getattr(C, "SCAN_NUDGE_STEP_MM", 5.0))
+
+    with state.target_lock:
+        current = dict(state.current_target)
+        new_x = current["x"] + dx * step
+        new_y = current["y"] + dy * step
+        new_z = current["z"]
+        new_x, new_y, new_z = _clamp_workspace(new_x, new_y, new_z)
+        state.current_target.update({
+            "x": new_x,
+            "y": new_y,
+            "z": new_z,
+        })
+
+    print(f"[RPi] SCAN_MOVE Δx={dx:.3f} Δy={dy:.3f} -> target x={new_x:.1f} y={new_y:.1f} z={new_z:.1f}")
 
 
 def handle_stop(debug: bool) -> bool:
@@ -40,152 +95,112 @@ def handle_stop(debug: bool) -> bool:
     return True
 
 
-def handle_goto_pwms(pi, conn, msg: dict, debug: bool) -> None:
-    """Handle CMD_GOTO_PWMS: Move to absolute PWM position."""
-    tb   = int(msg.get("pwm_btm", C.SERVO_CENTER))
-    tt   = int(msg.get("pwm_top", C.SERVO_CENTER))
-    slew = int(msg.get("slew_ms", C.GOTO_POSE_SLEW_MS))
-    pose_id = msg.get("pose_id", None)
-    if pose_id is not None:
-        try:
-            pose_id = int(pose_id)
-        except Exception:
-            pose_id = None
+def handle_move_to(conn, msg: dict, debug: bool) -> None:
+    """Handle CMD_MOVE_TO: update stored target and confirm completion."""
+    target = _get_target()
+    x = float(msg.get("x", target["x"]))
+    y = float(msg.get("y", target["y"]))
+    z = float(msg.get("z", target["z"]))
+    pitch = float(msg.get("pitch", target["pitch"]))
 
-    if debug:
-        extra = f" pose_id={pose_id}" if pose_id is not None else ""
-        print(f"[RPi] GOTO_PWMS btm={tb} top={tt} slew_ms={slew}{extra}")
-
-    # Block nudges during absolute motion
-    state.centering_active.clear()
-
-    # Synchronous goto; steps from config
-    goto_pwms(pi, tb, tt, duration_ms=slew, steps=C.GOTO_STEPS)
-
-    # Small settle to reduce oscillation, then allow nudges again
-    time.sleep(C.POSE_SETTLE_S)
+    x, y, z = _clamp_workspace(x, y, z)
+    _set_target(x, y, z, pitch)
     state.centering_active.set()
 
-    # Ack move completion (echo pose_id if provided)
-    payload = {"type": P.TYPE_POSE_READY}
-    if pose_id is not None:
-        payload["pose_id"] = pose_id
-    try:
-        send_json(conn, payload)
-        if debug:
-            print(f"[RPi] -> POSE_READY {payload}")
-    except Exception as e:
-        if debug:
-            print(f"[RPi] Failed to send POSE_READY: {e}")
+    print("[RPi] MOVE_TO received:")
+    print(f"        target position: x={x:.1f} mm, y={y:.1f} mm, z={z:.1f} mm")
+    print(f"        target pitch   : {pitch:.1f}°")
+    print("        (Stub: IK execution pending)")
 
-
-def handle_get_pwms(conn, debug: bool) -> None:
-    """Handle CMD_GET_PWMS: Return current PWM positions."""
     payload = {
-        "type": P.TYPE_PWMS,
-        "pwm_btm": int(state.current_horizontal),
-        "pwm_top": int(state.current_vertical),
+        "type": P.TYPE_CMD_COMPLETE,
+        "cmd": P.CMD_MOVE_TO,
+        "status": "success",
     }
     try:
         send_json(conn, payload)
         if debug:
-            print(f"[RPi] -> PWMS {payload}")
-    except Exception as e:
+            print(f"[RPi] -> CMD_COMPLETE {payload}")
+    except Exception as exc:
         if debug:
-            print(f"[RPi] Failed to send PWMS: {e}")
+            print(f"[RPi] Failed to send CMD_COMPLETE: {exc}")
 
 
-def handle_move_to(conn, msg: dict, debug: bool) -> None:
-    """Handle CMD_MOVE_TO: STUB - Print and confirm (no actual movement)."""
-    x = msg.get("x", 0)
-    y = msg.get("y", 0)
-    z = msg.get("z", 0)
-    print(f"[RPi] RECEIVED: MOVE_TO command")
-    print(f"[RPi]   Target position: x={x}, y={y}, z={z} mm")
-    print(f"[RPi]   (Stub: Not executing - would calculate IK and move servos)")
-    
+def handle_get_obj_loc(conn, debug: bool) -> None:
+    """Handle CMD_GET_OBJ_LOC: send current target location."""
+    target = _get_target()
+    payload = {
+        "type": P.TYPE_OBJ_LOC,
+        "x": float(target["x"]),
+        "y": float(target["y"]),
+        "z": float(target["z"]),
+    }
     try:
-        send_json(conn, {
-            "type": P.TYPE_CMD_COMPLETE,
-            "cmd": P.CMD_MOVE_TO,
-            "status": "success"
-        })
-        print(f"[RPi] CONFIRMED: MOVE_TO completed")
-    except Exception as e:
-        print(f"[RPi] Failed to send confirmation: {e}")
+        send_json(conn, payload)
+        if debug:
+            print(f"[RPi] -> OBJ_LOC {payload}")
+    except Exception as exc:
+        if debug:
+            print(f"[RPi] Failed to send OBJ_LOC: {exc}")
 
 
 def handle_grab(conn, msg: dict, debug: bool) -> None:
-    """Handle CMD_GRAB: STUB - Print and confirm (no actual gripper control)."""
-    print(f"[RPi] RECEIVED: GRAB command")
-    print(f"[RPi]   (Stub: Not executing - would close gripper)")
-    
+    """Handle CMD_GRAB: placeholder that confirms receipt."""
+    print("[RPi] GRAB received (stub)")
+    payload = {"type": P.TYPE_CMD_COMPLETE, "cmd": P.CMD_GRAB, "status": "success"}
     try:
-        send_json(conn, {
-            "type": P.TYPE_CMD_COMPLETE,
-            "cmd": P.CMD_GRAB,
-            "status": "success"
-        })
-        print(f"[RPi] CONFIRMED: GRAB completed")
-    except Exception as e:
-        print(f"[RPi] Failed to send confirmation: {e}")
+        send_json(conn, payload)
+        if debug:
+            print(f"[RPi] -> CMD_COMPLETE {payload}")
+    except Exception as exc:
+        if debug:
+            print(f"[RPi] Failed to send CMD_COMPLETE for GRAB: {exc}")
 
 
 def handle_release(conn, msg: dict, debug: bool) -> None:
-    """Handle CMD_RELEASE: STUB - Print and confirm (no actual gripper control)."""
-    print(f"[RPi] RECEIVED: RELEASE command")
-    print(f"[RPi]   (Stub: Not executing - would open gripper)")
-    
+    """Handle CMD_RELEASE: placeholder that confirms receipt."""
+    print("[RPi] RELEASE received (stub)")
+    payload = {"type": P.TYPE_CMD_COMPLETE, "cmd": P.CMD_RELEASE, "status": "success"}
     try:
-        send_json(conn, {
-            "type": P.TYPE_CMD_COMPLETE,
-            "cmd": P.CMD_RELEASE,
-            "status": "success"
-        })
-        print(f"[RPi] CONFIRMED: RELEASE completed")
-    except Exception as e:
-        print(f"[RPi] Failed to send confirmation: {e}")
+        send_json(conn, payload)
+        if debug:
+            print(f"[RPi] -> CMD_COMPLETE {payload}")
+    except Exception as exc:
+        if debug:
+            print(f"[RPi] Failed to send CMD_COMPLETE for RELEASE: {exc}")
 
 
 def handle_rot_yaw(conn, msg: dict, debug: bool) -> None:
-    """Handle CMD_ROT_YAW: STUB - Print and confirm (no actual servo control)."""
-    angle = msg.get("angle", 0.0)
-    print(f"[RPi] RECEIVED: ROT_YAW command")
-    print(f"[RPi]   Target angle: {angle}°")
-    print(f"[RPi]   (Stub: Not executing - would rotate yaw servo)")
-    
+    """Handle CMD_ROT_YAW: placeholder that confirms receipt."""
+    angle = float(msg.get("angle", 0.0))
+    print(f"[RPi] ROT_YAW received (stub) -> target angle {angle:.1f}°")
+    payload = {"type": P.TYPE_CMD_COMPLETE, "cmd": P.CMD_ROT_YAW, "status": "success"}
     try:
-        send_json(conn, {
-            "type": P.TYPE_CMD_COMPLETE,
-            "cmd": P.CMD_ROT_YAW,
-            "status": "success"
-        })
-        print(f"[RPi] CONFIRMED: ROT_YAW completed")
-    except Exception as e:
-        print(f"[RPi] Failed to send confirmation: {e}")
+        send_json(conn, payload)
+        if debug:
+            print(f"[RPi] -> CMD_COMPLETE {payload}")
+    except Exception as exc:
+        if debug:
+            print(f"[RPi] Failed to send CMD_COMPLETE for ROT_YAW: {exc}")
 
 
 def handle_rot_pitch(conn, msg: dict, debug: bool) -> None:
-    """Handle CMD_ROT_PITCH: STUB - Print and confirm (no actual servo control)."""
-    angle = msg.get("angle", 0.0)
-    print(f"[RPi] RECEIVED: ROT_PITCH command")
-    print(f"[RPi]   Target angle: {angle}°")
-    print(f"[RPi]   (Stub: Not executing - would rotate pitch servo)")
-    
+    """Handle CMD_ROT_PITCH: placeholder that confirms receipt."""
+    angle = float(msg.get("angle", 0.0))
+    print(f"[RPi] ROT_PITCH received (stub) -> target angle {angle:.1f}°")
+    payload = {"type": P.TYPE_CMD_COMPLETE, "cmd": P.CMD_ROT_PITCH, "status": "success"}
     try:
-        send_json(conn, {
-            "type": P.TYPE_CMD_COMPLETE,
-            "cmd": P.CMD_ROT_PITCH,
-            "status": "success"
-        })
-        print(f"[RPi] CONFIRMED: ROT_PITCH completed")
-    except Exception as e:
-        print(f"[RPi] Failed to send confirmation: {e}")
+        send_json(conn, payload)
+        if debug:
+            print(f"[RPi] -> CMD_COMPLETE {payload}")
+    except Exception as exc:
+        if debug:
+            print(f"[RPi] Failed to send CMD_COMPLETE for ROT_PITCH: {exc}")
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # Main Message Dispatcher
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False) -> bool:
     """
@@ -193,11 +208,12 @@ def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False)
     Returns:
         stop (bool): True if the server should stop and exit.
     """
+    _ = pi  # Reserved for future IK integration (pigpio instance)
     stop = False
 
     for msg in messages:
         mtype = msg.get("type")
-        mcmd  = msg.get("cmd")
+        mcmd = msg.get("cmd")
 
         # ---------------------- TYPE-* messages ----------------------
         if mtype:
@@ -211,12 +227,10 @@ def process_messages(pi, conn, messages: Iterable[dict], *, debug: bool = False)
 
         # ---------------------- CMD-* messages -----------------------
         elif mcmd:
-            if mcmd == P.CMD_GOTO_PWMS:
-                handle_goto_pwms(pi, conn, msg, debug)
-            elif mcmd == P.CMD_GET_PWMS:
-                handle_get_pwms(conn, debug)
-            elif mcmd == P.CMD_MOVE_TO:
+            if mcmd == P.CMD_MOVE_TO:
                 handle_move_to(conn, msg, debug)
+            elif mcmd == P.CMD_GET_OBJ_LOC:
+                handle_get_obj_loc(conn, debug)
             elif mcmd == P.CMD_GRAB:
                 handle_grab(conn, msg, debug)
             elif mcmd == P.CMD_RELEASE:

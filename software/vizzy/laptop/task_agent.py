@@ -49,9 +49,9 @@ class TaskAgent(threading.Thread):
         if self.state_mgr.motion is None:
             self.state_mgr.motion = Motion(
                 self.state_mgr.sock,
-                self.state_mgr.mail.pose_ready_q,
-                self.state_mgr.mail.pwms_event,
-                self.state_mgr.mail.pwms_payload,
+                self.state_mgr.mail.cmd_complete_q,
+                self.state_mgr.mail.obj_loc_event,
+                self.state_mgr.mail.obj_loc_payload,
                 abort_event=self.state_mgr.events.scan_abort,
             )
         self.motion = self.state_mgr.motion

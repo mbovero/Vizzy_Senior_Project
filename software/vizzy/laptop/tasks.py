@@ -194,13 +194,14 @@ def resolve_object_ids_and_offsets(plan: List[Dict], memory: ObjectMemory) -> Li
             destination = task.get("destination")
             offset = task.get("offset", [0, 0, 0])
             
-            xyz = _resolve_to_xyz(destination, memory)
-            if xyz:
+            pose = _resolve_to_pose(destination, memory)
+            if pose:
                 # Apply offset
-                new_task["x"] = xyz[0] + offset[0]
-                new_task["y"] = xyz[1] + offset[1]
-                new_task["z"] = xyz[2] + offset[2]
-                print(f"[Tasks] MOVE_TO resolved: xyz=[{new_task['x']}, {new_task['y']}, {new_task['z']}] mm")
+                new_task["x"] = pose["x"] + offset[0]
+                new_task["y"] = pose["y"] + offset[1]
+                new_task["z"] = pose["z"] + offset[2]
+                new_task["pitch"] = pose["pitch"]
+                print(f"[Tasks] MOVE_TO resolved: xyz=[{new_task['x']}, {new_task['y']}, {new_task['z']}] mm pitch={new_task['pitch']:.1f}°")
             else:
                 print(f"[Tasks] Warning: Could not resolve MOVE_TO destination: {destination}")
                 continue  # Skip this command
@@ -223,39 +224,34 @@ def resolve_object_ids_and_offsets(plan: List[Dict], memory: ObjectMemory) -> Li
     return resolved
 
 
-def _resolve_to_xyz(target: Any, memory: ObjectMemory) -> Optional[List[float]]:
+def _resolve_to_pose(target: Any, memory: ObjectMemory) -> Optional[Dict[str, float]]:
     """
-    Resolve a target (object ID or coordinates) to XYZ coordinates in millimeters.
-    
-    Args:
-        target: Object ID string (e.g., "0xA1B2C3D4") or coordinate list [x, y, z]
-        memory: ObjectMemory instance
-    
-    Returns:
-        [x_mm, y_mm, z_mm] or None if resolution fails
+    Resolve a target (object ID or coordinates) to a Cartesian pose:
+    {"x": mm, "y": mm, "z": mm, "pitch": degrees}
     """
+    default_pitch = float(getattr(C, "REST_PITCH_ANGLE", 0.0))
+
     if isinstance(target, str):
-        # Object ID - look up in memory
         obj = memory.get_object(target)
         if obj:
-            x = obj.get("x", 0.0)
-            y = obj.get("y", 0.0)
-            z = obj.get("z", 0.0)
-            print(f"[Tasks]   Resolved object {target} to [{x}, {y}, {z}] mm")
-            return [x, y, z]
-        else:
-            print(f"[Tasks]   Error: Object {target} not found in memory")
-            return None
-    
-    elif isinstance(target, (list, tuple)) and len(target) == 3:
-        # Already coordinates
-        xyz = [float(target[0]), float(target[1]), float(target[2])]
-        print(f"[Tasks]   Using provided coordinates [{xyz[0]}, {xyz[1]}, {xyz[2]}] mm")
-        return xyz
-    
-    else:
-        print(f"[Tasks]   Error: Invalid target format: {target}")
+            x = float(obj.get("x", 0.0))
+            y = float(obj.get("y", 0.0))
+            z = float(obj.get("z", 0.0))
+            pitch = float(obj.get("pitch", default_pitch))
+            print(f"[Tasks]   Resolved object {target} to [{x}, {y}, {z}] mm pitch={pitch:.1f}°")
+            return {"x": x, "y": y, "z": z, "pitch": pitch}
+        print(f"[Tasks]   Error: Object {target} not found in memory")
         return None
+
+    if isinstance(target, (list, tuple)) and len(target) == 3:
+        x = float(target[0])
+        y = float(target[1])
+        z = float(target[2])
+        print(f"[Tasks]   Using provided coordinates [{x}, {y}, {z}] mm (pitch={default_pitch:.1f}° default)")
+        return {"x": x, "y": y, "z": z, "pitch": default_pitch}
+
+    print(f"[Tasks]   Error: Invalid target format: {target}")
+    return None
 
 
 # ============================================================================
@@ -267,12 +263,12 @@ def convert_to_protocol_format(plan: List[Dict]) -> List[Dict]:
     Convert resolved commands to protocol format using P.CMD_* constants.
     
     Input format (from resolve step):
-      {"command": "MOVE_TO", "x": 1200, "y": 800, "z": 500}
+      {"command": "MOVE_TO", "x": 1200, "y": 800, "z": 500, "pitch": 0.0}
       {"command": "GRAB"}
       {"command": "ROT_YAW", "angle": 45.0}
     
     Output format (for network transmission):
-      {"cmd": P.CMD_MOVE_TO, "x": 1200, "y": 800, "z": 500}
+      {"cmd": P.CMD_MOVE_TO, "x": 1200, "y": 800, "z": 500, "pitch": 0.0}
       {"cmd": P.CMD_GRAB}
       {"cmd": P.CMD_ROT_YAW, "angle": 45.0}
     
@@ -284,11 +280,13 @@ def convert_to_protocol_format(plan: List[Dict]) -> List[Dict]:
         command = task.get("command", "").upper()
         
         if command == "MOVE_TO":
+            pitch = task.get("pitch", getattr(C, "REST_PITCH_ANGLE", 0.0))
             protocol_commands.append({
                 "cmd": P.CMD_MOVE_TO,
                 "x": task["x"],
                 "y": task["y"],
                 "z": task["z"],
+                "pitch": pitch,
             })
         
         elif command == "GRAB":

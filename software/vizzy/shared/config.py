@@ -60,37 +60,44 @@ LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 65432
 
 # -----------------------------
-# Servos & Sweep (RPi)
+# Cartesian Search & Arm Geometry
 # -----------------------------
-# Servo GPIO pins (BCM numbering for pigpio)
-# Adjust to match your wiring.
-SERVO_BTM = 22
-SERVO_MID = 27
-SERVO_TOP = 17
+# Workspace bounds used to build the search path (millimetres, laptop-side)
+SEARCH_X_MIN_MM = 150.0
+SEARCH_X_MAX_MM = 450.0
+SEARCH_X_STEP_MM = 40.0
 
-# Pulse width bounds (µs)
-SERVO_MIN    = 1000
-SERVO_MAX    = 2000
-SERVO_CENTER = 1500
+SEARCH_Y_MIN_MM = -150.0
+SEARCH_Y_MAX_MM = 150.0
+SEARCH_Y_STEP_MM = 40.0
 
-# Normalized scan moves (Laptop -> RPi) scaling to pulse width (µs)
-# The laptop sends SCAN_MOVE with values in [-1, 1]; the RPi multiplies by this scale.
-MOVE_SCALE_US = 40
+# Z is often constrained to a plane during scanning; allow step if needed
+SEARCH_Z_MIN_MM = 550.0
+SEARCH_Z_MAX_MM = 650.0
+SEARCH_Z_STEP_MM = 50.0
 
-# Return-to-pose behavior (laptop -> RPi)
-GOTO_POSE_SLEW_MS = 600    # how quickly to snap back to the baseline pose after a centering attempt
-RETURN_TO_POSE_DWELL_S = 0.25   # small pause to let the arm settle before the next scan window
-GOTO_STEPS = 24             # micro-steps per goto (used by rpi/servo.goto_pwms)
+# Default pitch for search poses (degrees)
+SEARCH_PITCH_DEG = 0.0
 
-# Search grid definition (computed on RPi)
-# Range is reduced by MIN/MAX offsets to avoid hard mechanical limits.
-SEARCH_MIN_OFFSET = 200  # µs trimmed from the low end
-SEARCH_MAX_OFFSET = 200  # µs trimmed from the high end
-SEARCH_H_STEP     = 250  # µs horizontal step between poses
-SEARCH_V_STEP     = 100  # µs vertical step between rows
+# Relative nudge scaling (converted from normalized [-1,1] commands on the RPi)
+SCAN_NUDGE_STEP_MM = 5.0
 
-# Time to allow the arm to settle mechanically at each pose before scanning
-POSE_SETTLE_S = 0.30
+# Target settle/dwell times
+MOVE_SETTLE_S = 0.30          # allow time after a commanded move before accepting nudges
+RETURN_TO_POSE_DWELL_S = 0.25 # dwell after returning to baseline before next scan window
+
+# Physical servo PWM bounds for the new arm (documentation for IK output clamping)
+SERVO_PITCH_CENTER_US = 1500
+SERVO_PITCH_MIN_US    = 1000
+SERVO_PITCH_MAX_US    = 2000
+
+SERVO_YAW_CENTER_US   = 1500
+SERVO_YAW_MIN_US      = 1000
+SERVO_YAW_MAX_US      = 2000
+
+SERVO_CLAW_CENTER_US  = 1500
+SERVO_CLAW_MIN_US     = 1000
+SERVO_CLAW_MAX_US     = 2000
 
 # Idle/auto-search behavior (laptop)
 IDLE_TIMEOUT_S = 20.0   # seconds of inactivity before auto SEARCH

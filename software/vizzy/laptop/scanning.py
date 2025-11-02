@@ -29,61 +29,55 @@ def _draw_scan_hud(frame, text: str, *, display_scale: float) -> Any:
 # ---------------------------------------------------------------------------
 def build_search_path() -> list[dict]:
     """
-    Build the serpentine search path as a list of poses:
-      [{"pose_id": int, "pwm_btm": int, "pwm_top": int, "slew_ms": int}, ...]
+    Build the serpentine search path as a list of Cartesian poses:
+      [{"pose_id": int, "x": float, "y": float, "z": float, "pitch": float}, ...]
 
-    Logic matches the RPi version:
-      - Use [SERVO_MIN+SEARCH_MIN_OFFSET, SERVO_MAX-SEARCH_MAX_OFFSET] for both axes
-      - Inclusive steps (SEARCH_H_STEP / SEARCH_V_STEP), step<=0 -> 1
-      - Serpentine traversal across rows to avoid long reversals
+    Traversal mirrors the previous PWM grid:
+      - Inclusive ranges between configured min/max values (step <= 0 -> treated as 1)
+      - Serpentine traversal across X for each Y row to minimise long reversals
+      - Iterate Z layers outermost, reusing the serpentine plan per layer
     """
-    # Bounds (trimmed)
-    b_lo = int(C.SERVO_MIN + C.SEARCH_MIN_OFFSET)
-    b_hi = int(C.SERVO_MAX - C.SEARCH_MAX_OFFSET)
-    t_lo = int(C.SERVO_MIN + C.SEARCH_MIN_OFFSET)
-    t_hi = int(C.SERVO_MAX - C.SEARCH_MAX_OFFSET)
 
-    # Ensure lo <= hi on both axes
-    if b_lo > b_hi:
-        b_lo, b_hi = b_hi, b_lo
-    if t_lo > t_hi:
-        t_lo, t_hi = t_hi, t_lo
+    def inclusive_range(lo: float, hi: float, step: float) -> list[float]:
+        """Return inclusive range from lo to hi with the provided step."""
+        if step == 0:
+            step = 1.0
+        step = float(abs(step))
+        values: list[float] = []
+        if lo <= hi:
+            x = float(lo)
+            while x <= hi + 1e-6:
+                values.append(round(x, 3))
+                x += step
+        else:
+            x = float(lo)
+            while x >= hi - 1e-6:
+                values.append(round(x, 3))
+                x -= step
+        return values
 
-    # Steps (guard against non-positive)
-    h_step = int(C.SEARCH_H_STEP) if int(getattr(C, "SEARCH_H_STEP", 0)) > 0 else 1
-    v_step = int(C.SEARCH_V_STEP) if int(getattr(C, "SEARCH_V_STEP", 0)) > 0 else 1
+    xs = inclusive_range(C.SEARCH_X_MIN_MM, C.SEARCH_X_MAX_MM, C.SEARCH_X_STEP_MM)
+    ys = inclusive_range(C.SEARCH_Y_MIN_MM, C.SEARCH_Y_MAX_MM, C.SEARCH_Y_STEP_MM)
+    zs = inclusive_range(C.SEARCH_Z_MIN_MM, C.SEARCH_Z_MAX_MM, C.SEARCH_Z_STEP_MM)
 
-    # Inclusive ranges
-    btms: list[int] = []
-    x = b_lo
-    while x <= b_hi:
-        btms.append(int(x))
-        x += h_step
+    pitch = float(C.SEARCH_PITCH_DEG)
 
-    tops: list[int] = []
-    y = t_lo
-    while y <= t_hi:
-        tops.append(int(y))
-        y += v_step
-
-    # Serpentine rows
-    grid: list[tuple[int, int]] = []
-    reverse = False
-    for top in tops:
-        row = btms[::-1] if reverse else btms
-        grid.extend((b, top) for b in row)
-        reverse = not reverse
-
-    # Attach pose_id and per-pose slew
-    slew_ms = int(C.GOTO_POSE_SLEW_MS)
     path: list[dict] = []
-    for pid, (pwm_btm, pwm_top) in enumerate(grid):
-        path.append({
-            "pose_id": pid,
-            "pwm_btm": int(pwm_btm),
-            "pwm_top": int(pwm_top),
-            "slew_ms": slew_ms,
-        })
+    pose_id = 0
+    for z in zs:
+        reverse = False
+        for y in ys:
+            row = list(reversed(xs)) if reverse else xs
+            for x in row:
+                path.append({
+                    "pose_id": pose_id,
+                    "x": float(x),
+                    "y": float(y),
+                    "z": float(z),
+                    "pitch": pitch,
+                })
+                pose_id += 1
+            reverse = not reverse
     return path
 
 def _result_iter(model_result, frame_w: int, frame_h: int):
