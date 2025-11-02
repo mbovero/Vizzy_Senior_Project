@@ -1,0 +1,129 @@
+# Vizzy: Enhancing Robotic Manipulation with Vision-Enabled Large Language Models
+
+**Authors:** Burke Dambly, Miles Bovero, Lawrence Ponce, Brian Stites, Jesse Jenkins  
+**Affiliation:** University of Utah — Electrical and Computer Engineering Capstone Project  
+
+---
+
+## Overview
+
+Vizzy is a modular 5-axis robotic arm designed to demonstrate the integration of computer vision, inverse kinematics, and large language model (LLM) reasoning for adaptive robotic control.  
+The project explores how modern AI can make robotic systems more flexible, intuitive, and user-friendly by combining visual perception, semantic reasoning, and motion planning into a single integrated platform.
+
+Unlike traditional robotic systems that require explicit programming and rigid motion paths, Vizzy enables high-level natural language interaction.  
+Through vision-based object detection and LLM-driven task scheduling, the system can interpret and execute user requests autonomously in constrained environments.
+
+![Placeholder: Vizzy Overview Diagram](images/placeholder_overview.png)  
+*Figure 1 — Conceptual overview of Vizzy’s modular arm system.*
+
+---
+
+## System Architecture
+
+### Hardware
+
+- **Motors:** MJBOTS mj5208 BLDC outrunner motors  
+- **Motor Controllers:** Moteus r.11 (Field-Oriented Control)  
+- **Microcontrollers:** Raspberry Pi 4B and Raspberry Pi Pico W (FreeRTOS firmware)  
+- **Sensors:** 16MP USB camera (YOLO11 vision model) and VL53L1X time-of-flight sensor  
+- **Communication:** CAN-FD network using the Moteus protocol  
+- **Structure:** CNC-milled T2-grade aluminum and PETG-CF 3D-printed components  
+- **Power Supply:** Mean Well 24V DC with emergency kill switch  
+
+![Placeholder: Vizzy Hardware Layout](images/placeholder_hardware.png)  
+*Figure 2 — Exploded view of mechanical components and electronics.*
+
+### Software
+
+- **Vision Stack:** YOLO11 segmentation for object recognition and localization  
+- **Semantic Layer:** LLM-based contextual enrichment of detected objects  
+- **Control Framework:** Python API for inverse kinematics and motion planning  
+- **GUI:** Tkinter-based interface for manual coordinate input and visualization  
+- **Embedded Firmware:** FreeRTOS task scheduling for low-level actuation and safety  
+
+![Placeholder: Software Architecture Diagram](images/placeholder_software.png)  
+*Figure 3 — Software architecture illustrating perception, reasoning, and control flow.*
+
+---
+
+## Key Features
+
+- Five-axis robotic manipulation with inverse kinematics control  
+- Real-time visual perception using YOLO11 segmentation  
+- Natural-language task execution via OpenAI’s API  
+- Modular structure with customizable end-effectors  
+- Safety-limited motion and emergency fault handling  
+- Open-source software stack for reproducibility and community use  
+
+![Placeholder: Vizzy Key Features Collage](images/placeholder_features.png)  
+*Figure 4 — Visualization of major system capabilities.*
+
+---
+
+## Design and Development
+
+Vizzy was developed through iterative mechanical and software prototyping.  
+The arm evolved from lightweight PLA prototypes to a final hybrid design combining PETG-CF gearboxes, Moteus-controlled BLDC actuators, and aluminum structural parts.  
+The system architecture separates perception, control, and task scheduling into distinct subsystems to improve modularity and robustness.
+
+### Subsystems
+
+| Subsystem | Description |
+|------------|-------------|
+| **Mechanical** | CNC aluminum arms, carbon-fiber PETG gearboxes, and TPU grippers |
+| **Electrical** | Distributed CAN-FD motor network with localized controllers |
+| **Embedded** | FreeRTOS firmware for real-time control and safety watchdogs |
+| **Software** | Python control layer integrating LLM logic and YOLO perception |
+| **AI Layer** | GPT-based interpretation of object data and task sequencing |
+
+![Placeholder: Vizzy Assembly Process](images/placeholder_assembly.png)  
+*Figure 5 — Step-by-step prototype development from PLA to aluminum.*
+
+---
+
+## Safety and Ethical Considerations
+
+- Built-in software and hardware limits prevent over-rotation and unsafe motion  
+- The LLM never issues raw joint commands; it only calls validated high-level actions  
+- All image and distance data are processed locally to protect user privacy  
+- Fail-safes ensure the system halts immediately upon communication loss  
+- Designed for tabletop-scale demonstrations, not industrial use  
+
+![Placeholder: Vizzy Safety Systems](images/placeholder_safety.png)  
+*Figure 6 — Overview of safety interlocks and communication fail-safes.*
+
+---
+
+## Evaluation Summary
+
+Vizzy was designed to validate the feasibility of LLM-assisted robotic control in constrained environments.  
+Testing focused on three major domains:
+
+1. **Mechanical Performance** — Verified torque capacity of mj5208 BLDC motors with custom 9:1 PETG-CF planetary gearboxes.  
+2. **Perception and Sensing** — Achieved real-time segmentation (~5 ms inference) using YOLO11 with 16MP USB camera and VL53L1X ToF sensor.  
+3. **Software Integration** — Implemented JSONL-based communication between vision (laptop) and control (Raspberry Pi) and validated natural-language task scheduling via OpenAI API.
+
+![Placeholder: Vizzy Testing Setup](images/placeholder_testing.png)  
+*Figure 7 — Prototype testing environment with motor torque and vision pipeline validation.*
+
+---
+
+## Future Work
+
+- Integrate full depth-fusion perception for 3D object localization  
+- Implement instance-level memory and tracking across frames  
+- Develop more advanced grasping end-effectors  
+- Optimize latency and reliability of the LLM interface  
+- Add obstacle-aware path planning for dynamic environments  
+
+![Placeholder: Vizzy Future Concepts](images/placeholder_future.png)  
+*Figure 8 — Concept render for next iteration including multi-sensor fusion.*
+
+---
+
+## Acknowledgements
+
+This project was developed as part of the University of Utah Electrical and Computer Engineering Capstone Program.  
+Special thanks to the faculty mentors and the Utah Machine Shop for technical support and machining resources.
+
+
