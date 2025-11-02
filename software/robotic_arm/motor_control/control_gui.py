@@ -1,415 +1,338 @@
 #!/usr/bin/env python3
 """
-Single-file Vizzy Click-to-Move GUI (positive X shown on the LEFT)
+vizzy manual control – Left Half-Plane Click UI
 
-- Uses your exact working kinematics (inlined below).
-- x,y plane: [-0.67, +0.67] m; X+ is on the LEFT side of the canvas.
-- Live z slider & pitch entry update the preview (no re-click needed).
-- Press Enter to confirm move; Esc = Stop motors; Q = Quit.
-- Multiple moves supported via an asyncio command queue.
-
-Requires: pip install moteus
+- Positive X points to the LEFT. We only use/display x ∈ [0, +0.6].
+- Click in the canvas to choose (x, y); shows the point and crosshair.
+- Sliders: Z (0..0.8 m), Rotation (-180..180 deg).
+- Pitch: LEFT (0), UP (~+π/2), DOWN (~-π/2) with rounding to thousandths.
+- Claw toggle button: Open/Close.
+- Red LEFT-facing semicircle centered at the origin with user-set radius (meters),
+  drawn with equal pixel radii so it appears as a perfect half-circle on screen.
+- Output line order: x y z pitch claw rotation
+- PRINTS to console **only when you press the “S” key** (s or S).
 """
 
-from __future__ import annotations
-import asyncio
-import contextlib
-from dataclasses import dataclass, field
-from math import atan2, cos, sin, sqrt, hypot, pi
-from typing import Optional, Tuple, Dict
+import math
+import tkinter as tk
+from tkinter import ttk, messagebox
 
-try:
-    import tkinter as tk
-    from tkinter import ttk, messagebox
-except Exception:
-    raise SystemExit("Tkinter is required for this GUI")
+# ---------------------- Tunable Parameters ----------------------
+PARAMS = {
+    # World-coordinate bounds (meters)
+    # Left-half-plane only: x ∈ [0, X_MAX], y ∈ [Y_MIN, Y_MAX]
+    "X_MAX": 0.60,                 # meters (positive x to LEFT)
+    "Y_RANGE": (-0.60, 0.60),      # meters (min_y, max_y)
 
-# ========================= EXACT KINEMATICS =========================
-RAD2DEG = 180.0 / pi
-DEG2RAD = pi / 180.0
+    # Canvas pixels
+    "CANVAS_W": 600,               # px (horizontal)
+    "CANVAS_H": 600,               # px (vertical)
 
-# --- q4 servo mapping (270°, 500–2500 µs, center 1750 µs) ---
-Q4_PWM_CENTER_US   = 1750
-Q4_PWM_MIN_US      = 800.0
-Q4_PWM_MAX_US      = 2500.0
-Q4_PWM_HALFSPAN_US = 1000.0
-Q4_MAX_DEG         = 135.0
-Q4_US_PER_RAD      = Q4_PWM_HALFSPAN_US / (Q4_MAX_DEG * DEG2RAD)  # µs per rad
+    # Z slider (meters)
+    "Z_MIN": 0.00,
+    "Z_MAX": 0.80,
+    "Z_INIT": 0.25,
 
-@dataclass
-class JointCalib:
-    theta0: float = 0.0
-    sign: int = 1
-    min_rad: float = -pi
-    max_rad: float = pi
-    pwm_m: Optional[float] = None
-    pwm_b: Optional[float] = None
-    gear_ratio: float = 1.0
+    # Rotation slider (degrees)
+    "ROT_MIN": -180,
+    "ROT_MAX": 180,
+    "ROT_INIT": 0,
 
-    def rad_to_cmd(self, q: float) -> float:
-        hw_angle_joint = self.sign * (q - self.theta0)
-        if self.pwm_m is not None and self.pwm_b is not None:
-            return (hw_angle_joint - self.pwm_b) / self.pwm_m
-        return (self.gear_ratio * hw_angle_joint) / (2.0 * pi)
+    # Reach/Arc radius input (meters)
+    "R_MIN": 0.05,
+    "R_MAX": 0.60,
+    "R_INIT": 0.3,
 
-    def cmd_to_rad(self, cmd: float) -> float:
-        if self.pwm_m is not None and self.pwm_b is not None:
-            hw_angle_joint = self.pwm_m * cmd + self.pwm_b
-        else:
-            hw_angle_joint = (cmd * 2.0 * pi) / self.gear_ratio
-        return self.theta0 + self.sign * hw_angle_joint
+    # Drawing
+    "ARC_WIDTH": 3,                # pixels for the red arc
+}
 
-@dataclass
-class ArmParams:
-    L1: float
-    L2: float
-    L3: float
-    L4: float = 0.0
-    prefer_elbow_up: bool = False
-    base_offset_x: float = 0.0
-    base_offset_y: float = 0.0
-    q1: JointCalib = field(default_factory=JointCalib)
-    q2: JointCalib = field(default_factory=JointCalib)
-    q3: JointCalib = field(default_factory=JointCalib)
-    q4: JointCalib = field(default_factory=JointCalib)
+# Only three pitch options now: LEFT(0), UP(π/2), DOWN(-π/2)
+PITCH_CHOICES = [
+    ("←", "left"),
+    ("↑", "up"),
+    ("↓", "down"),
+]
 
-class IKError(Exception):
-    pass
 
-def ik_yppp(arm: ArmParams, target_xyz: Tuple[float, float, float], target_pitch_rad: float) -> Dict[str, Dict[str, float]]:
-    x, y, z = target_xyz
-    bx, by = arm.base_offset_x, arm.base_offset_y
-    q1 = atan2(y - by, x - bx)
-    r_tcp = hypot(x - bx, y - by)
-    z_tcp = z
-    px = (r_tcp - arm.L4 * cos(target_pitch_rad))
-    pz = (z_tcp - arm.L4 * sin(target_pitch_rad)) - arm.L1
-    wx = bx + px * cos(q1)
-    wy = by + px * sin(q1)
-    wz = arm.L1 + pz
-    D = (px*px + pz*pz - arm.L2*arm.L2 - arm.L3*arm.L3) / (2.0 * arm.L2 * arm.L3)
-    D = max(-1.0, min(1.0, D))
-    s = sqrt(max(0.0, 1.0 - D*D))
-    q3 = atan2(+s, D) if arm.prefer_elbow_up else atan2(-s, D)
-    k1 = arm.L2 + arm.L3 * cos(q3)
-    k2 = arm.L3 * sin(q3)
-    q2 = atan2(pz, px) - atan2(k2, k1)
-    q4 = target_pitch_rad - (q2 + q3)
-    angles_rad = {'q1': q1, 'q2': q2, 'q3': q3, 'q4': q4}
-    angles_deg = {k: v * RAD2DEG for k, v in angles_rad.items()}
-    q4_pwm = Q4_PWM_CENTER_US + q4 * Q4_US_PER_RAD
-    q4_pwm = max(Q4_PWM_MIN_US, min(Q4_PWM_MAX_US, q4_pwm))
-    cmds = {
-        'q1': arm.q1.rad_to_cmd(q1),
-        'q2': arm.q2.rad_to_cmd(q2),
-        'q3': arm.q3.rad_to_cmd(q3),
-        'q4': int(round(q4_pwm)),
-    }
-    return {
-        'angles_rad': angles_rad,
-        'angles_deg': angles_deg,
-        'cmds': cmds,
-        'intermediate': {
-            'wrist_xyz': (wx, wy, wz),
-            'planar_px': px,
-            'planar_pz': pz,
-            'D': D,
-            'k1': k1,
-            'k2': k2,
-            'r_tcp': r_tcp,
-        }
-    }
+class VizzyManualControl(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("vizzy manual control")
 
-def max_height(arm: ArmParams) -> float:
-    return arm.L1 + arm.L2 + arm.L3 + arm.L4
+        # Internal state
+        self.x_m = 0.0       # meters (>= 0, positive to the LEFT on screen)
+        self.y_m = 0.0       # meters
+        self.z_m = tk.DoubleVar(value=PARAMS["Z_INIT"])
+        self.rot_deg = tk.DoubleVar(value=PARAMS["ROT_INIT"])
+        self.pitch_sel = tk.StringVar(value="left")   # 'left' | 'up' | 'down'
+        self.claw_open = tk.BooleanVar(value=False)
+        self.r_m = tk.DoubleVar(value=PARAMS["R_INIT"])
 
-# Arm instance (your values)
-GR = 9.0
-ARM = ArmParams(
-    L1=0.176932, L2=0.162737, L3=0.226991, L4=0.12047,
-    prefer_elbow_up=False,
-    q1=JointCalib(theta0=0.0,    sign=+1, gear_ratio=GR),
-    q2=JointCalib(theta0=pi/2.0, sign=+1, gear_ratio=GR),
-    q3=JointCalib(theta0=0.0,    sign=-1, gear_ratio=GR),
-    q4=JointCalib(theta0=0.0,    sign=+1, gear_ratio=GR),
-)
+        self._build_ui()
+        self._draw_axes()
+        self._update_output()
 
-# ========================= GUI / CONTROL CONFIG =========================
-PLANE_RANGE_M   = 0.67
-CANVAS_PX       = 720
-GRID_STEP_M     = 0.10
+        # Print ONLY when S is pressed (bind both lowercase and uppercase)
+        self.bind_all("<s>", self._on_s_key)
+        self.bind_all("<S>", self._on_s_key)
 
-ID1, ID2, ID3   = 1, 2, 3
-GROUP_DURATION_S= 1.0
-ACCEL_MULT      = 1.5
-VEL_MIN         = 0.01
-WATCHDOG_S      = 10
+    # ---------- Coordinate Mapping (World <-> Canvas) ----------
+    def world_to_canvas(self, x, y):
+        X_MAX = PARAMS["X_MAX"]
+        Y_MIN, Y_MAX = PARAMS["Y_RANGE"]
+        W, H = PARAMS["CANVAS_W"], PARAMS["CANVAS_H"]
 
-async def query_positions(m1, m2, m3):
-    try:
-        s1, s2, s3 = await asyncio.gather(m1.query(), m2.query(), m3.query())
-        return (
-            float(s1.values.get('position', 0.0)),
-            float(s2.values.get('position', 0.0)),
-            float(s3.values.get('position', 0.0)),
-        )
-    except Exception:
-        return (0.0, 0.0, 0.0)
-
-async def move_group_sync_time(m1, m2, m3, t1, t2, t3, duration=GROUP_DURATION_S):
-    c1, c2, c3 = await query_positions(m1, m2, m3)
-    deltas = [t1 - c1, t2 - c2, t3 - c3]
-    v = [max(VEL_MIN, abs(d)/max(duration,1e-3)) for d in deltas]
-    a = [max(vi * ACCEL_MULT, VEL_MIN) for vi in v]
-    await asyncio.gather(
-        m1.set_position(position=float(t1), velocity=float('nan'), accel_limit=a[0], velocity_limit=v[0], watchdog_timeout=WATCHDOG_S, query=False),
-        m2.set_position(position=float(t2), velocity=float('nan'), accel_limit=a[1], velocity_limit=v[1], watchdog_timeout=WATCHDOG_S, query=False),
-        m3.set_position(position=float(t3), velocity=float('nan'), accel_limit=a[2], velocity_limit=v[2], watchdog_timeout=WATCHDOG_S, query=False),
-    )
-
-# ========================= GUI APP =========================
-class ClickToMoveApp:
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.root.title("Vizzy Click-to-Move (X+ on LEFT)")
-        self.root.geometry(f"{CANVAS_PX+360}x{CANVAS_PX+70}")
-        self.root.resizable(False, False)
-
-        self.canvas = tk.Canvas(root, width=CANVAS_PX, height=CANVAS_PX, bg="#111")
-        self.canvas.grid(row=0, column=0, padx=10, pady=10, rowspan=10)
-        self.info = ttk.Frame(root, padding=10)
-        self.info.grid(row=0, column=1, sticky="n")
-
-        # Height
-        try:
-            _maxz = max_height(ARM)
-        except Exception:
-            _maxz = ARM.L1 + ARM.L2 + ARM.L3 + ARM.L4
-        self.z_var = tk.DoubleVar(value=min(_maxz, 0.30))
-        ttk.Label(self.info, text="Height z (m)").grid(row=0, column=0, sticky="w")
-        self.z_scale = ttk.Scale(self.info, orient="horizontal", from_=0.0, to=_maxz, variable=self.z_var, length=280)
-        self.z_scale.grid(row=1, column=0, pady=(0,8), sticky="we")
-        self.z_val_lbl = ttk.Label(self.info, text=f"z = {self.z_var.get():.3f} m")
-        self.z_val_lbl.grid(row=2, column=0, sticky="w")
-        self.z_var.trace_add('write', lambda *a: self.z_val_lbl.config(text=f"z = {self.z_var.get():.3f} m"))
-
-        # Pitch
-        ttk.Label(self.info, text="Pitch (rad)").grid(row=3, column=0, sticky="w", pady=(8,0))
-        self.pitch_entry = ttk.Entry(self.info, width=14)
-        self.pitch_entry.insert(0, "0.0")
-        self.pitch_entry.grid(row=4, column=0, sticky="w")
-
-        # Preview
-        self.preview = tk.StringVar(value="Click the plane to preview.")
-        ttk.Label(self.info, textvariable=self.preview, justify="left", wraplength=300)\
-            .grid(row=5, column=0, sticky="w", pady=(12,0))
-
-        # Buttons
-        btns = ttk.Frame(self.info)
-        btns.grid(row=6, column=0, pady=(10,0), sticky="w")
-        self.move_btn  = ttk.Button(btns, text="Move (Enter)",      command=self.enqueue_move)
-        self.stop_btn  = ttk.Button(btns, text="Stop Motors (Esc)", command=self.stop_motors)
-        self.quit_btn  = ttk.Button(btns, text="Quit (Q)",          command=self.quit)
-        self.move_btn.grid(row=0, column=0, padx=(0,8))
-        self.stop_btn.grid(row=0, column=1, padx=(0,8))
-        self.quit_btn.grid(row=0, column=2)
-
-        # Status
-        self.status = tk.StringVar(value="Idle")
-        ttk.Label(self.info, textvariable=self.status).grid(row=7, column=0, sticky="w", pady=(8,0))
-
-        # Bindings
-        self.canvas.bind('<Button-1>', self.on_click)
-        self.root.bind_all('<Return>',  lambda e: self.enqueue_move())
-        self.root.bind_all('<Escape>',  lambda e: self.stop_motors())
-        self.root.bind_all('<q>',       lambda e: self.quit())
-        self.root.protocol("WM_DELETE_WINDOW", self.quit)
-        self.pitch_entry.bind('<KeyRelease>', lambda e: self._recompute_from_params())
-        self.z_scale.configure(command=lambda _v: self._recompute_from_params())
-
-        self.draw_plane()
-
-        # Async / hardware
-        self.loop = asyncio.get_event_loop()
-        self.m1 = self.m2 = self.m3 = None
-        self.loop.create_task(self._init_moteus())
-
-        # Interaction state
-        self._last_xy: Optional[Tuple[float,float]] = None
-        self._pending_targets: Optional[Tuple[float,float,float]] = None  # (t1,t2,t3)
-
-        # Command queue & worker (allows multiple sequential moves)
-        self.cmd_q: asyncio.Queue = asyncio.Queue()
-        self.loop.create_task(self._cmd_worker())
-
-    # ----- Coord mapping (X+ on LEFT) -----
-    def m_to_px(self, x: float, y: float) -> tuple[int,int]:
-        scale = (CANVAS_PX/2) / PLANE_RANGE_M
-        cx = CANVAS_PX//2 - int(round(x * scale))   # invert X (X+ left)
-        cy = CANVAS_PX//2 - int(round(y * scale))   # Y up
+        cx = W * (1.0 - (x / X_MAX))              # +x goes LEFT
+        cy = H * (1.0 - (y - Y_MIN) / (Y_MAX - Y_MIN))
         return cx, cy
 
-    def px_to_m(self, px: int, py: int) -> tuple[float,float]:
-        scale = (CANVAS_PX/2) / PLANE_RANGE_M
-        x = -(px - CANVAS_PX/2) / scale             # invert X (X+ left)
-        y = -(py - CANVAS_PX/2) / scale
+    def canvas_to_world(self, cx, cy):
+        X_MAX = PARAMS["X_MAX"]
+        Y_MIN, Y_MAX = PARAMS["Y_RANGE"]
+        W, H = PARAMS["CANVAS_W"], PARAMS["CANVAS_H"]
+
+        x = X_MAX * (1.0 - (cx / W))
+        y = Y_MIN + (1.0 - (cy / H)) * (Y_MAX - Y_MIN)
+
+        # Clamp to left half-plane and Y limits
+        x = max(0.0, min(X_MAX, x))
+        y = max(Y_MIN, min(Y_MAX, y))
         return x, y
 
-    # ----- Drawing -----
-    def draw_plane(self):
-        c = self.canvas
-        c.delete('all')
-        g = GRID_STEP_M
-        v = PLANE_RANGE_M
-        n = int(v/g)
-        for i in range(-n, n+1):
-            x = i*g
-            x0, y0 = self.m_to_px(x, -v)
-            x1, y1 = self.m_to_px(x, +v)
-            c.create_line(x0, y0, x1, y1, fill="#2a2a2a")
-            y = i*g
-            x0, y0 = self.m_to_px(-v, y)
-            x1, y1 = self.m_to_px(+v, y)
-            c.create_line(x0, y0, x1, y1, fill="#2a2a2a")
-        # axes
-        x0, y0 = self.m_to_px(-v, 0); x1, y1 = self.m_to_px(+v, 0)
-        c.create_line(x0, y0, x1, y1, fill="#55aaff", width=2)
-        x0, y0 = self.m_to_px(0, -v); x1, y1 = self.m_to_px(0, +v)
-        c.create_line(x0, y0, x1, y1, fill="#55aaff", width=2)
-        # border
-        c.create_rectangle(*self.m_to_px(-v,-v), *self.m_to_px(+v,+v), outline="#777")
+    # ----------------------------- UI -----------------------------
+    def _build_ui(self):
+        root = ttk.Frame(self, padding=10)
+        root.grid(row=0, column=0, sticky="nsew")
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
 
-    # ----- Events / preview -----
-    def on_click(self, ev):
-        x, y = self.px_to_m(ev.x, ev.y)
-        x = max(-PLANE_RANGE_M, min(PLANE_RANGE_M, x))
-        y = max(-PLANE_RANGE_M, min(PLANE_RANGE_M, y))
-        self._last_xy = (x, y)
-        self._update_preview(x, y)
+        # Left: Canvas
+        left = ttk.Frame(root)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
 
-    def _recompute_from_params(self):
-        if self._last_xy is None:
-            return
-        self._update_preview(*self._last_xy)
+        self.canvas = tk.Canvas(
+            left,
+            width=PARAMS["CANVAS_W"],
+            height=PARAMS["CANVAS_H"],
+            bg="#101318",
+            highlightthickness=1,
+            highlightbackground="#3a3f47",
+        )
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        left.rowconfigure(0, weight=1)
+        left.columnconfigure(0, weight=1)
 
-    def _update_preview(self, x: float, y: float):
+        self.canvas.bind("<Button-1>", self._on_click)
+
+        # Right: Controls
+        right = ttk.Frame(root)
+        right.grid(row=0, column=1, sticky="ns")
+
+        # Z Slider
+        ttk.Label(right, text="Z Height (m)").grid(row=0, column=0, sticky="w")
+        ttk.Scale(
+            right, from_=PARAMS["Z_MIN"], to=PARAMS["Z_MAX"],
+            orient="horizontal", variable=self.z_m, command=self._on_any_change
+        ).grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        # Rotation Slider
+        ttk.Label(right, text="Rotation (deg)").grid(row=2, column=0, sticky="w")
+        ttk.Scale(
+            right, from_=PARAMS["ROT_MIN"], to=PARAMS["ROT_MAX"],
+            orient="horizontal", variable=self.rot_deg, command=self._on_any_change
+        ).grid(row=3, column=0, sticky="ew", pady=(0, 8))
+
+        # Reach Radius Input (meters)
+        radius_frame = ttk.Frame(right)
+        radius_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(radius_frame, text="Reach Radius (m)").pack(side="left")
+        self.r_entry = ttk.Entry(radius_frame, width=8)
+        self.r_entry.insert(0, f"{self.r_m.get():.3f}")
+        self.r_entry.pack(side="left", padx=(6, 6))
+        set_btn = ttk.Button(radius_frame, text="Set", command=self._on_radius_set)
+        set_btn.pack(side="left")
+        self.r_entry.bind("<Return>", lambda e: self._on_radius_set())
+
+        # Pitch Orientation (LEFT, UP, DOWN)
+        ttk.Label(right, text="Pitch Orientation").grid(row=5, column=0, sticky="w", pady=(12, 0))
+        pitch_row = ttk.Frame(right)
+        pitch_row.grid(row=6, column=0, sticky="w", pady=(2, 8))
+        for symbol, value in PITCH_CHOICES:
+            ttk.Radiobutton(
+                pitch_row, text=symbol, value=value, variable=self.pitch_sel,
+                command=self._on_any_change
+            ).pack(side="left", padx=2)
+
+        # Claw Toggle Button
+        self.claw_button = ttk.Button(
+            right, text="Claw: CLOSED", command=self._toggle_claw
+        )
+        self.claw_button.grid(row=7, column=0, sticky="ew", pady=(8, 8))
+
+        # Current XY readout
+        self.xy_label = ttk.Label(right, text="x=0.000  y=0.000", font=("Consolas", 11))
+        self.xy_label.grid(row=8, column=0, sticky="w", pady=(4, 2))
+
+        # Output line (label updates live; printing happens on S press)
+        ttk.Label(right, text="Output").grid(row=9, column=0, sticky="w", pady=(8, 0))
+        self.output_label = ttk.Label(right, text="", font=("Consolas", 11))
+        self.output_label.grid(row=10, column=0, sticky="w")
+
+        # Make right column expand a bit
+        right.columnconfigure(0, weight=1)
+
+    # ---------------------------- Drawing ----------------------------
+    def _draw_axes(self):
+        """Draw the left half-plane grid, axes, semicircle, and current point."""
+        self.canvas.delete("grid")
+        self.canvas.delete("arc")
+        self.canvas.delete("point")
+
+        W, H = PARAMS["CANVAS_W"], PARAMS["CANVAS_H"]
+        X_MAX = PARAMS["X_MAX"]
+        Y_MIN, Y_MAX = PARAMS["Y_RANGE"]
+
+        # Grid lines
+        divisions = 4
+        for i in range(divisions + 1):
+            xw = X_MAX * (i / divisions)
+            cx, _ = self.world_to_canvas(xw, 0)
+            self.canvas.create_line(cx, 0, cx, H, fill="#2b3240", tags="grid")
+
+        for i in range(divisions + 1):
+            yw = Y_MIN + (Y_MAX - Y_MIN) * (i / divisions)
+            _, cy = self.world_to_canvas(0, yw)
+            self.canvas.create_line(0, cy, W, cy, fill="#2b3240", tags="grid")
+
+        # Axis labels
+        self.canvas.create_text(W - 8, H // 2, anchor="e", fill="#8aa0b7",
+                                text="x=0 →", tags="grid")
+        self.canvas.create_text(12, 14, anchor="w", fill="#8aa0b7",
+                                text=f"+x to left, x∈[0,{X_MAX}]", tags="grid")
+        self.canvas.create_text(12, 32, anchor="w", fill="#8aa0b7",
+                                text=f"y∈[{Y_MIN},{Y_MAX}]", tags="grid")
+
+        # Red left-facing semicircle centered at origin, radius r_m
+        self._draw_left_semicircle()
+
+        # Current point
+        self._draw_point()
+
+    def _draw_left_semicircle(self):
+        """Draw a red left-facing semicircle centered at (0,0) with radius r_m (meters).
+        We force equal pixel radii so it renders as a perfect half-circle visually.
+        """
+        self.canvas.delete("arc")
+        W, H = PARAMS["CANVAS_W"], PARAMS["CANVAS_H"]
+        X_MAX = PARAMS["X_MAX"]
+        Y_MIN, Y_MAX = PARAMS["Y_RANGE"]
+
+        # Center at world origin (0,0)
+        cx0, cy0 = self.world_to_canvas(0.0, 0.0)
+
+        # Pixel-per-meter scales
+        px_per_m_x = W / X_MAX
+        px_per_m_y = H / (Y_MAX - Y_MIN)
+
+        # Use a unified pixel scale so the arc is a circle in screen space
+        px_per_m = min(px_per_m_x, px_per_m_y)
+
+        Rm = float(self.r_m.get())
+        Rpx = Rm * px_per_m  # same for x and y to look circular
+
+        # Bounding box in canvas coords
+        x1, y1 = cx0 - Rpx, cy0 - Rpx
+        x2, y2 = cx0 + Rpx, cy0 + Rpx
+
+        # Left-facing semicircle = arc from 90° to 270° (Tk: 0° is right, CCW positive)
+        self.canvas.create_arc(
+            x1, y1, x2, y2,
+            start=90, extent=180,
+            style="arc",
+            outline="#e74c3c",
+            width=PARAMS["ARC_WIDTH"],
+            tags="arc"
+        )
+
+    def _draw_point(self):
+        self.canvas.delete("point")
+        cx, cy = self.world_to_canvas(self.x_m, self.y_m)
+        r = 5
+        self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                                outline="#f2a65a", width=2, tags="point")
+        self.canvas.create_line(cx - 10, cy, cx + 10, cy, fill="#f2a65a", tags="point")
+        self.canvas.create_line(cx, cy - 10, cx, cy + 10, fill="#f2a65a", tags="point")
+
+    # -------------------------- Event Handlers -------------------------
+    def _on_click(self, event):
+        xw, yw = self.canvas_to_world(event.x, event.y)
+        self.x_m, self.y_m = xw, yw
+        self.xy_label.config(text=f"x={self.x_m:.3f}  y={self.y_m:.3f}")
+        self._draw_point()
+        self._update_output()
+
+    def _toggle_claw(self):
+        self.claw_open.set(not self.claw_open.get())
+        self.claw_button.config(text=f"Claw: {'OPEN' if self.claw_open.get() else 'CLOSED'}")
+        self._update_output()
+
+    def _on_any_change(self, *args):
+        self._update_output()
+
+    def _on_radius_set(self):
+        txt = self.r_entry.get().strip()
         try:
-            z = float(self.z_var.get())
-        except Exception:
-            z = 0.0
-        try:
-            pitch = float(self.pitch_entry.get().strip() or 0.0)
-        except Exception:
-            pitch = 0.0
-        try:
-            sol = ik_yppp(ARM, (x, y, z), pitch)
-            c = sol['cmds']
-            t1, t2, t3 = float(c['q1']), float(c['q2']), float(c['q3'])
-            q4_pwm = int(c['q4'])
-            a = sol['angles_deg']
-            self._pending_targets = (t1, t2, t3)
-            self.preview.set(
-                f"x={x:.3f}, y={y:.3f}, z={z:.3f}, pitch={pitch:.2f}\n"
-                f"Angles°: q1={a['q1']:.1f}, q2={a['q2']:.1f}, q3={a['q3']:.1f}, q4={a['q4']:.1f}\n"
-                f"Cmds: q1={t1:.3f}, q2={t2:.3f}, q3={t3:.3f}, q4={q4_pwm} µs"
-            )
-            # marker
-            self.draw_plane()
-            cx, cy = self.m_to_px(x, y)
-            r = 5
-            self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r, outline="#00ff88", width=2)
-        except Exception as e:
-            self.preview.set(f"IK failed: {e}")
-            self._pending_targets = None
-
-    # ----- Hardware init -----
-    async def _init_moteus(self):
-        import moteus
-        self.m1 = moteus.Controller(id=ID1)
-        self.m2 = moteus.Controller(id=ID2)
-        self.m3 = moteus.Controller(id=ID3)
-        with contextlib.suppress(Exception):
-            await asyncio.gather(self.m1.set_stop(), self.m2.set_stop(), self.m3.set_stop())
-        self.status.set("Hardware ready")
-
-    # ----- Command queue & worker -----
-    def enqueue_move(self):
-        if self._pending_targets is None:
-            self.status.set("No target — click plane or change z/pitch")
+            val = float(txt)
+        except ValueError:
+            messagebox.showerror("Invalid radius", "Please enter a numeric radius in meters.")
             return
-        if not (self.m1 and self.m2 and self.m3):
-            self.status.set("Hardware not ready")
-            return
-        # Push the current targets to the queue
-        self.cmd_q.put_nowait(("move", self._pending_targets))
-        self.status.set("Queued move")
 
-    async def _cmd_worker(self):
-        """Serializes moves so you can send multiple in a row."""
-        while True:
-            cmd, payload = await self.cmd_q.get()
-            if cmd == "move":
-                t1, t2, t3 = payload
-                try:
-                    self.status.set(f"Moving to q1={t1:.3f}, q2={t2:.3f}, q3={t3:.3f} …")
-                    await move_group_sync_time(self.m1, self.m2, self.m3, t1, t2, t3, duration=GROUP_DURATION_S)
-                    self.status.set("Arrived — ready for next target")
-                except Exception as e:
-                    self.status.set(f"Move error: {e}")
-            elif cmd == "stop":
-                # Stop immediately; drain any pending moves
-                with contextlib.suppress(Exception):
-                    await asyncio.gather(self.m1.set_stop(), self.m2.set_stop(), self.m3.set_stop())
-                # Clear the queue
-                try:
-                    while True:
-                        self.cmd_q.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-                self.status.set("Motors stopped (queue cleared)")
-            elif cmd == "quit":
-                # Stop and exit loop
-                with contextlib.suppress(Exception):
-                    await asyncio.gather(self.m1.set_stop(), self.m2.set_stop(), self.m3.set_stop())
-                self.status.set("Exiting…")
-                break
+        # Clamp to allowed range
+        val = max(PARAMS["R_MIN"], min(PARAMS["R_MAX"], val))
+        self.r_m.set(val)
+        self.r_entry.delete(0, tk.END)
+        self.r_entry.insert(0, f"{val:.3f}")
 
-    # ----- Immediate commands -----
-    def stop_motors(self):
-        if not (self.m1 and self.m2 and self.m3):
-            self.status.set("Stop requested (hardware not ready yet)")
-            return
-        self.cmd_q.put_nowait(("stop", None))
+        # Redraw with new radius
+        self._draw_axes()
+        self._update_output()
 
-    def quit(self):
-        async def _quit_async():
-            # Request worker to stop; then close window
-            self.cmd_q.put_nowait(("quit", None))
-            await asyncio.sleep(0)  # let the worker process the quit
-            try:
-                if self.m1 and self.m2 and self.m3:
-                    with contextlib.suppress(Exception):
-                        await asyncio.gather(
-                            self.m1.set_stop(),
-                            self.m2.set_stop(),
-                            self.m3.set_stop()
-                        )
-            finally:
-                self.root.after(0, self.root.destroy)
-        asyncio.create_task(_quit_async())
+    def _on_s_key(self, event=None):
+        """Print ONLY when 's' or 'S' is pressed."""
+        print(self._compose_output())
 
+    # ---------------------------- Helpers ----------------------------
+    def _pitch_radians(self) -> float:
+        """Map selection to radians, rounding π/2 choices to nearest thousandth."""
+        sel = self.pitch_sel.get()
+        if sel == "up":
+            return round(math.pi / 2, 3)       # +1.571
+        if sel == "down":
+            return round(-math.pi / 2, 3)      # -1.571
+        return 0.0                              # left
 
-# ========================= ENTRYPOINT =========================
-async def _amain(root):
-    app = ClickToMoveApp(root)
-    try:
-        while True:
-            root.update_idletasks()
-            root.update()
-            await asyncio.sleep(0.01)
-    except tk.TclError:
-        pass
+    def _compose_output(self) -> str:
+        # Order: x y z pitch claw rotation
+        x = self.x_m
+        y = self.y_m
+        z = self.z_m.get()
+        pitch_rad = self._pitch_radians()
+        claw = "OPEN" if self.claw_open.get() else "CLOSED"
+        rot = self.rot_deg.get()
+        return (
+            f"x={x:.3f}  y={y:.3f}  z={z:.3f}  "
+            f"pitch={pitch_rad:.3f} rad  "
+            f"claw={claw}  rotation={rot:.1f}°"
+        )
+
+    def _update_output(self):
+        """Update label only; printing happens on S press."""
+        self.output_label.config(text=self._compose_output())
+
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    asyncio.run(_amain(root))
+    app = VizzyManualControl()
+    app.mainloop()
