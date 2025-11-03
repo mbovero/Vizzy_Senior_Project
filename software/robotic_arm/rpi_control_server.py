@@ -1,14 +1,34 @@
 #!/usr/bin/env python3
-# rpi_arm_server.py — Pi-side control of 3 moteus motors + 1 GPIO hobby servo
-# IK protocol: accepts `ik <x> <y> <z> <wrist>` and maps to q1,q2,q3 + servo PWM (q4)
+# rpi_arm_server.py — Pi-side control of 3 moteus motors + 3 GPIO hobby servos (pitch, yaw, claw)
+# IK protocol: accepts `ik x, y, z, pitch_deg, yaw_deg, O/C` and maps to q1,q2,q3 + servos (pitch,yaw,claw)
+# All three servos tween in sync with the motor group duration.
 
 from __future__ import annotations
-import argparse, asyncio, math, time, sys, contextlib, pprint
+import argparse, asyncio, math, time, sys, contextlib, pprint, re
 
-# ---------- Servo -----------
+# ---------- Servo Pins (BCM) ----------
+SERVO_YAW   = 4
+SERVO_CLAW  = 17
+SERVO_PITCH = 27
+
+# ---------- Servo PWM bounds ----------
 SERVO_MIN    = 500
 SERVO_MAX    = 2500
-SERVO_CENTER = 1750
+SERVO_CENTER = 1500  # neutral for angular servos; change if your horns are off-center
+
+# Angular mapping (deg → PWM) — tune to your linkage/servo
+PITCH_DEG_MIN, PITCH_DEG_MAX = -90.0, 90.0
+YAW_DEG_MIN,   YAW_DEG_MAX   = -90.0, 90.0
+
+# Claw endpoints (PWM) — tune these
+CLAW_OPEN_PWM   = 1100
+CLAW_CLOSED_PWM = 2000
+
+# Tween timing for servos
+SERVO_TWEEN_MIN_DT = 0.02   # s
+SERVO_TWEEN_MAX_DT = 0.05   # s
+SERVO_IDLE_DT      = 0.02   # s
+DURATION_FLOOR_S   = 0.2    # minimum tween duration when motor delta is tiny
 
 try:
     import pigpio
@@ -96,6 +116,18 @@ WIGGLE_DWELL_S      = 0.15
 def ang_err(a: float, b: float) -> float:
     return math.remainder(a - b, 2.0 * math.pi)
 
+def clamp(v, lo, hi):
+    return lo if v < lo else hi if v > hi else v
+
+def lerp(a, b, t):
+    return a + (b - a) * t
+
+def map_deg_to_pwm(deg: float, dmin: float, dmax: float, pmin: int, pmax: int) -> int:
+    if dmax == dmin:
+        return int((pmin + pmax) // 2)
+    t = (deg - dmin) / (dmax - dmin)
+    return int(round(pmin + t * (pmax - pmin)))
+
 async def hold(ctrl: moteus.Controller, pos: float):
     await ctrl.set_position(
         position=float(pos),
@@ -118,19 +150,18 @@ async def move_ramped(ctrl: moteus.Controller, current: float, target: float) ->
     await hold(ctrl, target)
     return target
 
-# NOTE: on_duration is an optional async callable that receives the computed duration (seconds).
+# NOTE: on_duration is an optional async callable receiving the computed duration (seconds).
 async def move_group_sync_time(items, on_duration=None):
     if not items:
         return []
     deltas = [ang_err(t, c) for (_, c, t) in items]
     max_delta = max(abs(d) for d in deltas) if deltas else 0.0
 
-    # If motors basically don’t need to move, still allow servo to tween over a small floor.
+    # If motors basically don’t need to move, still allow servos to tween over a small floor.
     if max_delta < 1e-9:
-        duration = 0.2  # small floor to keep servo smooth
+        duration = DURATION_FLOOR_S
         if on_duration is not None:
             try:
-                # Fire-and-forget; motor “move” is trivial.
                 asyncio.create_task(on_duration(duration))
             except Exception:
                 pass
@@ -138,9 +169,8 @@ async def move_group_sync_time(items, on_duration=None):
         return [t for (_, _, t) in items]
 
     group_speed = max(GROUP_SPEED_RAD_S, MIN_SPEED)
-    duration = max(max_delta / group_speed, 0.2)
+    duration = max(max_delta / group_speed, DURATION_FLOOR_S)
 
-    # Kick off the servo tween immediately so it runs in parallel with the motor move.
     if on_duration is not None:
         try:
             asyncio.create_task(on_duration(duration))
@@ -240,18 +270,24 @@ async def gentle_clear_fault(ctrl: moteus.Controller, name: str):
 
 # ---------- Server ----------
 class ArmServer:
-    def __init__(self, host: str, port: int, servo_pin: int, transport_kind: str):
+    def __init__(self, host: str, port: int, servo_pitch_pin: int, transport_kind: str):
         self.host = host
         self.port = port
-        self.servo_pin = servo_pin
 
-        # Servo driver (robust)
+        # pigpio (single daemon controls all three servos)
         self.pi = pigpio.pi()
         if not self.pi.connected:
             raise RuntimeError("pigpio daemon not running. Start with: sudo systemctl start pigpiod")
-        self.current_pwm = SERVO_CENTER
-        self.target_pwm  = SERVO_CENTER
-        self.pi.set_servo_pulsewidth(self.servo_pin, SERVO_CENTER)
+
+        # Servo channels state
+        self.servos = {
+            "pitch": {"pin": SERVO_PITCH, "current": SERVO_CENTER, "target": SERVO_CENTER},
+            "yaw":   {"pin": SERVO_YAW,   "current": SERVO_CENTER, "target": SERVO_CENTER},
+            "claw":  {"pin": SERVO_CLAW,  "current": CLAW_OPEN_PWM, "target": CLAW_OPEN_PWM},
+        }
+        # Initialize outputs
+        for ch in self.servos.values():
+            self.pi.set_servo_pulsewidth(ch["pin"], ch["current"])
 
         # moteus controllers
         self._transport_kind = transport_kind
@@ -279,44 +315,18 @@ class ArmServer:
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
 
-    # ===== SERVO ROBUSTNESS =====
-    async def _reconnect_pigpio(self) -> bool:
-        try:
-            if self.pi is not None:
-                with contextlib.suppress(Exception):
-                    self.pi.stop()
-        except Exception:
-            pass
-
-        try:
-            self.pi = pigpio.pi()
-            if not self.pi.connected:
-                print("[rpi] SERVO: pigpio reconnect failed (not connected).", file=sys.stderr)
-                return False
-            self.pi.set_servo_pulsewidth(self.servo_pin, int(self.target_pwm))
-            self.current_pwm = int(self.target_pwm)
-            print("[rpi] SERVO: pigpio reconnected.")
-            return True
-        except Exception as e:
-            print(f"[rpi] SERVO: pigpio reconnect exception: {e}", file=sys.stderr)
-            return False
-
-    async def servo_set(self, pwm_us: int):
-        pwm = int(max(SERVO_MIN, min(SERVO_MAX, pwm_us)))
-        self.target_pwm = pwm
-
-        if self.pi is None or not getattr(self.pi, "connected", False):
-            print("[rpi] SERVO: pigpio disconnected, attempting reconnect...", file=sys.stderr)
-            if not await self._reconnect_pigpio():
-                return
-
+    # ===== SERVO I/O =====
+    async def _servo_write_pwm(self, name: str, pwm_us: int):
+        ch = self.servos[name]
+        pwm = int(clamp(pwm_us, SERVO_MIN, SERVO_MAX))
+        # attempt write with light retry
         for attempt in range(PIGPIO_MAX_RETRIES + 1):
             try:
-                self.pi.set_servo_pulsewidth(self.servo_pin, pwm)
-                self.current_pwm = pwm
+                self.pi.set_servo_pulsewidth(ch["pin"], pwm)
+                ch["current"] = pwm
                 return
             except Exception as e:
-                print(f"[rpi] SERVO: write error (attempt {attempt+1}): {e}", file=sys.stderr)
+                print(f"[rpi] SERVO {name}: write error (attempt {attempt+1}): {e}", file=sys.stderr)
                 try:
                     with contextlib.suppress(Exception):
                         self.pi.stop()
@@ -325,32 +335,59 @@ class ArmServer:
                 self.pi = None
                 if attempt < PIGPIO_MAX_RETRIES:
                     await asyncio.sleep(PIGPIO_RETRY_DELAY_S)
-                    await self._reconnect_pigpio()
+                    self.pi = pigpio.pi()
+                    if not self.pi.connected:
+                        print("[rpi] SERVO: pigpio reconnect failed.", file=sys.stderr)
+                        continue
                 else:
                     return
 
-    async def servo_tween_to(self, start_pwm: int, target_pwm: int, duration: float):
-        """Linearly interpolate servo PWM from start to target over 'duration' seconds."""
-        start_pwm = int(max(SERVO_MIN, min(SERVO_MAX, start_pwm)))
-        target_pwm = int(max(SERVO_MIN, min(SERVO_MAX, target_pwm)))
-        if duration <= 0.0 or start_pwm == target_pwm:
-            await self.servo_set(target_pwm)
+    def set_servo_targets(self, pitch_pwm: int | None = None, yaw_pwm: int | None = None, claw_pwm: int | None = None):
+        if pitch_pwm is not None:
+            self.servos["pitch"]["target"] = int(clamp(pitch_pwm, SERVO_MIN, SERVO_MAX))
+        if yaw_pwm is not None:
+            self.servos["yaw"]["target"] = int(clamp(yaw_pwm, SERVO_MIN, SERVO_MAX))
+        if claw_pwm is not None:
+            self.servos["claw"]["target"] = int(clamp(claw_pwm, SERVO_MIN, SERVO_MAX))
+
+    async def servos_tween_multi(self, duration: float):
+        """Tween all servos linearly from their current to target PWM over 'duration' seconds."""
+        if duration <= 0.0:
+            # snap to targets
+            await asyncio.gather(
+                self._servo_write_pwm("pitch", self.servos["pitch"]["target"]),
+                self._servo_write_pwm("yaw",   self.servos["yaw"]["target"]),
+                self._servo_write_pwm("claw",  self.servos["claw"]["target"]),
+            )
             return
 
+        # Snapshot starts/targets
+        s_pitch, t_pitch = self.servos["pitch"]["current"], self.servos["pitch"]["target"]
+        s_yaw,   t_yaw   = self.servos["yaw"]["current"],   self.servos["yaw"]["target"]
+        s_claw,  t_claw  = self.servos["claw"]["current"],  self.servos["claw"]["target"]
+
         t0 = time.monotonic()
-        # choose a modest update rate (50 Hz) without overloading I2C/SPI/daemon
-        dt = max(0.02, min(0.05, duration / 50.0))
+        dt = clamp(duration / 50.0, SERVO_TWEEN_MIN_DT, SERVO_TWEEN_MAX_DT)
         while True:
-            now = time.monotonic()
-            el = now - t0
+            el = time.monotonic() - t0
             if el >= duration:
                 break
-            alpha = el / duration
-            pwm = int(round(start_pwm + (target_pwm - start_pwm) * alpha))
-            await self.servo_set(pwm)
+            a = el / duration
+            pw_pitch = int(round(lerp(s_pitch, t_pitch, a)))
+            pw_yaw   = int(round(lerp(s_yaw,   t_yaw,   a)))
+            pw_claw  = int(round(lerp(s_claw,  t_claw,  a)))
+            await asyncio.gather(
+                self._servo_write_pwm("pitch", pw_pitch),
+                self._servo_write_pwm("yaw",   pw_yaw),
+                self._servo_write_pwm("claw",  pw_claw),
+            )
             await asyncio.sleep(dt)
 
-        await self.servo_set(target_pwm)
+        await asyncio.gather(
+            self._servo_write_pwm("pitch", t_pitch),
+            self._servo_write_pwm("yaw",   t_yaw),
+            self._servo_write_pwm("claw",  t_claw),
+        )
 
     # ===== MOTEUS & SYSTEM =====
     async def init_positions(self):
@@ -377,7 +414,9 @@ class ArmServer:
         self.m2 = moteus.Controller(id=ID2, transport=router)
         self.m3 = moteus.Controller(id=ID3, transport=router)
 
-        await self.servo_set(SERVO_CENTER)
+        # park servos to safe positions
+        self.set_servo_targets(SERVO_CENTER, SERVO_CENTER, CLAW_OPEN_PWM)
+        await self.servos_tween_multi(DURATION_FLOOR_S)
         await asyncio.sleep(RECOVER_SLEEP_S)
 
         try:
@@ -405,21 +444,14 @@ class ArmServer:
         try:
             while not self._stop.is_set():
                 async with self._lock:
-                    # NOTE: Do NOT jump the servo here. Let the tween run in sync with the motor group move.
-
                     group = [
                         (self.m1, self.c1, self.t1),
                         (self.m2, self.c2, self.t2),
                         (self.m3, self.c3, self.t3),
                     ]
 
-                    # Snapshot current/target PWM for a consistent tween.
-                    start_pwm = int(self.current_pwm)
-                    target_pwm = int(self.target_pwm)
-
                     async def _servo_sync(duration: float):
-                        # run tween concurrently with the motor move
-                        await self.servo_tween_to(start_pwm, target_pwm, duration)
+                        await self.servos_tween_multi(duration)
 
                     try:
                         finals = await move_group_sync_time(group, on_duration=_servo_sync)
@@ -448,24 +480,24 @@ class ArmServer:
 
                 if (self.last_temp2 is not None) and (not self.cooling2) and (self.last_temp2 > TEMP_LIMIT):
                     print(f"[rpi] WARN: m2 > {TEMP_LIMIT:.1f} °C → return to REST; enter cooldown2.")
-                    await self.servo_set(SERVO_CENTER)
+                    self.set_servo_targets(SERVO_CENTER, SERVO_CENTER, CLAW_OPEN_PWM)
                     finals = await move_group_sync_time([
                         (self.m1, self.c1, REST1),
                         (self.m2, self.c2, REST2),
                         (self.m3, self.c3, REST3),
-                    ])
+                    ], on_duration=lambda d: self.servos_tween_multi(d))
                     self.c1, self.c2, self.c3 = finals
                     self.t1, self.t2, self.t3 = REST1, REST2, REST3
                     self.cooling2 = True
 
                 if (self.last_temp3 is not None) and (not self.cooling3) and (self.last_temp3 > TEMP_LIMIT):
                     print(f"[rpi] WARN: m3 > {TEMP_LIMIT:.1f} °C → return to REST; enter cooldown3.")
-                    await self.servo_set(SERVO_CENTER)
+                    self.set_servo_targets(SERVO_CENTER, SERVO_CENTER, CLAW_OPEN_PWM)
                     finals = await move_group_sync_time([
                         (self.m1, self.c1, REST1),
                         (self.m2, self.c2, REST2),
                         (self.m3, self.c3, REST3),
-                    ])
+                    ], on_duration=lambda d: self.servos_tween_multi(d))
                     self.c1, self.c2, self.c3 = finals
                     self.t1, self.t2, self.t3 = REST1, REST2, REST3
                     self.cooling3 = True
@@ -488,18 +520,21 @@ class ArmServer:
                 await asyncio.gather(self.m1.set_stop(), self.m2.set_stop(), self.m3.set_stop())
             try:
                 if self.pi is not None and getattr(self.pi, "connected", False):
-                    self.pi.set_servo_pulsewidth(self.servo_pin, 0)
+                    for ch in self.servos.values():
+                        self.pi.set_servo_pulsewidth(ch["pin"], 0)
                     self.pi.stop()
             except Exception:
                 pass
 
     async def heartbeat_loop(self):
-        """Periodic status: prints FULL query dict for each motor."""
+        """Periodic status: prints FULL query dict for each motor + servo summary."""
         names = [("m1", self.m1), ("m2", self.m2), ("m3", self.m3)]
         while not self._stop.is_set():
-            # Servo status
+            # Servo status summary
             servo_state = "connected" if (self.pi is not None and getattr(self.pi, "connected", False)) else "DISCONNECTED"
-            print(f"[rpi] HB: servo={servo_state} target_pwm={self.target_pwm}", flush=True)
+            sp = self.servos["pitch"]; sy = self.servos["yaw"]; sc = self.servos["claw"]
+            print(f"[rpi] HB: servo={servo_state} P(current/target)={sp['current']}/{sp['target']}  "
+                  f"Y={sy['current']}/{sy['target']}  C={sc['current']}/{sc['target']}", flush=True)
 
             try:
                 results = await asyncio.gather(*(ctrl.query() for _, ctrl in names), return_exceptions=True)
@@ -513,7 +548,7 @@ class ArmServer:
                     print(f"[rpi] HB FULL {name} values:")
                     pprint.pprint(vals, width=100, compact=False, sort_dicts=False)
 
-                    # Optional: still surface summarized fields & faults
+                    # Optional: summarize
                     temp  = extract_temperature(vals)
                     volts = extract_voltage(vals)
                     pos   = vals.get('position')
@@ -532,6 +567,22 @@ class ArmServer:
 
             await asyncio.sleep(HEARTBEAT_S)
 
+    # ---- Command parsing helpers ----
+    @staticmethod
+    def _split_payload(s: str):
+        """
+        Accept 'ik x y z pitch yaw O/C' or comma-separated 'ik x, y, z, pitch, yaw, O/C'.
+        Returns list of 6 strings after 'ik'.
+        """
+        s = s.strip()
+        s = re.sub(r'\s+', ' ', s)
+        # replace commas with spaces, then split
+        s = s.replace(",", " ")
+        parts = s.split()
+        if len(parts) < 7:
+            raise ValueError("expected 6 values after 'ik'")
+        return parts[1:7]
+
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         addr = writer.get_extra_info("peername")
         print(f"[rpi] client connected: {addr}")
@@ -544,19 +595,23 @@ class ArmServer:
                 if not cmd_raw:
                     continue
 
-                cmd = cmd_raw.lower()
+                cmd_lower = cmd_raw.lower()
 
-                if cmd in ("quit", "q"):
+                if cmd_lower in ("quit", "q"):
                     writer.write(b"ACK bye\n"); await writer.drain()
                     self._stop.set()
                     break
 
-                if cmd == "rest":
+                if cmd_lower == "rest":
                     try:
-                        await self.servo_set(SERVO_CENTER)
                         async with self._lock:
                             self.t1, self.t2, self.t3 = REST1, REST2, REST3
-                            self.target_pwm = SERVO_CENTER
+                            # set servos to neutral/open
+                            self.set_servo_targets(
+                                pitch_pwm=SERVO_CENTER,
+                                yaw_pwm=SERVO_CENTER,
+                                claw_pwm=CLAW_OPEN_PWM
+                            )
                         writer.write(b"ACK rest\n")
                         await writer.drain()
                     except Exception as e:
@@ -564,24 +619,26 @@ class ArmServer:
                         writer.write(b"ERR rest failed\n"); await writer.drain()
                     continue
 
-                if cmd.startswith("ik "):
-                    parts = cmd_raw.split()
-                    if len(parts) != 5:
-                        writer.write(b"ERR ik usage: 'ik <x> <y> <z> <wrist>'\n")
+                if cmd_lower.startswith("ik "):
+                    try:
+                        sx, sy, sz, spitch, syaw, sclaw = self._split_payload(cmd_raw)
+                        x = float(sx); y = float(sy); z = float(sz)
+                        pitch_deg = float(spitch)
+                        yaw_deg   = float(syaw)
+                        claw_ch   = sclaw.strip().upper()
+                        if claw_ch not in ("O", "C"):
+                            raise ValueError("claw must be 'O' or 'C'")
+                    except Exception as e:
+                        writer.write(b"ERR ik parse (usage: ik x y z pitch_deg yaw_deg O|C)\n")
                         await writer.drain()
                         continue
-                    try:
-                        _, sx, sy, sz, sw = parts
-                        x = float(sx); y = float(sy); z = float(sz); wrist = float(sw)
-                    except ValueError:
-                        writer.write(b"ERR ik parse\n"); await writer.drain()
-                        continue
 
+                    # IK for motors (wrist parameter unused now; pass 0.0)
                     try:
                         cmds = ik_cmds_bounded(
                             self.ik_arm,
                             (x, y, z),
-                            wrist,
+                            0.0,
                             radius_m=IK_RADIUS_M,
                             z_min=IK_Z_MIN,
                             z_max=IK_Z_MAX
@@ -589,25 +646,35 @@ class ArmServer:
                         q1 = float(cmds["q1"])
                         q2 = float(cmds["q2"]) * Q2_SCALE
                         q3 = float(cmds["q3"])
-                        q4_pwm = int(round(cmds["q4"]))
                     except Exception as e:
                         print(f"[rpi] IK error: {e}", file=sys.stderr)
                         writer.write(b"ERR ik failed\n"); await writer.drain()
                         continue
 
+                    # Angle→PWM for pitch & yaw
+                    pitch_pwm = map_deg_to_pwm(
+                        clamp(pitch_deg, PITCH_DEG_MIN, PITCH_DEG_MAX),
+                        PITCH_DEG_MIN, PITCH_DEG_MAX, SERVO_MIN, SERVO_MAX
+                    )
+                    yaw_pwm = map_deg_to_pwm(
+                        clamp(yaw_deg, YAW_DEG_MIN, YAW_DEG_MAX),
+                        YAW_DEG_MIN, YAW_DEG_MAX, SERVO_MIN, SERVO_MAX
+                    )
+                    claw_pwm = CLAW_CLOSED_PWM if claw_ch == "C" else CLAW_OPEN_PWM
+
                     try:
-                        # Set the *target* only; the control loop will tween it in sync with motors.
                         async with self._lock:
-                            self.target_pwm = q4_pwm
+                            # set targets (servos tween during group move)
+                            self.set_servo_targets(pitch_pwm, yaw_pwm, claw_pwm)
                             if not (self.cooling2 or self.cooling3):
                                 self.t1, self.t2, self.t3 = q1, q2, q3
                         writer.write(b"ACK ik\n"); await writer.drain()
                     except Exception as e:
-                        print(f"[rpi] IK: servo error: {e}", file=sys.stderr)
+                        print(f"[rpi] IK: servo target set error: {e}", file=sys.stderr)
                         writer.write(b"ERR ik servo\n"); await writer.drain()
                     continue
 
-                writer.write(b"ERR expected: 'ik <x> <y> <z> <wrist>' or 'rest' or 'quit'\n")
+                writer.write(b"ERR expected: 'ik x y z pitch yaw O|C' or 'rest' or 'quit'\n")
                 await writer.drain()
 
         finally:
@@ -624,7 +691,7 @@ class ArmServer:
         hb_task   = asyncio.create_task(self.heartbeat_loop())
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
         addrs = ", ".join(str(sock.getsockname()) for sock in server.sockets)
-        print(f"[rpi] listening on {addrs}, servo pin BCM {self.servo_pin}")
+        print(f"[rpi] listening on {addrs} | servos: pitch={SERVO_PITCH} yaw={SERVO_YAW} claw={SERVO_CLAW}")
         async with server:
             await self._stop.wait()
             server.close()
@@ -650,7 +717,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=65432)
-    ap.add_argument("--servo-pin", type=int, default=27, help="BCM GPIO pin for servo signal")
+    ap.add_argument("--servo-pin", type=int, default=SERVO_PITCH, help="(unused—kept for backward compat)")
     ap.add_argument("--transport", default="pi3hat",
                     help="pi3hat | socketcan:can0 | auto")
     args = ap.parse_args()
