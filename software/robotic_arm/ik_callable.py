@@ -16,7 +16,7 @@ RAD2DEG = 180.0 / pi
 DEG2RAD = pi / 180.0
 
 # --- q4 servo mapping (270°, 500–2500 µs, center 1750 µs) ---
-Q4_PWM_CENTER_US   = 1750
+Q4_PWM_CENTER_US   = 1755
 Q4_PWM_MIN_US      = 800.0
 Q4_PWM_MAX_US      = 2500.0
 Q4_PWM_HALFSPAN_US = 1000.0
