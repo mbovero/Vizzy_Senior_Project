@@ -84,17 +84,19 @@ def expand_high_level_commands(plan: List[Dict], memory: ObjectMemory) -> List[D
     
     PICK(target) expands to:
       1. RELEASE
-      2. MOVE_TO(target)
+      2. MOVE_TO(target + vertical_offset, pitch=-π/2)  # Approach from above
       3. ROT_YAW(grasp_angle)  # from object's orientation in memory
-      4. GRAB
-      5. MOVE_TO(REST_POSITION)
-      6. ROT_YAW(REST_YAW_ANGLE)
+      4. MOVE_TO(target, pitch=-π/2)  # Descend to object
+      5. GRAB
+      6. MOVE_TO(REST_POSITION, pitch=REST_PITCH_ANGLE)
+      7. ROT_YAW(REST_YAW_ANGLE)
     
-    PLACE(destination, offset?) expands to:
-      1. MOVE_TO(destination, offset)
-      2. RELEASE
-      3. MOVE_TO(REST_POSITION)
-      4. ROT_YAW(REST_YAW_ANGLE)
+    PLACE(destination, offset?, yaw_rot?) expands to:
+      1. ROT_YAW(yaw_rot)  # Optional rotation before placing
+      2. MOVE_TO(destination + offset + vertical_offset, pitch=-π/2)  # Approach from above
+      3. RELEASE
+      4. MOVE_TO(REST_POSITION, pitch=REST_PITCH_ANGLE)
+      5. ROT_YAW(REST_YAW_ANGLE)
     """
     expanded = []
     
@@ -108,30 +110,48 @@ def expand_high_level_commands(plan: List[Dict], memory: ObjectMemory) -> List[D
             # Get grasp orientation for this object
             grasp_angle = get_grasp_orientation(target, memory)
             
-            # Expand to primitive sequence
+            # Expand to primitive sequence with approach offset
+            vertical_offset = [0, 0, C.APPROACH_OFFSET_Z]
             expanded.extend([
                 {"command": "RELEASE"},
-                {"command": "MOVE_TO", "destination": target},
+                {"command": "MOVE_TO", "destination": target, "offset": vertical_offset, "pitch": -90.0},
                 {"command": "ROT_YAW", "angle": grasp_angle},
+                {"command": "MOVE_TO", "destination": target, "pitch": -90.0},
                 {"command": "GRAB"},
-                {"command": "MOVE_TO", "destination": C.REST_POSITION},
+                {"command": "MOVE_TO", "destination": C.REST_POSITION, "pitch": C.REST_PITCH_ANGLE},
                 {"command": "ROT_YAW", "angle": C.REST_YAW_ANGLE},
             ])
-            print(f"[Tasks]   Expanded to 6 primitives")
+            print(f"[Tasks]   Expanded to 7 primitives")
         
         elif command == "PLACE":
             print(f"[Tasks] Expanding PLACE command {i}...")
             destination = task.get("destination")
             offset = task.get("offset", [0, 0, 0])
+            yaw_rot = task.get("yaw_rot", None)  # Optional yaw rotation
             
-            # Expand to primitive sequence
-            expanded.extend([
-                {"command": "MOVE_TO", "destination": destination, "offset": offset},
+            # Expand to primitive sequence with approach offset
+            vertical_offset = [0, 0, C.APPROACH_OFFSET_Z]
+            
+            # Combine user offset + vertical approach offset
+            combined_offset = [
+                offset[0] + vertical_offset[0],
+                offset[1] + vertical_offset[1],
+                offset[2] + vertical_offset[2]
+            ]
+            
+            primitives = []
+            if yaw_rot is not None:
+                primitives.append({"command": "ROT_YAW", "angle": yaw_rot})
+            
+            primitives.extend([
+                {"command": "MOVE_TO", "destination": destination, "offset": combined_offset, "pitch": -90.0},
                 {"command": "RELEASE"},
-                {"command": "MOVE_TO", "destination": C.REST_POSITION},
+                {"command": "MOVE_TO", "destination": C.REST_POSITION, "pitch": C.REST_PITCH_ANGLE},
                 {"command": "ROT_YAW", "angle": C.REST_YAW_ANGLE},
             ])
-            print(f"[Tasks]   Expanded to 4 primitives")
+            
+            expanded.extend(primitives)
+            print(f"[Tasks]   Expanded to {len(primitives)} primitives")
         
         else:
             # Pass through primitives unchanged
@@ -176,10 +196,10 @@ def resolve_object_ids_and_offsets(plan: List[Dict], memory: ObjectMemory) -> Li
     Convert object IDs to XYZ coordinates and apply offsets.
     
     Input format:
-      {"command": "MOVE_TO", "destination": "0xOBJ123", "offset": [10, 0, 0]}
+      {"command": "MOVE_TO", "destination": "0xOBJ123", "offset": [10, 0, 0], "pitch": -90.0}
     
     Output format:
-      {"command": "MOVE_TO", "x": 1210, "y": 800, "z": 500}  # offset applied
+      {"command": "MOVE_TO", "x": 1210, "y": 800, "z": 500, "pitch": -90.0}  # offset applied
     
     For commands without destination/target, passes through unchanged.
     """
@@ -193,15 +213,16 @@ def resolve_object_ids_and_offsets(plan: List[Dict], memory: ObjectMemory) -> Li
             # Resolve destination and apply offset
             destination = task.get("destination")
             offset = task.get("offset", [0, 0, 0])
+            pitch = task.get("pitch", C.REST_PITCH_ANGLE)  # Use specified pitch or default
             
-            pose = _resolve_to_pose(destination, memory)
-            if pose:
+            xyz = _resolve_to_xyz(destination, memory)
+            if xyz:
                 # Apply offset
-                new_task["x"] = pose["x"] + offset[0]
-                new_task["y"] = pose["y"] + offset[1]
-                new_task["z"] = pose["z"] + offset[2]
-                new_task["pitch"] = pose["pitch"]
-                print(f"[Tasks] MOVE_TO resolved: xyz=[{new_task['x']}, {new_task['y']}, {new_task['z']}] mm pitch={new_task['pitch']:.1f}°")
+                new_task["x"] = xyz[0] + offset[0]
+                new_task["y"] = xyz[1] + offset[1]
+                new_task["z"] = xyz[2] + offset[2]
+                new_task["pitch"] = pitch
+                print(f"[Tasks] MOVE_TO resolved: xyz=[{new_task['x']:.1f}, {new_task['y']:.1f}, {new_task['z']:.1f}] mm pitch={new_task['pitch']:.1f}°")
             else:
                 print(f"[Tasks] Warning: Could not resolve MOVE_TO destination: {destination}")
                 continue  # Skip this command
@@ -224,22 +245,19 @@ def resolve_object_ids_and_offsets(plan: List[Dict], memory: ObjectMemory) -> Li
     return resolved
 
 
-def _resolve_to_pose(target: Any, memory: ObjectMemory) -> Optional[Dict[str, float]]:
+def _resolve_to_xyz(target: Any, memory: ObjectMemory) -> Optional[List[float]]:
     """
-    Resolve a target (object ID or coordinates) to a Cartesian pose:
-    {"x": mm, "y": mm, "z": mm, "pitch": degrees}
+    Resolve a target (object ID or coordinates) to XYZ coordinates in millimeters.
+    Returns [x, y, z] or None if resolution fails.
     """
-    default_pitch = float(getattr(C, "REST_PITCH_ANGLE", 0.0))
-
     if isinstance(target, str):
         obj = memory.get_object(target)
         if obj:
             x = float(obj.get("x", 0.0))
             y = float(obj.get("y", 0.0))
             z = float(obj.get("z", 0.0))
-            pitch = float(obj.get("pitch", default_pitch))
-            print(f"[Tasks]   Resolved object {target} to [{x}, {y}, {z}] mm pitch={pitch:.1f}°")
-            return {"x": x, "y": y, "z": z, "pitch": pitch}
+            print(f"[Tasks]   Resolved object {target} to [{x:.1f}, {y:.1f}, {z:.1f}] mm")
+            return [x, y, z]
         print(f"[Tasks]   Error: Object {target} not found in memory")
         return None
 
@@ -247,8 +265,8 @@ def _resolve_to_pose(target: Any, memory: ObjectMemory) -> Optional[Dict[str, fl
         x = float(target[0])
         y = float(target[1])
         z = float(target[2])
-        print(f"[Tasks]   Using provided coordinates [{x}, {y}, {z}] mm (pitch={default_pitch:.1f}° default)")
-        return {"x": x, "y": y, "z": z, "pitch": default_pitch}
+        print(f"[Tasks]   Using provided coordinates [{x:.1f}, {y:.1f}, {z:.1f}] mm")
+        return [x, y, z]
 
     print(f"[Tasks]   Error: Invalid target format: {target}")
     return None
@@ -280,13 +298,12 @@ def convert_to_protocol_format(plan: List[Dict]) -> List[Dict]:
         command = task.get("command", "").upper()
         
         if command == "MOVE_TO":
-            pitch = task.get("pitch", getattr(C, "REST_PITCH_ANGLE", 0.0))
             protocol_commands.append({
                 "cmd": P.CMD_MOVE_TO,
                 "x": task["x"],
                 "y": task["y"],
                 "z": task["z"],
-                "pitch": pitch,
+                "pitch": task["pitch"],
             })
         
         elif command == "GRAB":

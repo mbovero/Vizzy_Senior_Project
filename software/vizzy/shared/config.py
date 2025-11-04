@@ -137,6 +137,9 @@ REST_POSITION = [0, 0, 800]      # [x_mm, y_mm, z_mm]
 REST_YAW_ANGLE = 0.0             # degrees
 REST_PITCH_ANGLE = 0.0           # degrees
 
+# Vertical offset for approach/retract moves (millimeters)
+APPROACH_OFFSET_Z = 100.0        # mm above object for safe approach
+
 # Timeout for primitive command execution (seconds)
 PRIMITIVE_CMD_TIMEOUT = 30.0
 

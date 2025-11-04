@@ -71,7 +71,7 @@ def handle_scan_move(_pi, msg: dict, debug: bool) -> None:
     dx = -1.0 if dx < -1.0 else (1.0 if dx > 1.0 else dx)
     dy = -1.0 if dy < -1.0 else (1.0 if dy > 1.0 else dy)
 
-    step = float(getattr(C, "SCAN_NUDGE_STEP_MM", 5.0))
+    step = float(C.SCAN_NUDGE_STEP_MM)
 
     with state.target_lock:
         current = dict(state.current_target)

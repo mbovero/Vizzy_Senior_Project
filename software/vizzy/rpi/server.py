@@ -45,7 +45,7 @@ def serve_forever(debug: bool = False) -> None:
                     "x": float(C.REST_POSITION[0]),
                     "y": float(C.REST_POSITION[1]),
                     "z": float(C.REST_POSITION[2]),
-                    "pitch": float(getattr(C, "REST_PITCH_ANGLE", 0.0)),
+                    "pitch": float(C.REST_PITCH_ANGLE),
                 })
 
             # Per-connection receive buffer

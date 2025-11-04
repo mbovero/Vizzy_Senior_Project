@@ -67,7 +67,7 @@ class ScanWorker(threading.Thread):
         self.allowed_class_ids = list(allowed_class_ids) if allowed_class_ids is not None else None
         
         # Image capture directory for LLM processing
-        self.image_dir = getattr(C, "IMAGE_DIR", "captured_images")
+        self.image_dir = C.IMAGE_DIR
         import os
         os.makedirs(self.image_dir, exist_ok=True)
 
@@ -234,7 +234,7 @@ class ScanWorker(threading.Thread):
                 if not ok:
                     print("[ScanWorker] Warning: MOVE_TO baseline timed out or failed; continuing after settle")
 
-                time.sleep(float(getattr(C, "MOVE_SETTLE_S", 0.3)))
+                time.sleep(C.MOVE_SETTLE_S)
 
                 # Per-pose repeat: try to find and center multiple distinct classes
                 attempts = 0
@@ -322,13 +322,12 @@ class ScanWorker(threading.Thread):
                             x=float(loc["x"]),
                             y=float(loc["y"]),
                             z=float(loc["z"]),
-                            pitch=pitch,
                             orientation=orientation_data,  # Add orientation data
                         )
                         
                         # Capture image and submit for LLM enrichment (non-blocking)
                         # Skip if SKIP_SEMANTIC_ENRICHMENT is enabled
-                        if not getattr(C, "SKIP_SEMANTIC_ENRICHMENT", False):
+                        if not C.SKIP_SEMANTIC_ENRICHMENT:
                             # The LLM worker will process this asynchronously and update semantics
                             image_path = self._capture_and_enrich(object_id)
                             

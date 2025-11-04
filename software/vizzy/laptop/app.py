@@ -108,8 +108,8 @@ class StateManager:
         print("[StateManager] Initializing LLM worker manager...")
         self.llm_worker = WorkerManager(
             memory=self.memory,
-            max_workers=getattr(C, "LLM_WORKERS", 5),
-            model=getattr(C, "IMAGE_PROCESS_MODEL", "gpt-5"),
+            max_workers=C.LLM_WORKERS,
+            model=C.IMAGE_PROCESS_MODEL,
         )
         print("[StateManager] Memory and LLM components initialized")
 
@@ -125,7 +125,7 @@ class StateManager:
         (Spawns the worker, wires in Motion, and flips scan_active.)
         """
         # Don't start scan worker if we're skipping scan cycle
-        if getattr(C, "SKIP_TO_TASK_SCHEDULER", False) or getattr(C, "SKIP_SCAN_CYCLE", False):
+        if C.SKIP_TO_TASK_SCHEDULER or C.SKIP_SCAN_CYCLE:
             print("[StateManager] Scan cycle skipped, scan worker will not run")
             return
             
@@ -335,8 +335,8 @@ class StateManager:
         print("[StateManager] Main loop started, entering IDLE state")
         
         # Check if SKIP_TO_TASK_SCHEDULER or SKIP_SCAN_CYCLE is enabled
-        if getattr(C, "SKIP_TO_TASK_SCHEDULER", False) or getattr(C, "SKIP_SCAN_CYCLE", False):
-            skip_mode = "TASK_SCHEDULER_ONLY" if getattr(C, "SKIP_TO_TASK_SCHEDULER", False) else "SKIP_SCAN"
+        if C.SKIP_TO_TASK_SCHEDULER or C.SKIP_SCAN_CYCLE:
+            skip_mode = "TASK_SCHEDULER_ONLY" if C.SKIP_TO_TASK_SCHEDULER else "SKIP_SCAN"
             print("="*70)
             print(f"[StateManager] {skip_mode} MODE")
             print("[StateManager] Bypassing scan cycle - using existing object memory")

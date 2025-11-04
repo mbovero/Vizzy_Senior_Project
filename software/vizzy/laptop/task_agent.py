@@ -42,7 +42,7 @@ class TaskAgent(threading.Thread):
 
         # Task scheduler: uses GPT-5 to convert user requests into structured task lists
         self._scheduler = TaskScheduler(
-            model=getattr(C, "TASK_SCHEDULER_MODEL", "gpt-5")
+            model=C.TASK_SCHEDULER_MODEL
         )
 
         # Motion facade: create if not already provided by StateManager
@@ -110,13 +110,13 @@ class TaskAgent(threading.Thread):
                     time.sleep(0.05)
             
             # Wait for LLM enrichment to complete (skip if directly accessing task scheduler)
-            skip_scan = getattr(C, "SKIP_TO_TASK_SCHEDULER", False)
+            skip_scan = C.SKIP_TO_TASK_SCHEDULER
             if not skip_scan and self.state_mgr.llm_worker:
                 pending = self.state_mgr.llm_worker.get_pending_count()
                 if pending > 0:
                     print(f"[TaskAgent] Waiting for {pending} LLM enrichment task(s) to complete...")
                     # Wait up to 30 seconds for enrichment (configurable)
-                    timeout = getattr(C, "LLM_COMPLETION_TIMEOUT", 30.0)
+                    timeout = C.LLM_COMPLETION_TIMEOUT
                     completed = self.state_mgr.llm_worker.wait_for_completion(timeout=timeout)
                     if not completed:
                         print("[TaskAgent] Warning: Some enrichment tasks still pending, proceeding anyway...")
@@ -181,14 +181,14 @@ class TaskAgent(threading.Thread):
 
     def _reset_idle_timer(self) -> None:
         """After handling a query, restart the IDLE timeout so SEARCH can auto-trigger later."""
-        self.state_mgr.idle_deadline = time.time() + getattr(C, "IDLE_TIMEOUT_S", 45.0)
+        self.state_mgr.idle_deadline = time.time() + C.IDLE_TIMEOUT_S
     
     def _save_plan_to_file(self, user_query: str, plan: list) -> None:
         """Save the task scheduler output to a file for verification."""
         import json
         from datetime import datetime
         
-        output_file = getattr(C, "TASK_SCHEDULER_OUTPUT_FILE", "task_scheduler_output.json")
+        output_file = C.TASK_SCHEDULER_OUTPUT_FILE
         
         output_data = {
             "timestamp": datetime.now().isoformat(),

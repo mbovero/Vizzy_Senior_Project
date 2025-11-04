@@ -18,7 +18,7 @@ class ObjectMemory:
           "x": float,                    # X coordinate (mm, IK target)
           "y": float,                    # Y coordinate (mm, IK target)
           "z": float,                    # Z coordinate (mm, IK target)
-          "pitch": float,                # Wrist pitch (degrees)
+          "orientation": {...},          # Grasp orientation data (grasp_yaw)
           "semantics": {...},            # LLM-enriched semantic data
           "last_seen_ts": float,         # UNIX timestamp
           "updated_this_session": int,   # 1 if updated in current session, else 0
@@ -142,7 +142,6 @@ class ObjectMemory:
         x: float,
         y: float,
         z: float,
-        pitch: float,
         image_path: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> str:
@@ -154,7 +153,6 @@ class ObjectMemory:
             cls_id: YOLO class ID
             cls_name: Human-readable name
             x, y, z: Spatial coordinates (mm)
-            pitch: Wrist pitch (degrees)
         
         Returns:
             The unique object ID (e.g., "0xA1B2C3D4")
@@ -170,7 +168,6 @@ class ObjectMemory:
                 "x": float(x),
                 "y": float(y),
                 "z": float(z),
-                "pitch": float(pitch),
                 "semantics": {},
                 "last_seen_ts": now,
                 "updated_this_session": 1,
@@ -199,7 +196,6 @@ class ObjectMemory:
         x: float,
         y: float,
         z: float,
-        pitch: float,
         image_path: Optional[str] = None,
         orientation: Optional[Dict[str, Any]] = None,
     ) -> str:
@@ -214,7 +210,6 @@ class ObjectMemory:
             x=x,
             y=y,
             z=z,
-            pitch=pitch,
             image_path=image_path,
             extra=extra if extra else None,
         )
