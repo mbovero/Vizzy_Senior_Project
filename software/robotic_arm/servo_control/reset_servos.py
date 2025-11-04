@@ -12,8 +12,8 @@ SERVO_MID = 17      # Claw (1300-1650 closed to open)
 SERVO_BTM = 27      # Wrist
 
 # Servo pulse width limits (µs)
-SERVO_MIN = 1250
-SERVO_MAX = 2250
+SERVO_MIN = 1000
+SERVO_MAX = 2500
 SERVO_CENTER = 1750
 
 # Sweep behavior
