@@ -19,7 +19,7 @@ SERVO_MIN    = 500
 SERVO_MAX    = 2500
 
 # Pitch center (original server behavior: pitch straight up)
-SERVO_PITCH_CENTER = 1750
+SERVO_PITCH_CENTER = 1755
 
 # Yaw PWM mapping (your exact endpoints)
 YAW_PWM_CENTER = 1730
@@ -50,8 +50,7 @@ IK_Z_MAX    = 0.4
 # ---- q2 linear scaling (map ±2.25 -> ±2.10, 0 -> 0) ----
 Q2_MAX_IN   = 2.25
 Q2_MAX_OUT  = 2.15
-Q2_SCALE    = (Q2_MAX_OUT / Q2_MAX_IN)  # 0.955... (use your previous value)
-# If you prefer the previous explicit 0.933333..., set it here.
+Q2_SCALE    = (Q2_MAX_OUT / Q2_MAX_IN)  # ~0.955...
 
 # ---- Comm/Heartbeat ----
 COMM_FAIL_THRESHOLD = 3
@@ -314,6 +313,72 @@ class ArmServer:
 
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
+        self._servo_task: asyncio.Task | None = None
+        self._pi_reconnect_backoff_s = 0.5
+
+    # ===== pigpio resilience =====
+    async def _ensure_pi(self):
+        """Ensure pigpio connection is alive; (re)connect if needed."""
+        if (self.pi is not None) and getattr(self.pi, "connected", False):
+            return
+        try:
+            if self.pi is not None and getattr(self.pi, "connected", False):
+                self.pi.stop()
+        except Exception:
+            pass
+
+        start = time.monotonic()
+        while True:
+            self.pi = pigpio.pi()
+            if getattr(self.pi, "connected", False):
+                # Re-apply current PWM to channels so state is consistent
+                for _, ch in self.servos.items():
+                    try:
+                        self.pi.set_servo_pulsewidth(ch["pin"], int(ch["current"]))
+                    except Exception:
+                        try: self.pi.stop()
+                        except Exception: pass
+                        self.pi = None
+                        await asyncio.sleep(self._pi_reconnect_backoff_s)
+                        continue
+                if self._pi_reconnect_backoff_s < 2.0:
+                    self._pi_reconnect_backoff_s *= 1.25
+                print("[rpi] pigpio reconnected.")
+                return
+            self.pi = None
+            await asyncio.sleep(self._pi_reconnect_backoff_s)
+            if (time.monotonic() - start) > 5.0:
+                print("[rpi] WARN: pigpio reconnect still pending...")
+                start = time.monotonic()
+
+    async def _safe_servo_write(self, name: str, pwm_us: int):
+        """Write with auto-reconnect protection."""
+        try:
+            await self._ensure_pi()
+            await self._servo_write_pwm(name, pwm_us)
+        except (AttributeError, pigpio.error, OSError) as e:
+            print(f"[rpi] pigpio write error ({name}): {e} → reconnecting...", file=sys.stderr)
+            try:
+                if self.pi is not None:
+                    self.pi.stop()
+            except Exception:
+                pass
+            self.pi = None
+            await self._ensure_pi()
+            await self._servo_write_pwm(name, pwm_us)
+
+    async def _cancel_servo_task(self):
+        """Cancel any in-flight tween task cleanly."""
+        if self._servo_task and not self._servo_task.done():
+            self._servo_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._servo_task
+        self._servo_task = None
+
+    async def _start_servo_tween(self, duration: float):
+        """Ensure only one tween task runs; start a new one for 'duration'."""
+        await self._cancel_servo_task()
+        self._servo_task = asyncio.create_task(self.servos_tween_multi(duration))
 
     # ===== SERVO I/O =====
     async def _servo_write_pwm(self, name: str, pwm_us: int):
@@ -332,11 +397,13 @@ class ArmServer:
 
     async def servos_tween_multi(self, duration: float):
         """Tween all servos linearly from their current to target PWM over 'duration' seconds."""
+        await self._ensure_pi()
+
         if duration <= 0.0:
             await asyncio.gather(
-                self._servo_write_pwm("pitch", self.servos["pitch"]["target"]),
-                self._servo_write_pwm("yaw",   self.servos["yaw"]["target"]),
-                self._servo_write_pwm("claw",  self.servos["claw"]["target"]),
+                self._safe_servo_write("pitch", self.servos["pitch"]["target"]),
+                self._safe_servo_write("yaw",   self.servos["yaw"]["target"]),
+                self._safe_servo_write("claw",  self.servos["claw"]["target"]),
             )
             return
 
@@ -352,16 +419,51 @@ class ArmServer:
                 break
             a = el / duration
             await asyncio.gather(
-                self._servo_write_pwm("pitch", int(round(lerp(s_pitch, t_pitch, a)))),
-                self._servo_write_pwm("yaw",   int(round(lerp(s_yaw,   t_yaw,   a)))),
-                self._servo_write_pwm("claw",  int(round(lerp(s_claw,  t_claw,  a)))),
+                self._safe_servo_write("pitch", int(round(lerp(s_pitch, t_pitch, a)))),
+                self._safe_servo_write("yaw",   int(round(lerp(s_yaw,   t_yaw,   a)))),
+                self._safe_servo_write("claw",  int(round(lerp(s_claw,  t_claw,  a)))),
             )
             await asyncio.sleep(dt)
 
         await asyncio.gather(
-            self._servo_write_pwm("pitch", t_pitch),
-            self._servo_write_pwm("yaw",   t_yaw),
-            self._servo_write_pwm("claw",  t_claw),
+            self._safe_servo_write("pitch", t_pitch),
+            self._safe_servo_write("yaw",   t_yaw),
+            self._safe_servo_write("claw",  t_claw),
+        )
+
+    async def servos_snap(self, *, pitch_pwm: int, yaw_pwm: int, claw_pwm: int):
+        """Set servos *once* without tweening. Best-effort; won't block the motor park."""
+        self.set_servo_targets(pitch_pwm=pitch_pwm, yaw_pwm=yaw_pwm, claw_pwm=claw_pwm)
+        with contextlib.suppress(Exception):
+            await self._cancel_servo_task()
+        try:
+            await self._ensure_pi()
+            await asyncio.gather(
+                self._safe_servo_write("pitch", self.servos["pitch"]["target"]),
+                self._safe_servo_write("yaw",   self.servos["yaw"]["target"]),
+                self._safe_servo_write("claw",  self.servos["claw"]["target"]),
+            )
+        except Exception as e:
+            print(f"[rpi] EMERG: servo snap failed (continuing cooldown): {e}", file=sys.stderr)
+
+    async def park_to_rest_emergency(self):
+        """Emergency cooldown: snap servos, then motor-only blocking park to REST."""
+        await self.servos_snap(
+            pitch_pwm=SERVO_PITCH_CENTER,
+            yaw_pwm=YAW_PWM_CENTER,
+            claw_pwm=CLAW_PWM_OPEN
+        )
+        finals = await move_group_sync_time([
+            (self.m1, self.c1, REST1),
+            (self.m2, self.c2, REST2),
+            (self.m3, self.c3, REST3),
+        ], on_duration=None)
+        self.c1, self.c2, self.c3 = finals
+        self.t1, self.t2, self.t3 = REST1, REST2, REST3
+        await asyncio.gather(
+            hold(self.m1, REST1),
+            hold(self.m2, REST2),
+            hold(self.m3, REST3),
         )
 
     # ===== MOTEUS & SYSTEM =====
@@ -389,13 +491,12 @@ class ArmServer:
         self.m2 = moteus.Controller(id=ID2, transport=router)
         self.m3 = moteus.Controller(id=ID3, transport=router)
 
-        # Park servos to your safe defaults
-        self.set_servo_targets(
+        # Park servos to your safe defaults (best-effort)
+        await self.servos_snap(
             pitch_pwm=SERVO_PITCH_CENTER,
             yaw_pwm=YAW_PWM_CENTER,
             claw_pwm=CLAW_PWM_OPEN
         )
-        await self.servos_tween_multi(DURATION_FLOOR_S)
         await asyncio.sleep(RECOVER_SLEEP_S)
         self._comm_failures = 0
         print("[rpi] COMM: recovery complete.")
@@ -417,11 +518,8 @@ class ArmServer:
                         (self.m3, self.c3, self.t3),
                     ]
 
-                    async def _servo_sync(duration: float):
-                        await self.servos_tween_multi(duration)
-
                     try:
-                        finals = await move_group_sync_time(group, on_duration=_servo_sync)
+                        finals = await move_group_sync_time(group, on_duration=self._start_servo_tween)
                         self.c1, self.c2, self.c3 = finals
                         self._comm_failures = 0
                     except Exception as e:
@@ -445,29 +543,15 @@ class ArmServer:
                             await self._recover_bus()
                     next_temp = now + 1.0
 
-                # Over-temp handling (park to REST + your servo defaults)
+                # Over-temp handling → EMERGENCY PARK (motor-only, servos snapped best-effort)
                 if (self.last_temp2 is not None) and (not self.cooling2) and (self.last_temp2 > TEMP_LIMIT):
-                    print(f"[rpi] WARN: m2 > {TEMP_LIMIT:.1f} °C → REST & cooldown2.")
-                    self.set_servo_targets(SERVO_PITCH_CENTER, YAW_PWM_CENTER, CLAW_PWM_OPEN)
-                    finals = await move_group_sync_time([
-                        (self.m1, self.c1, REST1),
-                        (self.m2, self.c2, REST2),
-                        (self.m3, self.c3, REST3),
-                    ], on_duration=lambda d: self.servos_tween_multi(d))
-                    self.c1, self.c2, self.c3 = finals
-                    self.t1, self.t2, self.t3 = REST1, REST2, REST3
+                    print(f"[rpi] WARN: m2 > {TEMP_LIMIT:.1f} °C → EMERGENCY PARK (motor-only).")
+                    await self.park_to_rest_emergency()
                     self.cooling2 = True
 
                 if (self.last_temp3 is not None) and (not self.cooling3) and (self.last_temp3 > TEMP_LIMIT):
-                    print(f"[rpi] WARN: m3 > {TEMP_LIMIT:.1f} °C → REST & cooldown3.")
-                    self.set_servo_targets(SERVO_PITCH_CENTER, YAW_PWM_CENTER, CLAW_PWM_OPEN)
-                    finals = await move_group_sync_time([
-                        (self.m1, self.c1, REST1),
-                        (self.m2, self.c2, REST2),
-                        (self.m3, self.c3, REST3),
-                    ], on_duration=lambda d: self.servos_tween_multi(d))
-                    self.c1, self.c2, self.c3 = finals
-                    self.t1, self.t2, self.t3 = REST1, REST2, REST3
+                    print(f"[rpi] WARN: m3 > {TEMP_LIMIT:.1f} °C → EMERGENCY PARK (motor-only).")
+                    await self.park_to_rest_emergency()
                     self.cooling3 = True
 
                 if self.cooling2 and (self.last_temp2 is not None) and (self.last_temp2 <= COOL_RESUME_TEMP):
@@ -483,6 +567,7 @@ class ArmServer:
             with contextlib.suppress(Exception):
                 await asyncio.gather(self.m1.set_stop(), self.m2.set_stop(), self.m3.set_stop())
             try:
+                await self._cancel_servo_task()
                 if self.pi is not None and getattr(self.pi, "connected", False):
                     for ch in self.servos.values():
                         self.pi.set_servo_pulsewidth(ch["pin"], 0)
@@ -564,7 +649,7 @@ class ArmServer:
                         async with self._lock:
                             self.t1, self.t2, self.t3 = REST1, REST2, REST3
                             # pitch straight up, yaw centered, claw open
-                            self.set_servo_targets(
+                            await self.servos_snap(
                                 pitch_pwm=SERVO_PITCH_CENTER,
                                 yaw_pwm=YAW_PWM_CENTER,
                                 claw_pwm=CLAW_PWM_OPEN
@@ -650,6 +735,8 @@ class ArmServer:
         ctrl_task.cancel(); hb_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await ctrl_task; await hb_task
+        with contextlib.suppress(Exception):
+            await self._cancel_servo_task()
 
 # ---- wiggle helper ----
 async def wiggle(ctrl: moteus.Controller, center: float, start_pos: float) -> float:
