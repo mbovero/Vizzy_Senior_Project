@@ -3,7 +3,7 @@
     Vizzy: Enhancing Robotic Manipulation with Vision-Enabled Large Language Models
   </h1>
 
-  <div style="font-size:14px;color:#6a737d;margin-bottom:10px;">
+  <div style="font-size:14px;color:#6a737d;margin-bottom:100px;">
     University of Utah • Electrical & Computer Engineering Capstone
   </div>
 
