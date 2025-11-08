@@ -5,7 +5,7 @@ import sys
 
 def main():
     p = argparse.ArgumentParser(description="Simple USB camera viewer (OpenCV) with scaling and upside-down flip.")
-    p.add_argument("--device", "-d", type=int, default=0, help="Camera index (/dev/videoN). Default: 0")
+    p.add_argument("--device", "-d", type=int, default=4, help="Camera index (/dev/videoN). Default: 0")
     p.add_argument("--width",  "-W", type=int, default=1280, help="Requested frame width")
     p.add_argument("--height", "-H", type=int, default=720,  help="Requested frame height")
     p.add_argument("--mjpg", action="store_true", help="Request MJPG to improve FPS on many USB cams")
