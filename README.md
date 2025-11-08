@@ -10,28 +10,17 @@
     <strong>Authors:</strong> Burke Dambly · Miles Bovero · Lawrence Ponce · Brian Stites · Jesse Jenkins
   </div>
 
-  <!-- badges (optional) -->
-  <div style="margin-top:12px;">
-    <a href="#" style="text-decoration:none;">
-      <img alt="Status: Demo Day" 
-           src="https://img.shields.io/badge/status-Demo%20Day-2563EB.svg" />
-    </a>
-    <a href="#" style="text-decoration:none;">
-      <img alt="License" 
-           src="https://img.shields.io/badge/license-MIT-0ea5e9.svg" />
-    </a>
-    <a href="#" style="text-decoration:none;">
-      <img alt="Made with Python" 
-           src="https://img.shields.io/badge/made%20with-Python-22c55e.svg" />
-    </a>
+  <!-- tech badges -->
+  <div style="margin-top:14px;">
+    <img alt="Moteus" src="https://img.shields.io/badge/Made%20with-Moteus-1e40af.svg" />
+    <img alt="Python" src="https://img.shields.io/badge/Python-3776AB.svg?logo=python&logoColor=white" />
+    <img alt="YOLO" src="https://img.shields.io/badge/YOLO-v11-ef4444.svg?logo=yolo&logoColor=white" />
+    <img alt="Raspberry Pi" src="https://img.shields.io/badge/Raspberry%20Pi-4-c51a4a.svg?logo=raspberrypi&logoColor=white" />
   </div>
 
-  <!-- subtle divider -->
   <hr style="margin:18px 0 0;border:0;height:1px;background:linear-gradient(90deg,rgba(0,0,0,0),rgba(140,140,140,.35),rgba(0,0,0,0));" />
 </div>
 
-
----
 
 ## Overview
 
