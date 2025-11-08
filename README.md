@@ -3,7 +3,7 @@
     Vizzy: Enhancing Robotic Manipulation with Vision-Enabled Large Language Models
   </h1>
 
-  <div style="font-size:14px;color:#6a737d;margin-bottom:100px;">
+  <div style="font-size:14px;color:#6a737d;margin-bottom:10px;">
     University of Utah • Electrical & Computer Engineering Capstone
   </div>
 
@@ -136,19 +136,6 @@
 
 ---
 
-## Evaluation Summary
-
-Vizzy was designed to validate the feasibility of LLM-assisted robotic control in constrained environments.  
-Testing focused on three major domains:
-
-1. **Mechanical Performance** — Verified torque capacity of mj5208 BLDC motors with custom 9:1 PETG-CF planetary gearboxes.  
-2. **Perception and Sensing** — Achieved real-time segmentation (~5 ms inference) using YOLO11 with 16MP USB camera and VL53L1X ToF sensor.  
-3. **Software Integration** — Implemented JSONL-based communication between vision (laptop) and control (Raspberry Pi) and validated natural-language task scheduling via OpenAI API.
-
-![Placeholder: Vizzy Testing Setup](images/placeholder_testing.png)  
-*Figure 7 — Prototype testing environment with motor torque and vision pipeline validation.*
-
----
 
 ## Acknowledgements
 
