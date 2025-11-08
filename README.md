@@ -62,10 +62,10 @@
 
 - **Motors:** MJBOTS mj5208 BLDC outrunner motors  
 - **Motor Controllers:** Moteus r.11 (Field-Oriented Control)  
-- **Microcontrollers:** Raspberry Pi 4B and Raspberry
-- **Sensors:** 16MP USB camera (YOLO11 vision model) and VL53L1X time-of-flight sensor  
+- **Microcontrollers:** Raspberry Pi 4B
+- **Sensors:** 16MP USB camera and VL53L1X time-of-flight sensor  
 - **Communication:** CAN-FD network using the Moteus protocol  
-- **Structure:** CNC-milled T2-grade aluminum and PETG-CF 3D-printed components  
+- **Structure:** CNC-milled T2-grade aluminum and PETG-CF 3D-printed components   
 - **Power Supply:** Mean Well 24V .625A DC Power Supply 
 
 <!-- 3x2 image grid for README -->
@@ -112,11 +112,10 @@
 <h3 id="software">Software</h3>
 
 <ul style="margin-top:6px;margin-bottom:12px;">
-  <li><strong>Vision Stack:</strong> YOLO11 segmentation for object recognition and localization</li>
+  <li><strong>Vision Stack:</strong> YOLO11 model for object classification and mask segmentation</li>
   <li><strong>Semantic Layer:</strong> LLM-based contextual enrichment of detected objects</li>
-  <li><strong>Control Framework:</strong> Python API for inverse kinematics and motion planning</li>
-  <li><strong>GUI:</strong> Tkinter-based interface for manual coordinate input and visualization</li>
-  <li><strong>Embedded Firmware:</strong> FreeRTOS task scheduling for low-level actuation and safety</li>
+  <li><strong>Task Scheduler:</strong> LLM-based task composition based on user request</li>
+  <li><strong>Control Framework:</strong> Python API for inverse kinematics and task execution</li>
 </ul>
 
 <p align="center" style="margin-top:10px;">
@@ -128,21 +127,6 @@
 <p align="center" style="margin-top:4px;">
   <em>Figure 3 — Software architecture illustrating perception, reasoning, and control flow.</em>
 </p>
-
-
----
-
-## Key Features
-
-- Five-axis robotic manipulation with inverse kinematics control  
-- Real-time visual perception using YOLO11 segmentation  
-- Natural-language task execution via OpenAI’s API  
-- Modular structure with customizable end-effectors  
-- Safety-limited motion and emergency fault handling  
-- Open-source software stack for reproducibility and community use  
-
-![Placeholder: Vizzy Key Features Collage](images/placeholder_features.png)  
-*Figure 4 — Visualization of major system capabilities.*
 
 ---
 <h2 id="about-the-authors" align="center">About the Authors</h2>
