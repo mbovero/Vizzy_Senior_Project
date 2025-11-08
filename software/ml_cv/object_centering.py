@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Object Centering Script
-Prototype script that captures a frame from camera, detects objects using YOLO segmentation,
-calculates object center coordinates, and transforms them from camera frame coordinates to
-robotic arm plane coordinates.
+Object Centering Script - Live Feed
+Shows live video feed with real-time x and y movement needed to center object.
+Displays how far the arm needs to move in x and y to make the camera y-axis perpendicular to the object.
 """
 
 from __future__ import annotations
@@ -24,19 +23,18 @@ from ultralytics import YOLO
 # Camera configuration
 CAMERA_INDEX = 4
 
-# Arm claw coordinates in mm
-X_A = 370.0  # mm
-Y_A = -24.0    # mm
-
-# Add a calibration factor
-SCALE_FACTOR_X = 1.0  # Tune this
-SCALE_FACTOR_Y = 1.0  # Tune this
-
-# Camera offset: camera is 35mm behind the claw position along the radius line
-CAMERA_OFFSET_MM = -34.5  # mm
-
 # Pixel to mm conversion factor (adjustable parameter)
 PIXEL_TO_MM = 1.0 / 2.90  # mm per pixel
+
+# Working distance for object detection (mm)
+# This is the approximate distance from camera to objects in the workspace
+# Used to calculate movement needed - adjust based on your setup
+WORKING_DISTANCE_MM = 600.0  # mm (typical working distance for arm operations)
+
+# Movement scale factor (adjustable parameter)
+# Multiplies the calculated movement to account for camera distance/perspective effects
+# Increase this value if movements are too small, decrease if movements are too large
+MOVEMENT_SCALE_FACTOR = 1.7 # Start with 1.0 and adjust as needed
 
 # YOLO model path (relative to project root)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -81,13 +79,59 @@ def instance_center(box_xyxy, mask_tensor, frame_w: int, frame_h: int) -> Tuple[
     return int((x1 + x2) / 2), int((y1 + y2) / 2)
 
 
+def calculate_movement_needed(
+    obj_offset_x_camera_mm: float,
+    obj_offset_y_camera_mm: float,
+    working_distance_mm: float,
+    scale_factor: float = 1.0
+) -> Tuple[float, float]:
+    """
+    Calculate the movement needed in x and y to center the object.
+    
+    Camera orientation:
+    - Camera y-axis (top) aligns with global x-axis (radial direction)
+    - Camera x-axis (right) points in negative global y direction (tangential)
+    - To center object: camera x offset should be zero (object centered horizontally)
+    
+    Movement calculation (axes flipped):
+    - Camera x offset (left/right) → x movement
+    - Camera y offset (top/bottom) → y movement (with sign flip)
+    
+    Args:
+        obj_offset_x_camera_mm: Object offset in camera x direction (left/right) in mm
+        obj_offset_y_camera_mm: Object offset in camera y direction (top/bottom) in mm
+        working_distance_mm: Working distance from camera to objects (mm) - not directly used but kept for future use
+        scale_factor: Scale factor to multiply movement values (default 1.0)
+    
+    Returns:
+        Tuple of (movement_x_mm, movement_y_mm)
+        - movement_x_mm: Movement needed in global x direction (scaled)
+        - movement_y_mm: Movement needed in global y direction (scaled)
+    """
+    # Swapped: Camera y offset maps to x movement, Camera x offset maps to y movement
+    # Camera y offset (top/bottom) → x movement
+    # Camera x offset (left/right) → y movement
+    movement_x_mm = obj_offset_y_camera_mm
+    
+    # Camera x offset → y movement
+    movement_y_mm = -obj_offset_x_camera_mm
+    
+    # Apply scale factor to both movements
+    movement_x_mm *= scale_factor
+    movement_y_mm *= scale_factor
+    
+    return movement_x_mm, movement_y_mm
+
+
 # ============================================================================
 # MAIN SCRIPT
 # ============================================================================
 
 def main():
     print("=" * 80)
-    print("Object Centering Script")
+    print("Object Centering - Live Feed")
+    print("=" * 80)
+    print("Press 'q' to quit")
     print("=" * 80)
     
     # Load YOLO model
@@ -122,288 +166,186 @@ def main():
     for _ in range(5):
         cap.grab()
     
-    # Capture frame
-    print(f"    Capturing frame...")
-    ok, frame = cap.read()
-    if not ok or frame is None:
+    print(f"    Starting live feed...")
+    
+    # Get frame dimensions
+    ok, test_frame = cap.read()
+    if not ok or test_frame is None:
         print(f"    ERROR: Failed to read frame from camera")
         cap.release()
         return
     
-    frame_h, frame_w = frame.shape[:2]
-    print(f"    Frame captured: {frame_w}x{frame_h} pixels")
-    
-    # Calculate frame center (corrected orientation)
+    frame_h, frame_w = test_frame.shape[:2]
     center_x = frame_h // 2  # half of image height
     center_y = frame_w // 2  # half of image width
+    
+    print(f"    Frame size: {frame_w}x{frame_h} pixels")
     print(f"    Frame center: ({center_x}, {center_y})")
     
-    # Run YOLO inference
-    print(f"\n[3] Running YOLO inference...")
-    results = model(frame, verbose=False)
+    # Main loop
+    frame_count = 0
+    fps_start_time = time.time()
     
-    # Process detections
-    print(f"    Processing detections...")
-    best_detection = None
-    best_conf = 0.0
-    best_area = 0
-    
-    for result in results:
-        if len(result.boxes) == 0:
-            continue
+    while True:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            print("    WARNING: Failed to read frame")
+            break
         
-        masks = getattr(result, "masks", None)
-        mask_list = list(masks.data) if (masks is not None and masks.data is not None) else None
+        frame_count += 1
         
-        n = len(result.boxes)
-        for i in range(n):
-            box_xyxy = result.boxes.xyxy[i].detach().cpu().numpy()
-            conf = float(result.boxes.conf[i].item())
-            cls_id = int(result.boxes.cls[i].item())
-            x1, y1, x2, y2 = map(int, box_xyxy)
-            area = max(0, (x2 - x1)) * max(0, (y2 - y1))
+        # Run YOLO inference
+        results = model(frame, verbose=False)
+        
+        # Process detections
+        best_detection = None
+        best_conf = 0.0
+        best_area = 0
+        
+        for result in results:
+            if len(result.boxes) == 0:
+                continue
             
-            mask_tensor = mask_list[i] if mask_list is not None and i < len(mask_list) else None
-            cx, cy = instance_center(box_xyxy, mask_tensor, frame_w, frame_h)
+            masks = getattr(result, "masks", None)
+            mask_list = list(masks.data) if (masks is not None and masks.data is not None) else None
             
-            # Object priority: highest confidence, break ties by larger area
-            if (conf > best_conf) or (conf == best_conf and area > best_area):
-                best_conf = conf
-                best_area = area
-                best_detection = {
-                    "cls_id": cls_id,
-                    "cls_name": model.names[cls_id] if hasattr(model, "names") else str(cls_id),
-                    "conf": conf,
-                    "area": area,
-                    "obj_x": cx,
-                    "obj_y": cy,
-                    "box_xyxy": box_xyxy,
-                    "mask_tensor": mask_tensor,
-                }
-    
-    if best_detection is None:
-        print(f"    WARNING: No detections found - will display frame without calculations")
-        cx = None
-        cy = None
-        obj_x = None
-        obj_y = None
-        cam_to_obj_x = None
-        cam_to_obj_y = None
-        x_c = None
-        y_c = None
-        xT = None
-        yT = None
-        x_cam = None
-        y_cam = None
-        x_arm = None
-        y_arm = None
-        theta_rad = None
-        theta_deg = None
-    else:
-        print(f"    Best detection: {best_detection['cls_name']} (conf={best_conf:.3f})")
+            n = len(result.boxes)
+            for i in range(n):
+                box_xyxy = result.boxes.xyxy[i].detach().cpu().numpy()
+                conf = float(result.boxes.conf[i].item())
+                cls_id = int(result.boxes.cls[i].item())
+                x1, y1, x2, y2 = map(int, box_xyxy)
+                area = max(0, (x2 - x1)) * max(0, (y2 - y1))
+                
+                mask_tensor = mask_list[i] if mask_list is not None and i < len(mask_list) else None
+                cx, cy = instance_center(box_xyxy, mask_tensor, frame_w, frame_h)
+                
+                # Object priority: highest confidence, break ties by larger area
+                if (conf > best_conf) or (conf == best_conf and area > best_area):
+                    best_conf = conf
+                    best_area = area
+                    best_detection = {
+                        "cls_id": cls_id,
+                        "cls_name": model.names[cls_id] if hasattr(model, "names") else str(cls_id),
+                        "conf": conf,
+                        "area": area,
+                        "obj_x": cx,
+                        "obj_y": cy,
+                        "box_xyxy": box_xyxy,
+                        "mask_tensor": mask_tensor,
+                    }
         
-        # Calculate camera-to-object offsets in pixels
-        # Due to camera orientation: camera x-axis maps to image rows (height), 
-        # camera y-axis maps to image columns (width)
-        cx = best_detection["obj_x"]  # column (x-coordinate in image space)
-        cy = best_detection["obj_y"]  # row (y-coordinate in image space)
-        print(f"    Object center (image pixels): ({cx}, {cy})")
+        # Create annotated frame
+        annotated = frame.copy()
         
-        obj_x = cy  # camera x = image row (due to orientation)
-        obj_y = cx  # camera y = image column (due to orientation)
-        print(f"    Object center (camera coords): ({obj_x}, {obj_y})")
-        cam_to_obj_x = obj_x - center_x
-        cam_to_obj_y = obj_y - center_y
+        # Draw YOLO annotations
+        for result in results:
+            try:
+                annotated = result.plot()
+            except Exception:
+                pass
         
-        print(f"\n[4] Camera frame coordinates:")
-        print(f"    cam_to_obj_x (pixels): {cam_to_obj_x}")
-        print(f"    cam_to_obj_y (pixels): {cam_to_obj_y}")
+        # Draw frame center (blue circle)
+        center_img_x = center_y  # column (x-coordinate in image)
+        center_img_y = center_x  # row (y-coordinate in image)
+        cv2.circle(annotated, (center_img_x, center_img_y), 8, (255, 0, 0), -1)
+        cv2.circle(annotated, (center_img_x, center_img_y), 12, (255, 0, 0), 2)
         
-        # Convert to millimeters
-        x_c = cam_to_obj_x * PIXEL_TO_MM
-        y_c = cam_to_obj_y * PIXEL_TO_MM
-        print(f"    x_c (mm): {x_c:.3f}")
-        print(f"    y_c (mm): {y_c:.3f}")
-        
-        # Calculate rotation angle
-        print(f"\n[5] Coordinate transformation:")
-        print(f"    Arm claw position: ({X_A:.1f}, {Y_A:.1f}) mm")
-        
-        if abs(Y_A) < 1e-6:
-            # When Y_A = 0, planes are aligned (theta = 0)
-            theta_rad = 0.0
-            print(f"    NOTE: y_a is zero, setting theta = 0 (planes aligned)")
+        # Calculate and display movement needed
+        if best_detection is not None:
+            cx = best_detection["obj_x"]  # column
+            cy = best_detection["obj_y"]  # row
+            
+            # Calculate offsets in camera coordinate system
+            cam_to_obj_x_camera = cx - center_y  # column offset (camera x direction, left/right)
+            cam_to_obj_y_camera = cy - center_x  # row offset (camera y direction, top/bottom)
+            
+            # Convert to millimeters
+            obj_offset_x_camera_mm = cam_to_obj_x_camera * PIXEL_TO_MM
+            obj_offset_y_camera_mm = cam_to_obj_y_camera * PIXEL_TO_MM
+            
+            # Calculate movement needed
+            movement_x_mm, movement_y_mm = calculate_movement_needed(
+                obj_offset_x_camera_mm=obj_offset_x_camera_mm,
+                obj_offset_y_camera_mm=obj_offset_y_camera_mm,
+                working_distance_mm=WORKING_DISTANCE_MM,
+                scale_factor=MOVEMENT_SCALE_FACTOR
+            )
+            
+            # Draw object center (red circle)
+            obj_img_x = cx
+            obj_img_y = cy
+            cv2.circle(annotated, (obj_img_x, obj_img_y), 8, (0, 0, 255), -1)
+            cv2.circle(annotated, (obj_img_x, obj_img_y), 12, (0, 0, 255), 2)
+            
+            # Draw line connecting centers
+            cv2.line(annotated, (obj_img_x, obj_img_y), (center_img_x, center_img_y), (0, 255, 0), 2)
         else:
-            theta_rad = math.atan(X_A / Y_A)
+            movement_x_mm = 0.0
+            movement_y_mm = 0.0
+            obj_offset_x_camera_mm = 0.0
+            obj_offset_y_camera_mm = 0.0
         
-        theta_deg = math.degrees(theta_rad)
-        print(f"    Theta (rotation angle): {theta_rad:.4f} rad ({theta_deg:.2f} deg)")
+        # Overlay text with movement information
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.7
+        font_thickness = 2
+        line_height = 30
+        y_offset = 40
+        color = (255, 255, 255)
+        bg_color = (0, 0, 0)
         
-        # Apply rotation matrix transformation
-        c = math.cos(theta_rad)
-        s = math.sin(theta_rad)
-        xT = (c * x_c - s * y_c) * SCALE_FACTOR_X
-        yT = (s * x_c + c * y_c) * SCALE_FACTOR_Y
-        
-        # Sign correction based on testing:
-        # - When Y_A < 0: signs are correct, no flip needed
-        # - When Y_A > 0: both xT and yT need to be flipped
-        # - When Y_A = 0: only yT needs to be flipped
-        if Y_A > 0:
-            xT = -xT
-            yT = -yT
-            print(f"    NOTE: Y_A > 0, flipped signs of xT and yT")
-        elif abs(Y_A) < 1e-6:  # Y_A == 0
-            yT = -yT
-            print(f"    NOTE: Y_A == 0, flipped sign of yT only")
-        
-        print(f"    xT (transformed offset): {xT:.3f} mm")
-        print(f"    yT (transformed offset): {yT:.3f} mm")
-        
-        # Calculate camera position in arm plane (camera is 35mm behind claw)
-        print(f"\n[6] Camera offset calculation:")
-        r_a = math.sqrt(X_A**2 + Y_A**2)
-        print(f"    Claw radius (r_a): {r_a:.3f} mm")
-        
-        if r_a < 1e-6:
-            print(f"    ERROR: Claw radius is zero, cannot calculate camera position")
-            cap.release()
-            return
-        
-        r_cam = r_a - CAMERA_OFFSET_MM
-        if r_cam < 0:
-            print(f"    WARNING: Camera offset ({CAMERA_OFFSET_MM} mm) is larger than claw radius ({r_a:.3f} mm)")
-            print(f"    Setting r_cam to 0")
-            r_cam = 0.0
-        
-        print(f"    Camera radius (r_cam): {r_cam:.3f} mm")
-        
-        # Calculate camera position (scaled along radius line)
-        scale = r_cam / r_a if r_a > 0 else 0.0
-        x_cam = X_A * scale
-        y_cam = Y_A * scale
-        print(f"    Camera position: ({x_cam:.3f}, {y_cam:.3f}) mm")
-        
-        # Calculate camera offset components along radius line
-        # This represents the offset from claw to camera in arm plane coordinates
-        if r_a > 1e-6:
-            offset_scale = CAMERA_OFFSET_MM / r_a
-            camera_offset_x = X_A * offset_scale
-            camera_offset_y = Y_A * offset_scale
-            print(f"    Camera offset from claw: ({camera_offset_x:.3f}, {camera_offset_y:.3f}) mm")
+        # Build text lines
+        if best_detection is None:
+            text_lines = [
+                "No detections found",
+                "",
+                "Waiting for object...",
+            ]
         else:
-            camera_offset_x = 0.0
-            camera_offset_y = 0.0
+            text_lines = [
+                f"Object: {best_detection['cls_name']} (conf={best_conf:.2f})",
+                "",
+                "MOVEMENT NEEDED:",
+                f"  X: {movement_x_mm:+.2f} mm",
+                f"  Y: {movement_y_mm:+.2f} mm",
+                "",
+                f"Scale: {MOVEMENT_SCALE_FACTOR:.2f}",
+            ]
         
-        # Final arm plane coordinates relative to claw position
-        # Object position = claw position + object offset from camera + camera offset
-        # xT and yT are the object offset from camera center in arm plane coordinates
-        # We add the camera offset to translate from camera reference frame to claw reference frame
-        x_arm = X_A + xT - camera_offset_x
-        y_arm = Y_A + yT + camera_offset_y
+        # Draw text with background
+        for i, line in enumerate(text_lines):
+            y_pos = y_offset + i * line_height
+            # Get text size for background rectangle
+            (text_w, text_h), baseline = cv2.getTextSize(line, font, font_scale, font_thickness)
+            # Draw background rectangle
+            cv2.rectangle(annotated, (10, y_pos - text_h - 5), (10 + text_w + 10, y_pos + 5), bg_color, -1)
+            # Draw text
+            cv2.putText(annotated, line, (10, y_pos), font, font_scale, color, font_thickness)
         
-        print(f"\n[7] Final arm plane coordinates (relative to claw):")
-        print(f"    x_arm: {x_arm:.3f} mm")
-        print(f"    y_arm: {y_arm:.3f} mm")
-    
-    # Create annotated frame for visualization
-    print(f"\n[8] Creating visualization...")
-    annotated = frame.copy()
-    
-    # Draw YOLO annotations
-    for result in results:
-        try:
-            annotated = result.plot()
-        except Exception:
-            pass
-    
-    # Draw frame center (blue circle) - center_x is row, center_y is column in image
-    center_img_x = center_y  # column (x-coordinate in image)
-    center_img_y = center_x  # row (y-coordinate in image)
-    cv2.circle(annotated, (center_img_x, center_img_y), 8, (255, 0, 0), -1)
-    cv2.circle(annotated, (center_img_x, center_img_y), 12, (255, 0, 0), 2)
-    
-    # Draw object center and line only if detection exists
-    if best_detection is not None and cx is not None and cy is not None:
-        # Draw object center (red circle) - use image coordinates (cx, cy)
-        obj_img_x = cx  # column (x-coordinate in image)
-        obj_img_y = cy  # row (y-coordinate in image)
-        cv2.circle(annotated, (obj_img_x, obj_img_y), 8, (0, 0, 255), -1)
-        cv2.circle(annotated, (obj_img_x, obj_img_y), 12, (0, 0, 255), 2)
+        # Calculate and display FPS
+        if frame_count % 30 == 0:
+            fps_elapsed = time.time() - fps_start_time
+            fps = 30.0 / fps_elapsed if fps_elapsed > 0 else 0
+            fps_start_time = time.time()
+            fps_text = f"FPS: {fps:.1f}"
+            (fps_w, fps_h), _ = cv2.getTextSize(fps_text, font, 0.5, 1)
+            cv2.rectangle(annotated, (frame_w - fps_w - 20, 10), (frame_w - 10, 10 + fps_h + 10), bg_color, -1)
+            cv2.putText(annotated, fps_text, (frame_w - fps_w - 15, 10 + fps_h + 5), font, 0.5, color, 1)
         
-        # Draw line connecting centers
-        cv2.line(annotated, (obj_img_x, obj_img_y), (center_img_x, center_img_y), (0, 255, 0), 2)
-    
-    # Overlay text with calculations
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.5
-    font_thickness = 1
-    line_height = 20
-    y_offset = 30
-    color = (255, 255, 255)
-    bg_color = (0, 0, 0)
-    
-    # Build text lines based on whether detection exists
-    if best_detection is None:
-        text_lines = [
-            f"No detections found",
-            f"",
-            f"Camera Frame Center:",
-            f"  center_x: {center_x}",
-            f"  center_y: {center_y}",
-            f"",
-            f"Arm Claw Position:",
-            f"  X_A: {X_A:.1f} mm",
-            f"  Y_A: {Y_A:.1f} mm",
-        ]
-    else:
-        text_lines = [
-            f"Object: {best_detection['cls_name']} (conf={best_conf:.3f})",
-            f"",
-            f"Camera Frame (pixels):",
-            f"  cam_to_obj_x: {cam_to_obj_x:.1f}",
-            f"  cam_to_obj_y: {cam_to_obj_y:.1f}",
-            f"",
-            f"Camera Frame (mm):",
-            f"  x_c: {x_c:.3f} mm",
-            f"  y_c: {y_c:.3f} mm",
-            f"",
-            f"Transformation:",
-            f"  theta: {theta_deg:.2f} deg",
-            f"  xT: {xT:.3f} mm",
-            f"  yT: {yT:.3f} mm",
-            f"",
-            f"Camera Position:",
-            f"  x_cam: {x_cam:.3f} mm",
-            f"  y_cam: {y_cam:.3f} mm",
-            f"",
-            f"Final Arm Coordinates:",
-            f"  x_arm: {x_arm:.3f} mm",
-            f"  y_arm: {y_arm:.3f} mm",
-        ]
-    
-    # Draw text with background
-    for i, line in enumerate(text_lines):
-        y_pos = y_offset + i * line_height
-        # Get text size for background rectangle
-        (text_w, text_h), baseline = cv2.getTextSize(line, font, font_scale, font_thickness)
-        # Draw background rectangle
-        cv2.rectangle(annotated, (10, y_pos - text_h - 5), (10 + text_w + 5, y_pos + 5), bg_color, -1)
-        # Draw text
-        cv2.putText(annotated, line, (10, y_pos), font, font_scale, color, font_thickness)
-    
-    # Display frame
-    print(f"    Displaying frame (press any key to close)...")
-    cv2.imshow("Object Centering", annotated)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+        # Display frame
+        cv2.imshow("Object Centering - Live Feed (Press 'q' to quit)", annotated)
+        
+        # Check for quit
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
     
     # Cleanup
     cap.release()
-    print(f"\n[9] Cleanup complete")
+    cv2.destroyAllWindows()
+    print(f"\n[3] Cleanup complete")
     print("=" * 80)
 
 
 if __name__ == "__main__":
     main()
-
