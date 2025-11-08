@@ -146,13 +146,13 @@
     </td>
     <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
       <strong>Miles Bovero</strong><br>
-      <em style="color:#57606a;">Mechanical Engineering</em><br>
-      Blah blah YOLO
+      <em style="color:#57606a;">Computer Engineering</em><br>
+      Designed subsystem interfaces, YOLO-based vision pipeline, object centering / location / orientation algorithms.
     </td>
     <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
       <strong>Lawrence Ponce</strong><br>
       <em style="color:#57606a;">Computer Engineering</em><br>
-      Developed semantic enrichment and LLM-based task scheduling, enabling natural lanuage driven task execution.
+      Developed semantic enrichment and LLM-based task scheduling, enabling natural language driven task execution.
     </td>
     
   </tr>
