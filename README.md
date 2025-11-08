@@ -117,19 +117,6 @@ Testing focused on three major domains:
 
 ---
 
-## Future Work
-
-- Integrate full depth-fusion perception for 3D object localization  
-- Implement instance-level memory and tracking across frames  
-- Develop more advanced grasping end-effectors  
-- Optimize latency and reliability of the LLM interface  
-- Add obstacle-aware path planning for dynamic environments  
-
-![Placeholder: Vizzy Future Concepts](images/placeholder_future.png)  
-*Figure 8 — Concept render for next iteration including multi-sensor fusion.*
-
----
-
 ## Acknowledgements
 
 This project was developed as part of the University of Utah Electrical and Computer Engineering Capstone Program.  
