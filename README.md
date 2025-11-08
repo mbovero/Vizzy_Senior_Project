@@ -1,7 +1,35 @@
-# Vizzy: Enhancing Robotic Manipulation with Vision-Enabled Large Language Models
+<div align="center" style="margin-top:12px;margin-bottom:10px;">
+  <h1 style="margin:0;font-size:40px;line-height:1.1;letter-spacing:.3px;">
+    Vizzy: Enhancing Robotic Manipulation with Vision-Enabled Large Language Models
+  </h1>
+  <div style="margin-top:8px;font-size:14px;color:#6a737d;">
+    University of Utah • Electrical & Computer Engineering Capstone
+  </div>
 
-**Authors:** Burke Dambly, Miles Bovero, Lawrence Ponce, Brian Stites, Jesse Jenkins  
-**Affiliation:** University of Utah — Electrical and Computer Engineering Capstone Project  
+  <div style="margin-top:12px;font-size:15px;">
+    <strong>Authors:</strong> Burke Dambly · Miles Bovero · Lawrence Ponce · Brian Stites · Jesse Jenkins
+  </div>
+
+  <!-- badges (optional) -->
+  <div style="margin-top:12px;">
+    <a href="#" style="text-decoration:none;">
+      <img alt="Status: Demo Day" 
+           src="https://img.shields.io/badge/status-Demo%20Day-2563EB.svg" />
+    </a>
+    <a href="#" style="text-decoration:none;">
+      <img alt="License" 
+           src="https://img.shields.io/badge/license-MIT-0ea5e9.svg" />
+    </a>
+    <a href="#" style="text-decoration:none;">
+      <img alt="Made with Python" 
+           src="https://img.shields.io/badge/made%20with-Python-22c55e.svg" />
+    </a>
+  </div>
+
+  <!-- subtle divider -->
+  <hr style="margin:18px 0 0;border:0;height:1px;background:linear-gradient(90deg,rgba(0,0,0,0),rgba(140,140,140,.35),rgba(0,0,0,0));" />
+</div>
+
 
 ---
 
