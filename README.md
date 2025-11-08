@@ -73,7 +73,7 @@ Unlike traditional robotic systems that require explicit programming and rigid m
   </tr>
 </table>
 
-<p align="center"><em>Figure 2 — Hardware overview showing mechanical, electrical, and sensing components.</em></p>
+<p align="center"><em>Figure 2 — Hardware overview showing mechanical components.</em></p>
 
 
 ### Software
