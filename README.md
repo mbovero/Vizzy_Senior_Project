@@ -27,21 +27,34 @@
 
 ## Overview
 
-Vizzy is a modular 5-axis robotic arm designed to demonstrate the integration of computer vision, inverse kinematics, and large language model (LLM) reasoning for adaptive robotic control.  
-The project explores how artificial intelligence can make robotic systems more flexible and user-friendly by combining visual perception and semantic reasoning into a single integrated robotic platform.
+<!-- Overview Section -->
+<div style="margin-top:24px; margin-bottom:24px; padding:18px 22px; border-left:4px solid #2563eb; background:rgba(37,99,235,0.05); border-radius:8px;">
+  <p style="margin:0 0 12px 0;">
+    <strong>Vizzy</strong> is a modular 5-axis robotic arm designed to demonstrate the integration of 
+    <strong>computer vision</strong>, <strong>inverse kinematics</strong>, and 
+    <strong>large language model (LLM)</strong> reasoning for adaptive robotic control.  
+    The project explores how artificial intelligence can make robotic systems more flexible and user-friendly 
+    by combining visual perception and semantic reasoning into a single integrated robotic platform.
+  </p>
 
-Unlike traditional robotic systems that require explicit programming and rigid motion paths, Vizzy enables high-level natural language interaction. Through vision-based object detection and LLM-driven task scheduling, the system can autonomously interpret and execute user requests.
+  <p style="margin:0;">
+    Unlike traditional robotic systems that require explicit programming and rigid motion paths, Vizzy enables 
+    high-level natural language interaction. Through vision-based object detection and LLM-driven task scheduling, 
+    the system can autonomously interpret and execute user requests.
+  </p>
+</div>
 
 <p align="center">
   <img src="docs/diagrams/VizzySystemDiagram.jpeg" 
        alt="Vizzy System Diagram" 
-       width="800" 
-       style="border:3px solid white; border-radius:6px;">
+       width="820" 
+       style="border:3px solid white; border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.15);">
 </p>
 
 <p align="center"><em>Figure 1 — Conceptual overview of Vizzy’s modular arm system.</em></p>
 
----
+<hr style="margin-top:28px; margin-bottom:0; border:0; height:1px; background:linear-gradient(90deg,rgba(0,0,0,0),rgba(140,140,140,.35),rgba(0,0,0,0));" />
+
 
 ## System Architecture
 
