@@ -109,16 +109,26 @@
 <p align="center"><em>Figure 2 — Hardware overview showing mechanical components.</em></p>
 
 
-### Software
+<h3 id="software">Software</h3>
 
-- **Vision Stack:** YOLO11 segmentation for object recognition and localization  
-- **Semantic Layer:** LLM-based contextual enrichment of detected objects  
-- **Control Framework:** Python API for inverse kinematics and motion planning  
-- **GUI:** Tkinter-based interface for manual coordinate input and visualization  
-- **Embedded Firmware:** FreeRTOS task scheduling for low-level actuation and safety  
+<ul style="margin-top:6px;margin-bottom:12px;">
+  <li><strong>Vision Stack:</strong> YOLO11 segmentation for object recognition and localization</li>
+  <li><strong>Semantic Layer:</strong> LLM-based contextual enrichment of detected objects</li>
+  <li><strong>Control Framework:</strong> Python API for inverse kinematics and motion planning</li>
+  <li><strong>GUI:</strong> Tkinter-based interface for manual coordinate input and visualization</li>
+  <li><strong>Embedded Firmware:</strong> FreeRTOS task scheduling for low-level actuation and safety</li>
+</ul>
 
-![Placeholder: Software Architecture Diagram](asf.jpeg)  
-*Figure 3 — Software architecture illustrating perception, reasoning, and control flow.*
+<p align="center" style="margin-top:10px;">
+  <img src="docs/diagrams/VizzySystemDiagram.jpeg" 
+       alt="Software Architecture Diagram" 
+       width="820" 
+       style="max-width:100%;border:3px solid white;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.10);">
+</p>
+<p align="center" style="margin-top:4px;">
+  <em>Figure 3 — Software architecture illustrating perception, reasoning, and control flow.</em>
+</p>
+
 
 ---
 
