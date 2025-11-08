@@ -152,7 +152,7 @@
     <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
       <strong>Lawrence Ponce</strong><br>
       <em style="color:#57606a;">Computer Engineering</em><br>
-      LM blah blah
+      Developed semantic enrichment and LLM-based task scheduling, enabling natural lanuage driven task execution.
     </td>
     
   </tr>
