@@ -45,7 +45,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/diagrams/VizzySystemDiagram.jpeg" 
+  <img src="docs/diagrams/High_Level_Diagram.png" 
        alt="Vizzy System Diagram" 
        width="820" 
        style="border:3px solid white; border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.15);">
