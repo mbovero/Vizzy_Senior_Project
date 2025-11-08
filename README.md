@@ -35,8 +35,46 @@ Unlike traditional robotic systems that require explicit programming and rigid m
 - **Structure:** CNC-milled T2-grade aluminum and PETG-CF 3D-printed components  
 - **Power Supply:** Mean Well 24V DC with emergency kill switch  
 
-![Placeholder: Vizzy Hardware Layout](images/placeholder_hardware.png)  
-*Figure 2 — Exploded view of mechanical components and electronics.*
+<!-- 3x2 image grid for README -->
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="docs/images/C1Gearbox.jpg" width="250" height="250"
+           style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Arm Assembly">
+      <div style="font-size:12px;color:#999;margin-top:6px;">2-Stage Planetary GearBox</div>
+    </td>
+    <td align="center">
+      <img src="docs/images/gripper.jpg" width="250" height="250"
+           style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Joint Close-Up">
+      <div style="font-size:12px;color:#999;margin-top:6px;">End Effector</div>
+    </td>
+    <td align="center">
+      <img src="docs/CAD/screenshots/UpperArm.jpg" width="250" height="250"
+           style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Moteus Controllers">
+      <div style="font-size:12px;color:#999;margin-top:6px;">Upper Arm Linkage</div>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/images/ArmOnDesk.jpg" width="250" height="250"
+           style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Electronics Hub">
+      <div style="font-size:12px;color:#999;margin-top:6px;">System with Power Box</div>
+    </td>
+    <td align="center">
+      <img src="docs/images/GripperHolding.jpg" width="250" height="250"
+           style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Camera Mount">
+      <div style="font-size:12px;color:#999;margin-top:6px;">Printed End Effector</div>
+    </td>
+    <td align="center">
+      <img src="docs/images/ArmExtended.jpeg" width="250" height="250"
+           style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Power System">
+      <div style="font-size:12px;color:#999;margin-top:6px;">Arm Extended with Aluminum</div>
+    </td>
+  </tr>
+</table>
+
+<p align="center"><em>Figure 2 — Hardware overview showing mechanical, electrical, and sensing components.</em></p>
+
 
 ### Software
 
