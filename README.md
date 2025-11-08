@@ -40,7 +40,7 @@ Unlike traditional robotic systems that require explicit programming and rigid m
 - **GUI:** Tkinter-based interface for manual coordinate input and visualization  
 - **Embedded Firmware:** FreeRTOS task scheduling for low-level actuation and safety  
 
-![Placeholder: Software Architecture Diagram](images/placeholder_software.png)  
+![Placeholder: Software Architecture Diagram](docs/diagrams/VizzySystemDiagram.jpeg)  
 *Figure 3 — Software architecture illustrating perception, reasoning, and control flow.*
 
 ---
