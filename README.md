@@ -10,8 +10,7 @@
 Vizzy is a modular 5-axis robotic arm designed to demonstrate the integration of computer vision, inverse kinematics, and large language model (LLM) reasoning for adaptive robotic control.  
 The project explores how artificial intelligence can make robotic systems more flexible and user-friendly by combining visual perception and semantic reasoning into a single integrated robotic platform.
 
-Unlike traditional robotic systems that require explicit programming and rigid motion paths, Vizzy enables high-level natural language interaction.  
-Through vision-based object detection and LLM-driven task scheduling, the system can autonomously interpret and execute user requests.
+Unlike traditional robotic systems that require explicit programming and rigid motion paths, Vizzy enables high-level natural language interaction. Through vision-based object detection and LLM-driven task scheduling, the system can autonomously interpret and execute user requests.
 
 ![Placeholder: Vizzy Overview Diagram](images/placeholder_overview.png)  
 *Figure 1 — Conceptual overview of Vizzy’s modular arm system.*
