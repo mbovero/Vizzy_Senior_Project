@@ -4,13 +4,13 @@
   </h1>
 
   <div style="font-size:14px;color:#6a737d;margin-bottom:10px;">
-    University of Utah • Electrical & Computer Engineering Capstone
+    University of Utah — Electrical & Computer Engineering Capstone
   </div>
 
   <div style="font-size:15px;margin-bottom:14px;">
-    <strong>Authors:</strong> Burke Dambly · Miles Bovero · Lawrence Ponce · Brian Stites · Jesse Jenkins
+    Authors: Burke Dambly · Miles Bovero · Lawrence Ponce · Brian Stites · Jesse Jenkins
   </div>
-
+  <br>
   <!-- tech badges -->
   <div style="margin-bottom:14px;">
     <img alt="Moteus" src="https://img.shields.io/badge/Made%20with-Moteus-1e40af.svg" />
@@ -135,6 +135,55 @@
 *Figure 4 — Visualization of major system capabilities.*
 
 ---
+<h2 id="about-the-authors" align="center">About the Authors</h2>
+
+<table style="width:100%;border-collapse:separate;border-spacing:18px 14px;">
+  <tr align="center" valign="top">
+    <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
+      <strong>Burke Dambly</strong><br>
+      <em style="color:#57606a;">Computer Engineering</em><br>
+      Focused on control systems, embedded firmware, and integration of Moteus-controlled BLDC actuators with high-level Python logic.
+    </td>
+    <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
+      <strong>Miles Bovero</strong><br>
+      <em style="color:#57606a;">Mechanical Engineering</em><br>
+      Blah blah YOLO
+    </td>
+    <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
+      <strong>Lawrence Ponce</strong><br>
+      <em style="color:#57606a;">Computer Engineering</em><br>
+      LM blah blah
+    </td>
+    
+  </tr>
+
+  <tr align="center" valign="top">
+    <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
+      <strong>Brian Stites</strong><br>
+      <em style="color:#57606a;">Electrical Engineering</em><br>
+      Designed and assembled the power distribution and safety systems for the robotic arm.
+    </td>
+    <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
+      <strong>Jesse Jenkins</strong><br>
+      <em style="color:#57606a;">Computer Science</em><br>
+      Contributed to the inverse kinematics (IK) framework for precise arm positioning and control.
+    </td>
+    <td style="width:33%;border:1px dashed #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
+      <strong>Neal Patwari</strong><br>
+      <em style="color:#57606a;">Faculty Advisor</em><br>
+      Provided guidance on system integration and research methodology throughout the Vizzy capstone project.
+    </td>
+  </tr>
+</table>
+
+
+
+
+
+
+
+
+
 
 
 ## Acknowledgements
