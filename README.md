@@ -29,11 +29,11 @@ Unlike traditional robotic systems that require explicit programming and rigid m
 
 - **Motors:** MJBOTS mj5208 BLDC outrunner motors  
 - **Motor Controllers:** Moteus r.11 (Field-Oriented Control)  
-- **Microcontrollers:** Raspberry Pi 4B and Raspberry Pi Pico W (FreeRTOS firmware)  
+- **Microcontrollers:** Raspberry Pi 4B and Raspberry
 - **Sensors:** 16MP USB camera (YOLO11 vision model) and VL53L1X time-of-flight sensor  
 - **Communication:** CAN-FD network using the Moteus protocol  
 - **Structure:** CNC-milled T2-grade aluminum and PETG-CF 3D-printed components  
-- **Power Supply:** Mean Well 24V DC with emergency kill switch  
+- **Power Supply:** Mean Well 24V .625A DC Power Supply 
 
 <!-- 3x2 image grid for README -->
 <table align="center">
