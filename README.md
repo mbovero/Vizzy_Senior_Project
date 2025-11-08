@@ -12,8 +12,14 @@ The project explores how artificial intelligence can make robotic systems more f
 
 Unlike traditional robotic systems that require explicit programming and rigid motion paths, Vizzy enables high-level natural language interaction. Through vision-based object detection and LLM-driven task scheduling, the system can autonomously interpret and execute user requests.
 
-![Placeholder: Vizzy Overview Diagram](docs/diagrams/VizzySystemDiagram.jpeg)  
-*Figure 1 — Conceptual overview of Vizzy’s modular arm system.*
+<p align="center">
+  <img src="docs/diagrams/VizzySystemDiagram.jpeg" 
+       alt="Vizzy System Diagram" 
+       width="800" 
+       style="border:3px solid white; border-radius:6px;">
+</p>
+
+<p align="center"><em>Figure 1 — Conceptual overview of Vizzy’s modular arm system.</em></p>
 
 ---
 
