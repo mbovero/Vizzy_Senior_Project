@@ -103,40 +103,6 @@ Unlike traditional robotic systems that require explicit programming and rigid m
 
 ---
 
-## Design and Development
-
-Vizzy was developed through iterative mechanical and software prototyping.  
-The arm evolved from lightweight PLA prototypes to a final hybrid design combining PETG-CF gearboxes, Moteus-controlled BLDC actuators, and aluminum structural parts.  
-The system architecture separates perception, control, and task scheduling into distinct subsystems to improve modularity and robustness.
-
-### Subsystems
-
-| Subsystem | Description |
-|------------|-------------|
-| **Mechanical** | CNC aluminum arms, carbon-fiber PETG gearboxes, and TPU grippers |
-| **Electrical** | Distributed CAN-FD motor network with localized controllers |
-| **Embedded** | FreeRTOS firmware for real-time control and safety watchdogs |
-| **Software** | Python control layer integrating LLM logic and YOLO perception |
-| **AI Layer** | GPT-based interpretation of object data and task sequencing |
-
-![Placeholder: Vizzy Assembly Process](images/placeholder_assembly.png)  
-*Figure 5 — Step-by-step prototype development from PLA to aluminum.*
-
----
-
-## Safety and Ethical Considerations
-
-- Built-in software and hardware limits prevent over-rotation and unsafe motion  
-- The LLM never issues raw joint commands; it only calls validated high-level actions  
-- All image and distance data are processed locally to protect user privacy  
-- Fail-safes ensure the system halts immediately upon communication loss  
-- Designed for tabletop-scale demonstrations, not industrial use  
-
-![Placeholder: Vizzy Safety Systems](images/placeholder_safety.png)  
-*Figure 6 — Overview of safety interlocks and communication fail-safes.*
-
----
-
 ## Evaluation Summary
 
 Vizzy was designed to validate the feasibility of LLM-assisted robotic control in constrained environments.  
