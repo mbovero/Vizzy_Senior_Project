@@ -25,14 +25,18 @@ from ultralytics import YOLO
 CAMERA_INDEX = 4
 
 # Arm claw coordinates in mm
-X_A = 321.0  # mm
-Y_A = 0.0    # mm
+X_A = 370.0  # mm
+Y_A = -24.0    # mm
+
+# Add a calibration factor
+SCALE_FACTOR_X = 1.0  # Tune this
+SCALE_FACTOR_Y = 1.0  # Tune this
 
 # Camera offset: camera is 35mm behind the claw position along the radius line
-CAMERA_OFFSET_MM = 35.0  # mm
+CAMERA_OFFSET_MM = -34.5  # mm
 
 # Pixel to mm conversion factor (adjustable parameter)
-PIXEL_TO_MM = 1.0 / 2.90  # mm per pixel (1/29 conversion factor)
+PIXEL_TO_MM = 1.0 / 2.90  # mm per pixel
 
 # YOLO model path (relative to project root)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -226,14 +230,9 @@ def main():
         print(f"    Arm claw position: ({X_A:.1f}, {Y_A:.1f}) mm")
         
         if abs(Y_A) < 1e-6:
-            # Handle division by zero: y_a = 0
-            if X_A > 0:
-                theta_rad = math.pi / 2
-            elif X_A < 0:
-                theta_rad = -math.pi / 2
-            else:
-                theta_rad = 0.0
-            print(f"    WARNING: y_a is zero, using special case for theta")
+            # When Y_A = 0, planes are aligned (theta = 0)
+            theta_rad = 0.0
+            print(f"    NOTE: y_a is zero, setting theta = 0 (planes aligned)")
         else:
             theta_rad = math.atan(X_A / Y_A)
         
@@ -243,8 +242,21 @@ def main():
         # Apply rotation matrix transformation
         c = math.cos(theta_rad)
         s = math.sin(theta_rad)
-        xT = c * x_c - s * y_c
-        yT = s * x_c + c * y_c
+        xT = (c * x_c - s * y_c) * SCALE_FACTOR_X
+        yT = (s * x_c + c * y_c) * SCALE_FACTOR_Y
+        
+        # Sign correction based on testing:
+        # - When Y_A < 0: signs are correct, no flip needed
+        # - When Y_A > 0: both xT and yT need to be flipped
+        # - When Y_A = 0: only yT needs to be flipped
+        if Y_A > 0:
+            xT = -xT
+            yT = -yT
+            print(f"    NOTE: Y_A > 0, flipped signs of xT and yT")
+        elif abs(Y_A) < 1e-6:  # Y_A == 0
+            yT = -yT
+            print(f"    NOTE: Y_A == 0, flipped sign of yT only")
+        
         print(f"    xT (transformed offset): {xT:.3f} mm")
         print(f"    yT (transformed offset): {yT:.3f} mm")
         
@@ -272,10 +284,25 @@ def main():
         y_cam = Y_A * scale
         print(f"    Camera position: ({x_cam:.3f}, {y_cam:.3f}) mm")
         
-        # Final arm plane coordinates
-        x_arm = x_cam + xT
-        y_arm = y_cam + yT
-        print(f"\n[7] Final arm plane coordinates:")
+        # Calculate camera offset components along radius line
+        # This represents the offset from claw to camera in arm plane coordinates
+        if r_a > 1e-6:
+            offset_scale = CAMERA_OFFSET_MM / r_a
+            camera_offset_x = X_A * offset_scale
+            camera_offset_y = Y_A * offset_scale
+            print(f"    Camera offset from claw: ({camera_offset_x:.3f}, {camera_offset_y:.3f}) mm")
+        else:
+            camera_offset_x = 0.0
+            camera_offset_y = 0.0
+        
+        # Final arm plane coordinates relative to claw position
+        # Object position = claw position + object offset from camera + camera offset
+        # xT and yT are the object offset from camera center in arm plane coordinates
+        # We add the camera offset to translate from camera reference frame to claw reference frame
+        x_arm = X_A + xT - camera_offset_x
+        y_arm = Y_A + yT + camera_offset_y
+        
+        print(f"\n[7] Final arm plane coordinates (relative to claw):")
         print(f"    x_arm: {x_arm:.3f} mm")
         print(f"    y_arm: {y_arm:.3f} mm")
     
