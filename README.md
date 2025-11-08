@@ -1,18 +1,18 @@
-<div align="center" style="margin-top:12px;margin-bottom:10px;">
-  <h1 style="margin:0;font-size:40px;line-height:1.1;letter-spacing:.3px;">
+<div align="center" style="margin-top:16px;margin-bottom:12px;">
+  <h1 style="margin:0 0 6px 0;font-size:38px;line-height:1.15;letter-spacing:.3px;">
     Vizzy: Enhancing Robotic Manipulation with Vision-Enabled Large Language Models
   </h1>
 
-  <div style="margin-top:8px;font-size:14px;color:#6a737d;">
+  <div style="font-size:14px;color:#6a737d;margin-bottom:10px;">
     University of Utah • Electrical & Computer Engineering Capstone
   </div>
 
-  <div style="margin-top:14px;font-size:15px;">
+  <div style="font-size:15px;margin-bottom:14px;">
     <strong>Authors:</strong> Burke Dambly · Miles Bovero · Lawrence Ponce · Brian Stites · Jesse Jenkins
   </div>
 
   <!-- tech badges -->
-  <div style="margin-top:16px;">
+  <div style="margin-bottom:14px;">
     <img alt="Moteus" src="https://img.shields.io/badge/Made%20with-Moteus-1e40af.svg" />
     <img alt="YOLO" src="https://img.shields.io/badge/YOLO-v11-ef4444.svg?logo=yolo&logoColor=white" />
     <img alt="Raspberry Pi" src="https://img.shields.io/badge/Raspberry%20Pi-4-c51a4a.svg?logo=raspberrypi&logoColor=white" />
@@ -20,7 +20,7 @@
     <img alt="Python" src="https://img.shields.io/badge/Python-3776AB.svg?logo=python&logoColor=white" />
   </div>
 
-  <hr style="margin:18px 0 0;border:0;height:1px;background:linear-gradient(90deg,rgba(0,0,0,0),rgba(140,140,140,.35),rgba(0,0,0,0));" />
+  <hr style="margin:0 auto;border:0;height:1px;width:90%;background:linear-gradient(90deg,rgba(0,0,0,0),rgba(140,140,140,.35),rgba(0,0,0,0));" />
 </div>
 
 
