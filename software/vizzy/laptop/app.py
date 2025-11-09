@@ -73,7 +73,9 @@ class StateManager:
         if not self.cap.isOpened():
             raise RuntimeError(f"Could not open camera index {C.CAM_INDEX}")
 
-        # TODO add in USB cam config
+        # Configure camera for non-blocking reads to prevent GUI freezing
+        # Set buffer size to 1 to minimize latency and prevent frame accumulation
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         ok, frame0 = self.cap.read()
         if not ok:
@@ -106,8 +108,8 @@ class StateManager:
         self.motion = None
 
         # NEW: Frame bus for worker->main display handoff
-        # Larger buffer for smoother GUI (reduces frame drops)
-        self.frame_bus = FrameBus(maxsize=8)
+        # Larger buffer for smoother GUI (reduces frame drops and stuttering)
+        self.frame_bus = FrameBus(maxsize=16)
 
         # NEW: Shared memory and LLM worker manager
         print("[StateManager] Initializing object memory...")
@@ -337,28 +339,24 @@ class StateManager:
         draw_wrapped_text(frame, text, 8, 8, int(w * 0.8))
 
     def _run_idle_preview_once(self) -> None:
-        ok, frame = self.cap.read()
-        if not ok:
-            print("[StateManager] WARNING: Failed to read camera frame in IDLE")
-            return
-
-        #print("[StateManager] Running YOLO inference on IDLE frame...") TODO
-        verbose = C.YOLO_VERBOSE
-        try:
-            results = self.model(frame, classes=self.allowed_class_ids, verbose=verbose)
-        except TypeError:
-            results = self.model(frame, classes=self.allowed_class_ids)
-        except Exception as e:
-            print(f"[StateManager] WARNING: YOLO inference failed: {e}")
-            results = []
-
-        annotated = frame
-        try:
-            for r in results:
-                annotated = r.plot()
-        except Exception as e:
-            print(f"[StateManager] WARNING: YOLO plot failed: {e}")
-            pass
+        # Non-blocking camera read: grab frame first, then retrieve
+        # This prevents blocking if camera buffer is empty
+        grabbed = self.cap.grab()
+        if not grabbed:
+            # If grab fails, try regular read as fallback
+            ok, frame = self.cap.read()
+            if not ok:
+                return  # Skip this frame if read also fails
+        else:
+            # Retrieve the grabbed frame (should be fast)
+            ok, frame = self.cap.retrieve()
+            if not ok:
+                return  # Skip if retrieve fails
+        
+        # Skip YOLO inference in IDLE mode to prevent GUI freezing
+        # YOLO inference can take 100-500ms+ and blocks the GUI thread
+        # Just show the raw frame with HUD for responsive GUI
+        annotated = frame.copy()
 
         secs_left = max(0.0, self.idle_deadline - time.time())
         status = f"IDLE | auto-search in {secs_left:0.1f}s"
@@ -498,8 +496,15 @@ class StateManager:
                 # remember previous state for next tick
                 self._prev_state = self.state
 
-                # Reduced sleep for faster GUI responsiveness
-                time.sleep(0.005)  # Faster main loop for responsive GUI
+                # Adaptive sleep: shorter when displaying, longer when idle
+                # This keeps GUI responsive while reducing CPU usage
+                # Always use small sleep to keep GUI responsive and prevent freezing
+                if self.state in ("SEARCH", "EXECUTE_TASK") and last is not None:
+                    time.sleep(0.001)  # Very short sleep when actively displaying frames
+                elif self.state == "IDLE":
+                    time.sleep(0.01)  # Slightly longer sleep in IDLE (10ms) to reduce CPU, but still responsive
+                else:
+                    time.sleep(0.005)  # Default sleep
 
         finally:
             # Stop LLM worker gracefully

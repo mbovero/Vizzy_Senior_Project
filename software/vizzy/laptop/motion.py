@@ -193,7 +193,8 @@ class Motion:
         
         # Format: "ik x y z pitch_rad yaw_rad O|C\n"
         cmd_text = f"ik {x_m:.6f} {y_m:.6f} {z_m:.6f} {pitch_rad:.6f} {yaw_rad:.6f} {claw_upper}\n"
-        print(f"[Motion] Sending ik command: {cmd_text.strip()}")
+        print(f"[Motion] Sending ik command: x={x:.2f}mm y={y:.2f}mm z={z:.2f}mm pitch={pitch:.3f}° ({pitch_rad:.6f}rad) yaw={yaw:.3f}° claw={claw_upper}")
+        print(f"[Motion] Command string: {cmd_text.strip()}")
         self._send_text(cmd_text)
         
         result = self._wait_cmd_complete("IK", timeout)

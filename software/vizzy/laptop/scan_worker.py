@@ -48,6 +48,9 @@ class ScanWorker(threading.Thread):
         memory=None,  # NEW: Shared ObjectMemory instance
         allowed_class_ids=None,
     ):
+        # Arm movement state tracking
+        self._arm_moving = threading.Event()  # Set when arm is moving, cleared when stopped
+        self._last_move_time = 0.0  # Timestamp of last movement command
         super().__init__(name="ScanWorker")
         self.sock = sock
         self.cap = cap
@@ -173,6 +176,7 @@ class ScanWorker(threading.Thread):
         self._centering_active = True
         
         # Centering loop - continues until movement < 5mm and object is centered
+        # Will NOT exit until item is successfully centered (no timeout)
         center_success, collected_frames, final_x_mm, final_y_mm = center_on_class(
             cap=self.cap,
             model=self.model,
@@ -189,6 +193,7 @@ class ScanWorker(threading.Thread):
             current_z_mm=z,       # Baseline z position in mm
             current_pitch_deg=pitch,  # Baseline pitch in degrees
             motion=self.motion,   # Motion object for absolute moves
+            abort_event=self.events.scan_abort,  # Allow abort via scan_abort event
         )
         
         # Clear centering flag
@@ -233,18 +238,32 @@ class ScanWorker(threading.Thread):
                 print(f"[ScanWorker] Skipping semantic enrichment (SKIP_SEMANTIC_ENRICHMENT enabled)")
             
             print(f"[ScanWorker] Object centered and registered successfully")
+            
+            # Return to baseline pose after successful centering and registration
+            print(f"[ScanWorker] Returning to baseline pose: x={x:.2f}mm, y={y:.2f}mm, z={z:.2f}mm")
+            returned = self.motion.move_to_target(x, y, z, pitch)
+            if not returned:
+                print("[ScanWorker] Warning: Baseline MOVE_TO did not confirm; continuing after dwell")
+            time.sleep(C.RETURN_TO_POSE_DWELL_S)
+            self._flush_capture()
+            print(f"[ScanWorker] Returned to baseline pose - ready to resume scan")
         else:
-            print(f"[ScanWorker] Centering FAILED - movement not < {C.CENTER_MIN_MOVEMENT_MM}mm or object lost")
-            print(f"[ScanWorker] Object NOT registered - resuming scan cycle")
-        
-        # Return to baseline pose before resuming scan
-        print(f"[ScanWorker] Returning to baseline pose: x={x:.2f}mm, y={y:.2f}mm, z={z:.2f}mm")
-        returned = self.motion.move_to_target(x, y, z, pitch)
-        if not returned:
-            print("[ScanWorker] Warning: Baseline MOVE_TO did not confirm; continuing after dwell")
-        time.sleep(C.RETURN_TO_POSE_DWELL_S)
-        self._flush_capture()
-        print(f"[ScanWorker] Returned to baseline pose - ready to resume scan")
+            # Centering was aborted or camera failed - should not happen in normal operation
+            # since centering now continues until success
+            if self.events.scan_abort.is_set():
+                print(f"[ScanWorker] Centering ABORTED - scan cycle cancelled")
+            else:
+                print(f"[ScanWorker] Centering EXITED unexpectedly (camera failure?)")
+            print(f"[ScanWorker] Object NOT registered")
+            
+            # Still return to baseline pose even if centering was aborted
+            print(f"[ScanWorker] Returning to baseline pose: x={x:.2f}mm, y={y:.2f}mm, z={z:.2f}mm")
+            returned = self.motion.move_to_target(x, y, z, pitch)
+            if not returned:
+                print("[ScanWorker] Warning: Baseline MOVE_TO did not confirm; continuing after dwell")
+            time.sleep(C.RETURN_TO_POSE_DWELL_S)
+            self._flush_capture()
+            print(f"[ScanWorker] Returned to baseline pose")
     
     def _display_registered_object_info(self, cls_name: str, x: float, y: float, z: float, object_id: int) -> None:
         """Display registered object information and stop scanning."""
@@ -359,13 +378,14 @@ class ScanWorker(threading.Thread):
         while not self.events.scan_abort.is_set():
             ok, frame = self.cap.read()
             if not ok:
-                time.sleep(0.016)  # ~60 FPS if read fails
+                time.sleep(0.033)  # ~30 FPS if read fails (matches display rate)
                 continue
             
             frame_count += 1
             
             # Run YOLO to check if object is still in frame
-            results = self.model(frame, classes=[cls_id], verbose=False)
+            # Use half precision for faster inference
+            results = self.model(frame, classes=[cls_id], verbose=False, half=True)
             annotated = frame.copy()
             best_conf = 0.0
             object_still_detected = False
@@ -443,8 +463,8 @@ class ScanWorker(threading.Thread):
                 last_log_time = current_time
                 frame_count = 0
             
-            # Very short sleep for high FPS GUI (~60 FPS target)
-            time.sleep(0.016)  # ~60 FPS update rate for responsive GUI
+            # Balanced sleep for smooth GUI without excessive CPU usage (~30 FPS target)
+            time.sleep(0.033)  # ~30 FPS update rate for smooth, responsive GUI
     
     def _calculate_orientation_from_collected_frames(self, frames_list: list) -> dict:
         """
@@ -531,19 +551,46 @@ class ScanWorker(threading.Thread):
                 print(f"[ScanWorker] Pose {pid}: x={x:.1f} y={y:.1f} z={z:.1f} pitch={pitch:.1f}")
 
                 # Go to baseline pose for this grid point
-                print(f"[ScanWorker] Moving to pose {pid}: x={x:.1f}mm, y={y:.1f}mm, z={z:.1f}mm")
+                print(f"[ScanWorker] Moving to pose {pid}: x={x:.1f}mm, y={y:.1f}mm, z={z:.1f}mm, pitch={pitch:.3f}°")
+                
+                # Mark arm as moving
+                self._arm_moving.set()
+                self._last_move_time = time.time()
+                
                 ok = self.motion.move_to_target(x, y, z, pitch)
                 if not ok:
                     print("[ScanWorker] Warning: MOVE_TO baseline timed out or failed; continuing after settle")
 
-                time.sleep(C.MOVE_SETTLE_S)
+                # Wait for arm to settle (movement complete)
+                settle_time = C.MOVE_SETTLE_S + getattr(C, 'POSE_CV_DELAY_S', 0.3)
+                print(f"[ScanWorker] Waiting {settle_time:.1f}s for arm to settle at pose {pid}...")
+                time.sleep(settle_time)
+                
+                # Add 5 second delay after first command (pose 0)
+                if pid == 0:
+                    print("[ScanWorker] First pose reached - waiting 5 seconds...")
+                    time.sleep(5.0)
+                
+                # Mark arm as stopped (ready for YOLO detection)
+                self._arm_moving.clear()
+                print(f"[ScanWorker] Arm stopped at pose {pid} - YOLO detection enabled")
+                
+                # Wait a bit more to ensure arm is fully settled before detection
+                time.sleep(0.2)
                 
                 # CRITICAL: Check if object of interest is in frame BEFORE starting scan loop
                 # If detected, STOP scan cycle immediately - do NOT proceed with scanning or centering
-                ok, check_frame = self.cap.read()
+                # Use grab/retrieve for non-blocking read
+                grabbed = self.cap.grab()
+                if grabbed:
+                    ok, check_frame = self.cap.retrieve()
+                else:
+                    ok, check_frame = self.cap.read()
+                
                 if ok:
                     # Quick detection check for objects we care about
-                    check_results = self.model(check_frame, classes=self.search_valid_class_ids, verbose=False)
+                    # Use half precision for faster inference
+                    check_results = self.model(check_frame, classes=self.search_valid_class_ids, verbose=False, half=True)
                     object_detected = False
                     detected_cls_name = None
                     detected_cls_id = None
@@ -564,6 +611,18 @@ class ScanWorker(threading.Thread):
                                 break
                     
                     if object_detected:
+                        # Check if objects of this class have already been registered
+                        existing_objects = self.memory.get_objects_by_class(detected_cls_id)
+                        if len(existing_objects) > 0:
+                            print(f"[ScanWorker] =========================================")
+                            print(f"[ScanWorker] OBJECT DETECTED: {detected_cls_name} (conf={detected_conf:.2f})")
+                            print(f"[ScanWorker] BUT: {len(existing_objects)} object(s) of class '{detected_cls_name}' already registered")
+                            print(f"[ScanWorker] SKIPPING centering to avoid re-registering same object type")
+                            print(f"[ScanWorker] Continuing scan cycle...")
+                            print(f"[ScanWorker] =========================================")
+                            # Skip centering and continue to next pose
+                            continue
+                        
                         print(f"[ScanWorker] =========================================")
                         print(f"[ScanWorker] OBJECT DETECTED: {detected_cls_name} (conf={detected_conf:.2f})")
                         print(f"[ScanWorker] SCAN CYCLE PAUSED - Starting centering...")
@@ -596,37 +655,54 @@ class ScanWorker(threading.Thread):
                         continue
                     
                     # BEFORE scanning, check again if object is in frame
-                    # If object appears during scan loop, pause and wait for removal
-                    ok, pre_scan_frame = self.cap.read()
-                    if ok:
-                        pre_scan_results = self.model(pre_scan_frame, classes=self.search_valid_class_ids, verbose=False)
-                        object_detected_pre = False
-                        detected_cls_name_pre = None
-                        detected_cls_id_pre = None
-                        detected_conf_pre = 0.0
+                    # Only check if arm is stopped (no detection during movement)
+                    if not self._arm_moving.is_set():
+                        # Non-blocking camera read
+                        grabbed = self.cap.grab()
+                        if grabbed:
+                            ok, pre_scan_frame = self.cap.retrieve()
+                        else:
+                            ok, pre_scan_frame = self.cap.read()
                         
-                        for r in pre_scan_results:
-                            if len(r.boxes) > 0:
-                                for i in range(len(r.boxes)):
-                                    cls_id = int(r.boxes.cls[i].item())
-                                    conf = float(r.boxes.conf[i].item())
-                                    if cls_id in self.search_valid_class_ids and conf >= C.SCAN_MIN_CONF:
-                                        object_detected_pre = True
-                                        detected_cls_name_pre = self._get_name(cls_id)
-                                        detected_cls_id_pre = cls_id
-                                        detected_conf_pre = conf
+                        if ok:
+                            # Only run YOLO when arm is stopped
+                            # Use half precision for faster inference
+                            pre_scan_results = self.model(pre_scan_frame, classes=self.search_valid_class_ids, verbose=False, half=True)
+                            
+                            object_detected_pre = False
+                            detected_cls_name_pre = None
+                            detected_cls_id_pre = None
+                            detected_conf_pre = 0.0
+                            
+                            for r in pre_scan_results:
+                                if len(r.boxes) > 0:
+                                    for i in range(len(r.boxes)):
+                                        cls_id = int(r.boxes.cls[i].item())
+                                        conf = float(r.boxes.conf[i].item())
+                                        if cls_id in self.search_valid_class_ids and conf >= C.SCAN_MIN_CONF:
+                                            # Check if objects of this class have already been registered
+                                            existing_objects = self.memory.get_objects_by_class(cls_id)
+                                            if len(existing_objects) > 0:
+                                                # Object already registered - skip it
+                                                print(f"[ScanWorker] Object '{self._get_name(cls_id)}' detected but already registered - ignoring")
+                                                continue
+                                            
+                                            object_detected_pre = True
+                                            detected_cls_name_pre = self._get_name(cls_id)
+                                            detected_cls_id_pre = cls_id
+                                            detected_conf_pre = conf
+                                            break
+                                    if object_detected_pre:
                                         break
-                                if object_detected_pre:
-                                    break
-                        
-                        if object_detected_pre:
-                            print(f"[ScanWorker] Object detected during scan: {detected_cls_name_pre} (conf={detected_conf_pre:.2f})")
-                            print(f"[ScanWorker] PAUSING scan - starting centering...")
-                            # Center on object - centering will continue until movement < 5mm
-                            self._center_and_register_object(detected_cls_name_pre, detected_cls_id_pre, x, y, z, pitch)
-                            # Object centered and registered - resume scan at this pose
-                            print(f"[ScanWorker] Object centered and registered - resuming scan at current pose")
-                            break  # Exit inner scan loop, continue to next pose
+                            
+                            if object_detected_pre:
+                                print(f"[ScanWorker] Object detected during scan: {detected_cls_name_pre} (conf={detected_conf_pre:.2f})")
+                                print(f"[ScanWorker] PAUSING scan - starting centering...")
+                                # Center on object - centering will continue until movement < 5mm
+                                self._center_and_register_object(detected_cls_name_pre, detected_cls_id_pre, x, y, z, pitch)
+                                # Object centered and registered - resume scan at this pose
+                                print(f"[ScanWorker] Object centered and registered - resuming scan at current pose")
+                                break  # Exit inner scan loop, continue to next pose
 
                     # Exclusions: already updated this session, or too many fails here
                     exclude_ids = [int(e["cls_id"]) for e in self.memory.entries_sorted()
@@ -637,6 +713,7 @@ class ScanWorker(threading.Thread):
 
                     # Scan the window at this pose (publish frames via frame_sink)
                     # Only scan for fork and cup (use search_valid_class_ids instead of allowed_class_ids)
+                    # Pass arm movement state checker - only run YOLO when arm is stopped
                     summary = run_scan_window(
                         cap=self.cap,
                         model=self.model,
@@ -646,6 +723,7 @@ class ScanWorker(threading.Thread):
                         frame_sink=self.frame_sink,
                         display_scale=self.display_scale,
                         allowed_class_ids=self.search_valid_class_ids,  # Only fork and cup
+                        arm_is_stopped=lambda: not self._arm_moving.is_set(),  # Only run YOLO when arm is stopped
                     )
 
                     objs = summary.get("objects", [])

@@ -107,9 +107,11 @@ def center_on_class(
     current_z_mm: float = 275.0,
     current_pitch_deg: float = 0.0,
     motion=None,
+    abort_event=None,
 ) -> Tuple[bool, list, float, float]:
     """
-    Closed-loop centering on a class for up to C.CENTER_DURATION_MS.
+    Closed-loop centering on a class until item is successfully centered.
+    Will continue indefinitely until success is achieved (unless aborted).
 
     Args:
         cap: OpenCV VideoCapture.
@@ -126,6 +128,7 @@ def center_on_class(
         current_z_mm: Current z position in mm (for absolute moves).
         current_pitch_deg: Current pitch angle in degrees (for absolute moves).
         motion: Motion object for absolute moves (if None, uses send_move callback).
+        abort_event: Optional threading.Event to check for abort signal. If set, centering will exit.
 
     Returns:
         (success, collected_frames, final_x_mm, final_y_mm): 
@@ -152,9 +155,15 @@ def center_on_class(
     print(f"[Centering] Starting centering at baseline position: x={x_mm:.2f}mm, y={y_mm:.2f}mm, z={z_mm:.2f}mm")
     print(f"[Centering] Measurements will only occur when arm is stopped")
     print(f"[Centering] Wait time after movement command: {C.CENTER_MEASURE_WAIT_TIME_S}s before next measurement")
+    print(f"[Centering] Will continue until item is successfully centered (no timeout)")
 
-    # Loop until time budget is exhausted or success achieved
-    while (time.time() - t0) < (C.CENTER_DURATION_MS / 1000.0) and not success:
+    # Loop until success achieved (no timeout - will continue until item is centered)
+    # Only exit on: success, abort event, or camera failure
+    while not success:
+        # Check for abort signal
+        if abort_event is not None and abort_event.is_set():
+            print(f"[Centering] Abort signal received - exiting centering mode")
+            break
         current_time = time.time()
         
         # Check if arm has settled after last movement
@@ -176,6 +185,7 @@ def center_on_class(
         # Just show status and publish frame for live feed
         if not arm_is_settled:
             # Skip YOLO inference to save computation - just show status
+            # Use a lightweight frame copy without heavy processing
             annotated = frame.copy()
             h, w = annotated.shape[:2]
             cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
@@ -189,11 +199,12 @@ def center_on_class(
             draw_wrapped_text(annotated, hud, 10, 24, max_w)
             resized = cv2.resize(annotated, (int(w * display_scale), int(h * display_scale)))
             frame_sink(resized)
-            time.sleep(0.016)  # ~60 FPS update rate for smooth GUI
+            time.sleep(0.033)  # ~30 FPS when waiting (reduces CPU usage)
             continue
         
         # Model inference filtered to the target class (only when arm is settled)
-        results = model(frame, [int(target_cls)], verbose=False)  # Disable verbose for speed
+        # Use half precision and disable verbose for faster inference
+        results = model(frame, classes=[int(target_cls)], verbose=False, half=True)  # half=True for faster inference
         annotated = frame  # fallback
         best_conf = 0.0
         best_area = 0
@@ -295,83 +306,81 @@ def center_on_class(
             movement_small_enough = (abs(movement_x_mm) < C.CENTER_MIN_MOVEMENT_MM and 
                                      abs(movement_y_mm) < C.CENTER_MIN_MOVEMENT_MM)
 
-            # Command movement if movement is too large (>= 5mm in either direction)
-            # OR if not within pixel/stability thresholds
-            if not movement_small_enough or not (err_ok and move_ok):
+            # Command movement ONLY if movement is too large (>= 5mm in either direction)
+            # If movement is small enough (< 5mm), we consider it stable regardless of pixel/stability thresholds
+            if not movement_small_enough:
                 if motion is not None:
-                    # Only move if movement is >= 5mm in at least one direction
-                    if not movement_small_enough:
-                        # Calculate new absolute position by adding movement to CURRENT position
-                        # This is relative to the current arm position, not the origin
-                        # We accumulate movements from the baseline pose
-                        new_x_mm = x_mm + movement_x_mm  # Add movement to current x
-                        new_y_mm = y_mm + movement_y_mm  # Add movement to current y
-                        
-                        # Send absolute move command (new position relative to origin)
-                        print(f"[Centering] Current pos: ({x_mm:.2f}, {y_mm:.2f})mm")
-                        print(f"[Centering] Movement: dx={movement_x_mm:.2f}mm dy={movement_y_mm:.2f}mm")
-                        print(f"[Centering] Movement too large (>= {C.CENTER_MIN_MOVEMENT_MM}mm) - moving arm")
-                        print(f"[Centering] New pos: ({new_x_mm:.2f}, {new_y_mm:.2f})mm")
-                        
-                        ok = motion.move_to_target(new_x_mm, new_y_mm, z_mm, pitch_deg)
-                        if ok:
-                            # Update tracked position after successful move (accumulate from baseline)
-                            x_mm = new_x_mm
-                            y_mm = new_y_mm
-                            print(f"[Centering] Move command sent and acknowledged")
-                            print(f"[Centering] Updated target position to ({x_mm:.2f}, {y_mm:.2f})mm")
-                            # Mark that arm is moving and record move time
-                            # The ACK means the server received the command, but arm is still physically moving
-                            arm_is_moving = True
-                            last_move_time = time.time()
-                            print(f"[Centering] Arm movement started - will wait {C.CENTER_MEASURE_WAIT_TIME_S}s before next measurement")
-                        else:
-                            print(f"[Centering] Warning: Move command failed or timed out, keeping old position ({x_mm:.2f}, {y_mm:.2f})mm")
-                            # If command failed, don't mark as moving
-                            # But still wait a bit in case there's residual motion
-                            last_move_time = time.time()
-                            arm_is_moving = True
-                        
-                        # Don't set arm_is_moving = False here!
-                        # The arm is physically moving even after ACK is received
-                        # We'll check the time in the next iteration to see if enough time has passed
-                        # Publish current frame with movement info before continuing to keep GUI live
-                        if best_xy_valid:
-                            bx, by = best_xy
-                            cv2.circle(annotated, (bx, by), 6, (0, 0, 255), -1)
-                            cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
-                            cv2.line(annotated, (bx, by), (center_x, center_y), (0, 255, 0), 2)
-                        else:
-                            cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
-                        hud = f"{label}  Moving arm... waiting {C.CENTER_MEASURE_WAIT_TIME_S}s"
-                        max_w = int(annotated.shape[1] * 0.92)
-                        draw_wrapped_text(annotated, hud, 10, 24, max_w)
-                        h, w = annotated.shape[:2]
-                        resized = cv2.resize(annotated, (int(w * display_scale), int(h * display_scale)))
-                        frame_sink(resized)
-                        # Continue to next iteration to wait for movement to complete
-                        continue
+                    # Movement is >= 5mm in at least one direction - need to move
+                    # Calculate new absolute position by adding movement to CURRENT position
+                    # This is relative to the current arm position, not the origin
+                    # We accumulate movements from the baseline pose
+                    new_x_mm = x_mm + movement_x_mm  # Add movement to current x
+                    new_y_mm = y_mm + movement_y_mm  # Add movement to current y
+                    
+                    # Send absolute move command (new position relative to origin)
+                    print(f"[Centering] Current pos: ({x_mm:.2f}, {y_mm:.2f})mm")
+                    print(f"[Centering] Movement: dx={movement_x_mm:.2f}mm dy={movement_y_mm:.2f}mm")
+                    print(f"[Centering] Movement too large (>= {C.CENTER_MIN_MOVEMENT_MM}mm) - moving arm")
+                    print(f"[Centering] New pos: ({new_x_mm:.2f}, {new_y_mm:.2f})mm")
+                    
+                    ok = motion.move_to_target(new_x_mm, new_y_mm, z_mm, pitch_deg)
+                    if ok:
+                        # Update tracked position after successful move (accumulate from baseline)
+                        x_mm = new_x_mm
+                        y_mm = new_y_mm
+                        print(f"[Centering] Move command sent and acknowledged")
+                        print(f"[Centering] Updated target position to ({x_mm:.2f}, {y_mm:.2f})mm")
+                        # Mark that arm is moving and record move time
+                        # The ACK means the server received the command, but arm is still physically moving
+                        arm_is_moving = True
+                        last_move_time = time.time()
+                        print(f"[Centering] Arm movement started - will wait {C.CENTER_MEASURE_WAIT_TIME_S}s before next measurement")
                     else:
-                        # Movement is small but pixel/stability thresholds not met
-                        # This is okay, we'll keep checking
-                        print(f"[Centering] Movement small (dx={movement_x_mm:.2f}mm dy={movement_y_mm:.2f}mm) but not fully stable yet")
+                        print(f"[Centering] Warning: Move command failed or timed out, keeping old position ({x_mm:.2f}, {y_mm:.2f})mm")
+                        # If command failed, don't mark as moving
+                        # But still wait a bit in case there's residual motion
+                        last_move_time = time.time()
+                        arm_is_moving = True
+                    
+                    # Don't set arm_is_moving = False here!
+                    # The arm is physically moving even after ACK is received
+                    # We'll check the time in the next iteration to see if enough time has passed
+                    # Publish current frame with movement info before continuing to keep GUI live
+                    if best_xy_valid:
+                        bx, by = best_xy
+                        cv2.circle(annotated, (bx, by), 6, (0, 0, 255), -1)
+                        cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
+                        cv2.line(annotated, (bx, by), (center_x, center_y), (0, 255, 0), 2)
+                    else:
+                        cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
+                    hud = f"{label}  Moving arm... waiting {C.CENTER_MEASURE_WAIT_TIME_S}s"
+                    max_w = int(annotated.shape[1] * 0.92)
+                    draw_wrapped_text(annotated, hud, 10, 24, max_w)
+                    h, w = annotated.shape[:2]
+                    resized = cv2.resize(annotated, (int(w * display_scale), int(h * display_scale)))
+                    frame_sink(resized)
+                    # Sleep to prevent excessive CPU usage while waiting for arm movement
+                    time.sleep(0.033)  # ~30 FPS update rate
+                    # Continue to next iteration to wait for movement to complete
+                    continue
                 else:
                     # Legacy: use normalized moves (if motion not provided)
                     send_move(ndx, ndy)
             else:
-                # Movement is small enough AND thresholds are met
+                # Movement is small enough (< 5mm) - consider it stable
                 if best_xy_valid:
-                    print(f"[Centering] Movement is small enough: dx={movement_x_mm:.2f}mm dy={movement_y_mm:.2f}mm (< {C.CENTER_MIN_MOVEMENT_MM}mm)")
+                    print(f"[Centering] Movement small enough: dx={movement_x_mm:.2f}mm dy={movement_y_mm:.2f}mm (< {C.CENTER_MIN_MOVEMENT_MM}mm) - STABLE")
 
             # Count stable frames toward quota
+            # PRIMARY REQUIREMENT: Movement must be small enough (< 5mm)
+            # When movement is < 5mm, we consider it stable and count it as good
+            # even if pixel/stability thresholds aren't perfect (movement threshold takes priority)
             # Only count frames where:
-            # 1. Object is detected (best_xy_valid)
-            # 2. Confidence is high enough (conf_ok)
-            # 3. Object is centered within tolerance (err_ok)
-            # 4. Movement is stable (move_ok)
-            # 5. Movement is small enough (< 5mm) - NEW REQUIREMENT
-            # This ensures the item is still in frame and successfully centered with minimal movement
-            if best_xy_valid and conf_ok and err_ok and move_ok and movement_small_enough:
+            # 1. Movement is small enough (< 5mm) - PRIMARY REQUIREMENT (must be met)
+            # 2. Object is detected (best_xy_valid)
+            # 3. Confidence is high enough (conf_ok)
+            # Pixel error and motion stability (err_ok, move_ok) are NOT required when movement is < 5mm
+            if movement_small_enough and best_xy_valid and conf_ok:
                 good_frames += 1
                 
                 # Collect frames with masks if requested (only up to CENTER_FRAMES)
@@ -423,6 +432,8 @@ def center_on_class(
         h, w = annotated.shape[:2]
         resized = cv2.resize(annotated, (int(w * display_scale), int(h * display_scale)))
         frame_sink(resized)
+        # Frame rate limiting for smooth GUI (~30 FPS)
+        time.sleep(0.033)
 
     # Clear any class filter set during this centering attempt
     clear_class_filter(model)
@@ -433,8 +444,11 @@ def center_on_class(
         print(f"[Centering] Final centered position: x={x_mm:.2f}mm, y={y_mm:.2f}mm")
         print(f"[Centering] Object location will be registered at this position")
     else:
-        print(f"[Centering] Centering FAILED - item not centered or no longer in frame")
-        print(f"[Centering] Final position: x={x_mm:.2f}mm, y={y_mm:.2f}mm (NOT registering object)")
-    print(f"[Centering] Scan cycle will RESUME after returning to baseline pose")
+        if abort_event is not None and abort_event.is_set():
+            print(f"[Centering] Centering ABORTED by user/system")
+        else:
+            print(f"[Centering] Centering EXITED - camera failure or other error")
+        print(f"[Centering] Final position: x={x_mm:.2f}mm, y={y_mm:.2f}mm")
+    print(f"[Centering] Exiting centering mode")
 
     return success, captured_frames, x_mm, y_mm

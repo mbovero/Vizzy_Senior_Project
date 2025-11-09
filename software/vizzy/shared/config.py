@@ -33,7 +33,7 @@ CENTER_DURATION_MS = 10000  # Max time to attempt centering (10 seconds)
 # Centering movement calculation (matching object_centering.py)
 PIXEL_TO_MM = 1.0 / 2.90  # mm per pixel
 WORKING_DISTANCE_MM = 600.0  # mm (typical working distance for arm operations)
-MOVEMENT_SCALE_FACTOR = 1.7  # Scale factor for movement calculation
+MOVEMENT_SCALE_FACTOR = 1.5  # Scale factor for movement calculation
 
 # Explicit scan gates (selection before attempting to center)
 # (Use these to filter scan results; centering thresholds remain separate.)
@@ -55,8 +55,8 @@ MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a sing
 # Object memory
 MEM_FILE = str(LAPTOP_DIR / "object_memory.json")
 
-# Valid objects to center on during search (only fork and cup)
-SEARCH_VALID_CLASS_NAMES = ["fork", "cup"]  # Only center on these objects
+# Valid objects to center on during search (fork, cup, and knife)
+SEARCH_VALID_CLASS_NAMES = ["fork", "cup", "knife"]  # Only center on these objects
 
 # -----------------------------
 # Networking
@@ -73,13 +73,8 @@ LISTEN_PORT = 65432
 # Cartesian Search & Arm Geometry
 # -----------------------------
 # Workspace bounds used to build the search path (millimetres, laptop-side)
-# Constraints: 
-#   - x >= 0 (non-negative, cannot go negative)
-#   - y can be negative or positive (can go negative)
-#   - Magnitude of (x, y) must be >= 300mm: sqrt(x^2 + y^2) >= 300mm
-#   - Magnitude of (x, y) must be <= 500mm: sqrt(x^2 + y^2) <= 500mm
-# Invalid poses are filtered out by build_search_path()
 # NOTE: Commands are sent to server in meters (mm/1000.0)
+# The search path is now built from SEARCH_PATH_POINTS below (all points are valid)
 SEARCH_X_MIN_MM = 0.0    # Starting x: 0mm (x cannot be negative)
 SEARCH_X_MAX_MM = 500.0  # Maximum x: 500mm (constrained by max magnitude)
 SEARCH_X_STEP_MM = 50.0  # Step size: 50mm (reduced by 50% from 100mm)
@@ -96,7 +91,32 @@ SEARCH_Z_MAX_MM = 275.0
 SEARCH_Z_STEP_MM = 50.0
 
 # Default pitch for search poses (degrees)
-SEARCH_PITCH_DEG = 0.0
+SEARCH_PITCH_DEG = 5
+
+# Explicit search path points (x_mm, y_mm) - all valid poses the arm can move to
+SEARCH_PATH_POINTS = [
+    # Start points
+    (0.0, -225.0),    # Pose 0
+    (0.0, -350.0),    # Pose 1
+    (0.0, -450.0),    # Pose 2
+    # Middle points
+    (350.0, -350.0),  # Pose 5
+    (270.0, -270.0),  # Pose 4
+    (170,-170),  # Pose 3
+    
+    (250.0, 0.0),     # Pose 6
+    (350.0, 0.0),     # Pose 7
+    (450.0, 0.0),     # Pose 8
+    (350.0, 350.0),   # Pose 11
+    (270.0, 270.0),   # Pose 10
+    (170, 170),   # Pose 9
+    
+    
+    # End points
+    (0.0, 225.0),     # Pose 12
+    (0.0, 350.0),     # Pose 13
+    (0.0, 450.0),     # Pose 14
+]
 
 # Relative nudge scaling (converted from normalized [-1,1] commands on the RPi)
 SCAN_NUDGE_STEP_MM = 5.0
@@ -104,6 +124,7 @@ SCAN_NUDGE_STEP_MM = 5.0
 # Target settle/dwell times (reduced for faster iteration)
 MOVE_SETTLE_S = 0.15          # allow time after a commanded move before accepting nudges (reduced from 0.30)
 RETURN_TO_POSE_DWELL_S = 0.10 # dwell after returning to baseline before next scan window (reduced from 0.25)
+POSE_CV_DELAY_S = 0.3         # extra delay at each pose to give CV model time to identify objects
 
 # Physical servo PWM bounds for the new arm (documentation for IK output clamping)
 SERVO_PITCH_CENTER_US = 1500

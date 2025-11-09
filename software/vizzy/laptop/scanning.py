@@ -10,6 +10,9 @@ from .hud import draw_wrapped_text
 from .centering import instance_center
 from ..shared import config as C
 
+# Type hint for callable that returns bool
+CallableBool = Callable[[], bool]
+
 # Always publish frames via the sink; main thread renders them.
 FrameSink = Callable[[Any], None]
 
@@ -29,142 +32,44 @@ def _draw_scan_hud(frame, text: str, *, display_scale: float) -> Any:
 # ---------------------------------------------------------------------------
 def build_search_path() -> list[dict]:
     """
-    Build a custom arch search path with 15 total points:
-      - Start: (0, -300mm), (0, -400mm), (0, -500mm) - 3 points
-      - Middle: 9 interpolated points forming an arch from (0, -500mm) to (0, 500mm)
-      - End: (0, 500mm), (0, 400mm), (0, 300mm) - 3 points
-    
-    Constraints:
-      - x >= 0 (non-negative, 0mm is fully extended)
-      - y can be negative or positive
-      - Magnitude of (x, y) must be >= 300mm: sqrt(x^2 + y^2) >= 300mm
-      - Magnitude of (x, y) must be <= 500mm: sqrt(x^2 + y^2) <= 500mm
+    Build search path from explicit SEARCH_PATH_POINTS in config.
+    All points in SEARCH_PATH_POINTS are considered valid and will be used.
     """
     import math
     
-    def is_valid_pose(x: float, y: float) -> bool:
-        """Check if pose meets constraints."""
-        # x must be non-negative (0mm is fully extended)
-        if x < 0:
-            return False
-        
-        # Calculate magnitude (distance from origin)
-        magnitude = math.sqrt(x * x + y * y)
-        
-        # Magnitude must be between 300-500mm
-        if magnitude < 300.0 or magnitude > 500.0:
-            return False
-        
-        return True
+    # Get search path points from config (all points are considered valid)
+    search_points = C.SEARCH_PATH_POINTS
+    if not search_points:
+        raise ValueError("SEARCH_PATH_POINTS not defined in config or is empty")
     
     # Z is fixed at 275mm for the entire scan cycle
     z_fixed = getattr(C, 'SEARCH_Z_FIXED_MM', 275.0)
     pitch = float(C.SEARCH_PITCH_DEG)
     
+    # Validate pitch value
+    if pitch is None:
+        raise ValueError(f"SEARCH_PITCH_DEG is None in config!")
+    if not isinstance(pitch, (int, float)):
+        raise ValueError(f"SEARCH_PITCH_DEG must be a number, got: {type(pitch)}")
+    
+    print(f"[build_search_path] Using pitch: {pitch:.3f}° (from SEARCH_PITCH_DEG={C.SEARCH_PITCH_DEG})")
+    
     path: list[dict] = []
-    pose_id = 0
     
-    # Step 1: Start points (3 points)
-    # (0, -300), (0, -400), (0, -500)
-    start_points = [
-        (0.0, -300.0),
-        (0.0, -400.0),
-        (0.0, -500.0),
-    ]
+    # Build path from config points
+    for pose_id, (x, y) in enumerate(search_points):
+        path.append({
+            "pose_id": pose_id,
+            "x": float(x),
+            "y": float(y),
+            "z": float(z_fixed),
+            "pitch": pitch,
+        })
     
-    for x, y in start_points:
-        if is_valid_pose(x, y):
-            path.append({
-                "pose_id": pose_id,
-                "x": float(x),
-                "y": float(y),
-                "z": float(z_fixed),
-                "pitch": pitch,
-            })
-            pose_id += 1
-    
-    # Step 2: Interpolate 9 points between (0, -500mm) and (0, 500mm)
-    # Create points along an arch that maintains magnitude between 300-500mm
-    # We'll create points along a circular arc with radius ~450mm
-    # This gives us points that smoothly transition from negative y to positive y
-    
-    # Generate 9 intermediate points along an arch
-    # Using angles from -90 degrees (pointing down) to +90 degrees (pointing up)
-    # With radius ~450mm to stay within 300-500mm range
-    radius = 450.0  # Approximate radius for the arch
-    
-    # 9 points means 10 intervals (from -90 to +90 degrees)
-    # Angles: -90, -70, -50, -30, -10, 10, 30, 50, 70, 90 (9 intermediate points)
-    # But we want to exclude the endpoints since they're in start/end, so:
-    # We need 9 points between -90 and +90, so we use 10 intervals
-    num_middle_points = 9
-    start_angle = -90.0  # degrees (pointing down, y negative)
-    end_angle = 90.0     # degrees (pointing up, y positive)
-    angle_step = (end_angle - start_angle) / (num_middle_points + 1)  # +1 because we exclude endpoints
-    
-    for i in range(1, num_middle_points + 1):  # 1 to 9 (skip endpoints)
-        angle_deg = start_angle + (angle_step * i)
-        angle_rad = math.radians(angle_deg)
-        
-        # Calculate x and y along the arch
-        # x = radius * cos(angle), y = radius * sin(angle)
-        x = radius * math.cos(angle_rad)
-        y = radius * math.sin(angle_rad)
-        
-        # Ensure x >= 0 (if angle is in second quadrant, x would be negative)
-        # For angles from -90 to +90, cos is positive, so x should be positive
-        if x < 0:
-            x = 0.0  # Clamp to 0 if somehow negative
-        
-        # Adjust to maintain exact magnitude if needed
-        magnitude = math.sqrt(x * x + y * y)
-        if magnitude > 500.0:
-            # Scale down to fit within 500mm
-            scale = 500.0 / magnitude
-            x *= scale
-            y *= scale
-        elif magnitude < 300.0:
-            # Scale up to fit within 300mm minimum
-            scale = 300.0 / magnitude
-            x *= scale
-            y *= scale
-        
-        if is_valid_pose(x, y):
-            path.append({
-                "pose_id": pose_id,
-                "x": float(x),
-                "y": float(y),
-                "z": float(z_fixed),
-                "pitch": pitch,
-            })
-            pose_id += 1
-    
-    # Step 3: End points (3 points)
-    # (0, 300), (0, 400), (0, 500) - ending sequence
-    end_points = [
-        (0.0, 300.0),
-        (0.0, 400.0),
-        (0.0, 500.0),
-    ]
-    
-    for x, y in end_points:
-        if is_valid_pose(x, y):
-            path.append({
-                "pose_id": pose_id,
-                "x": float(x),
-                "y": float(y),
-                "z": float(z_fixed),
-                "pitch": pitch,
-            })
-            pose_id += 1
-    
-    print(f"[build_search_path] Created {len(path)} poses in custom arch path (should be 15)")
+    print(f"[build_search_path] Created {len(path)} poses from SEARCH_PATH_POINTS")
     for i, p in enumerate(path):
         mag = math.sqrt(p["x"]**2 + p["y"]**2)
-        print(f"  Pose {i}: ({p['x']:.1f}, {p['y']:.1f}) mm, magnitude={mag:.1f} mm")
-    
-    if len(path) != 15:
-        print(f"[build_search_path] WARNING: Expected 15 points, got {len(path)}")
+        print(f"  Pose {i}: ({p['x']:.1f}, {p['y']:.1f}) mm, z={p['z']:.1f}mm, pitch={p['pitch']:.3f}°, magnitude={mag:.1f} mm")
     
     return path
 
@@ -213,10 +118,12 @@ def run_scan_window(
     frame_sink: FrameSink,                 # REQUIRED: main-thread renderer
     display_scale: float = None,
     allowed_class_ids: Optional[Iterable[int]] = None,
+    arm_is_stopped: Optional[CallableBool] = None,  # NEW: Callable to check if arm is stopped
 ) -> dict:
     """
     Run a short scan window and aggregate per-class stats while continuously
     publishing YOLO-annotated frames to the main thread.
+    Only runs YOLO inference when arm is stopped (arm_is_stopped() returns True).
     """
     if display_scale is None:
         display_scale = float(C.DISPLAY_SCALE)
@@ -236,36 +143,60 @@ def run_scan_window(
     allowed_ids = list(allowed_class_ids) if allowed_class_ids is not None else None
 
     while (time.time() - t0) < duration_s:
-        ok, frame = cap.read()
-        if not ok:
-            break
+        # Non-blocking camera read using grab/retrieve pattern
+        grabbed = cap.grab()
+        if not grabbed:
+            # Fallback to regular read if grab fails
+            ok, frame = cap.read()
+            if not ok:
+                break
+        else:
+            ok, frame = cap.retrieve()
+            if not ok:
+                continue
+        
         frames += 1
         h, w = frame.shape[:2]
 
-        # Run YOLO and get an annotated image to display (faster inference)
-        results = model(frame, classes=allowed_ids, verbose=False, half=False)  # Disable verbose for speed
-
-        annotated = frame  # fallback if no results object behaves oddly
-        for r in results:
-            # Aggregate stats from detections
-            for cls_id, conf, cx, cy in _result_iter(r, w, h):
-                if cls_id in exclude:
-                    continue
-                per_class_conf.setdefault(cls_id, []).append(conf)
-                per_class_cx.setdefault(cls_id, []).append(cx)
-                per_class_cy.setdefault(cls_id, []).append(cy)
-
-            # Use YOLO's plotted/annotated frame for display
+        # Only run YOLO when arm is stopped
+        arm_stopped = arm_is_stopped() if arm_is_stopped is not None else True
+        
+        if arm_stopped:
+            # Run YOLO and get an annotated image to display (faster inference)
+            # Use half precision for faster inference (reduces stuttering)
             try:
-                annotated = r.plot()
-            except Exception:
-                pass  # if plot fails, show the raw frame + HUD
+                results = model(frame, classes=allowed_ids, verbose=False, half=True)
+                
+                annotated = frame  # fallback if no results object behaves oddly
+                for r in results:
+                    # Aggregate stats from detections
+                    for cls_id, conf, cx, cy in _result_iter(r, w, h):
+                        if cls_id in exclude:
+                            continue
+                        per_class_conf.setdefault(cls_id, []).append(conf)
+                        per_class_cx.setdefault(cls_id, []).append(cx)
+                        per_class_cy.setdefault(cls_id, []).append(cy)
+
+                    # Use YOLO's plotted/annotated frame for display
+                    try:
+                        annotated = r.plot()
+                    except Exception:
+                        pass  # if plot fails, show the raw frame + HUD
+            except Exception as e:
+                # If YOLO fails, show raw frame
+                annotated = frame.copy()
+        else:
+            # Arm is moving - show raw frame without YOLO
+            annotated = frame.copy()
 
         # Add a simple HUD ribbon and publish annotated frame (only publish once per loop)
         annotated = _draw_scan_hud(annotated, hud_text, display_scale=display_scale)
         rh, rw = annotated.shape[:2]
         resized = cv2.resize(annotated, (int(rw * display_scale), int(rh * display_scale)))
         frame_sink(resized)
+        
+        # Frame rate limiting
+        time.sleep(0.033)  # ~30 FPS
 
     # Build summary
     objects: List[dict] = []
