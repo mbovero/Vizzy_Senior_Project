@@ -84,7 +84,7 @@ def expand_high_level_commands(plan: List[Dict], memory: ObjectMemory) -> List[D
     
     PICK(target) expands to:
       1. RELEASE
-      2. MOVE_TO(target + vertical_offset, pitch=-π/2)  # Approach from above
+      2. MOVE_TO(target + vertical_offset, pitch=0)  # Approach from above while keeping claw out straight
       3. ROT_YAW(grasp_angle)  # from object's orientation in memory
       4. MOVE_TO(target, pitch=-π/2)  # Descend to object
       5. GRAB
@@ -110,7 +110,7 @@ def expand_high_level_commands(plan: List[Dict], memory: ObjectMemory) -> List[D
             # Get grasp orientation for this object
             grasp_angle = get_grasp_orientation(target, memory)
             
-            # Get object's actual z coordinate (without offset)
+            # Get object's actual coordinates
             obj_xyz = _resolve_to_xyz(target, memory)
             if obj_xyz is None:
                 print(f"[Tasks] Warning: Could not resolve target {target} for PICK, skipping")
@@ -120,24 +120,24 @@ def expand_high_level_commands(plan: List[Dict], memory: ObjectMemory) -> List[D
             
             # Expand to primitive sequence:
             # 1. RELEASE (ensure claw is open)
-            # 2. ROT_YAW to optimal grasp orientation
-            # 3. MOVE_TO above object with approach offset, pitch down, with optimal yaw
-            # 4. MOVE_TO to object's actual z coordinate (no offset), pitch down, keep yaw
+            # 2. MOVE_TO above object with approach offset, pitch=0 (claw out straight)
+            # 3. ROT_YAW to optimal grasp orientation
+            # 4. MOVE_TO to object (descend with pitch=-π/2)
             # 5. GRAB (close claw)
-            # 6. MOVE_TO rest position with rest pitch/yaw
+            # 6. MOVE_TO rest position with rest pitch
+            # 7. ROT_YAW to rest yaw angle
             vertical_offset = [0, 0, C.APPROACH_OFFSET_Z]
             expanded.extend([
                 {"command": "RELEASE"},
-                {"command": "ROT_YAW", "angle": grasp_angle},  # Set yaw before approaching
-                {"command": "MOVE_TO", "destination": target, "offset": vertical_offset, "pitch": -90.0},
-                # Second MOVE_TO: go to object's actual z coordinate (no offset), keep pitch down and yaw
-                {"command": "MOVE_TO", "destination": [obj_xyz[0], obj_xyz[1], 0], "pitch": -90.0},
+                {"command": "MOVE_TO", "destination": target, "offset": vertical_offset, "pitch": 0.0},  # Approach from above with claw straight
+                {"command": "ROT_YAW", "angle": grasp_angle},  # Rotate to grasp orientation
+                {"command": "MOVE_TO", "destination": target, "pitch": -90.0},  # Descend to object (pitch = -π/2)
                 {"command": "GRAB"},
                 {"command": "MOVE_TO", "destination": C.REST_POSITION, "pitch": C.REST_PITCH_ANGLE},
                 {"command": "ROT_YAW", "angle": C.REST_YAW_ANGLE},
             ])
             print(f"[Tasks]   Expanded to 7 primitives")
-            print(f"[Tasks]   Sequence: RELEASE -> ROT_YAW({grasp_angle:.1f}°) -> MOVE_TO(above, z={obj_z + C.APPROACH_OFFSET_Z:.1f}mm) -> MOVE_TO(pick, z={obj_z:.1f}mm) -> GRAB -> REST")
+            print(f"[Tasks]   Sequence: RELEASE -> MOVE_TO(above, z={obj_z + C.APPROACH_OFFSET_Z:.1f}mm, pitch=0°) -> ROT_YAW({grasp_angle:.1f}°) -> MOVE_TO(pick, z={obj_z:.1f}mm, pitch=-90°) -> GRAB -> REST")
         
         elif command == "PLACE":
             print(f"[Tasks] Expanding PLACE command {i}...")

@@ -177,7 +177,7 @@ REST_YAW_ANGLE = 0.0             # degrees
 REST_PITCH_ANGLE = 0.0           # degrees
 
 # Vertical offset for approach/retract moves (millimeters)
-APPROACH_OFFSET_Z = 100.0        # mm above object for safe approach
+APPROACH_OFFSET_Z = 350.0        # mm above object for safe approach
 
 # Timeout for primitive command execution (seconds)
 PRIMITIVE_CMD_TIMEOUT = 30.0

@@ -202,13 +202,14 @@ class ScanWorker(threading.Thread):
         # Only register object if centering was successful (movement < 5mm and object centered)
         if center_success:
             print(f"[ScanWorker] Centering SUCCESS - movement < {C.CENTER_MIN_MOVEMENT_MM}mm")
-            print(f"[ScanWorker] Final centered position: x={final_x_mm:.2f}mm, y={final_y_mm:.2f}mm, z={z:.2f}mm")
+            print(f"[ScanWorker] Final centered position: x={final_x_mm:.2f}mm, y={final_y_mm:.2f}mm, z=0.0mm (stored as 0)")
             
             # Use the final centered position for object location
+            # Z coordinate is always stored as 0 (objects are on the table/work surface)
             loc = {
                 "x": final_x_mm,  # Final x after centering
                 "y": final_y_mm,  # Final y after centering
-                "z": z,           # Z unchanged
+                "z": 0.0,         # Z always stored as 0 (object is on table/work surface)
             }
             
             # Calculate grasp orientation from collected frames
