@@ -168,17 +168,20 @@ def get_grasp_orientation(target: Any, memory: ObjectMemory) -> float:
     If target is coordinates, returns default angle (0.0).
     
     Returns:
-        Yaw angle in degrees for grasping
+        Yaw angle in degrees for grasping (converted from radians stored in memory)
     """
+    import math
     if isinstance(target, str):
         # Object ID - look up in memory
         obj = memory.get_object(target)
         if obj:
             # Check if object has orientation data
             orientation = obj.get("orientation", {})
-            yaw = orientation.get("grasp_yaw", 0.0)
-            print(f"[Tasks] Object {target} grasp angle: {yaw:.1f}°")
-            return yaw
+            yaw_rad = orientation.get("grasp_yaw", 0.0)
+            # Convert from radians (stored) to degrees (expected by ROT_YAW command)
+            yaw_deg = math.degrees(yaw_rad)
+            print(f"[Tasks] Object {target} grasp angle: {yaw_rad:.4f} rad -> {yaw_deg:.1f}°")
+            return yaw_deg
         else:
             print(f"[Tasks] Warning: Object {target} not found in memory, using default angle (0.0°)")
             return 0.0

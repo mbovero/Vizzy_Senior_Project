@@ -37,16 +37,15 @@ MOVEMENT_SCALE_FACTOR = 1.2  # Scale factor for movement calculation
 
 # Explicit scan gates (selection before attempting to center)
 # (Use these to filter scan results; centering thresholds remain separate.)
-SCAN_MIN_CONF   = 0.70  # 70% confidence threshold for object detection
-SCAN_MIN_FRAMES = 3  # Reduced from 4 for faster detection
+SCAN_MIN_CONF   = 0.60  # confidence threshold for object detection
+SCAN_MIN_FRAMES = 10  # Reduced from 4 for faster detection
 
 # Centering verification thresholds (used during closed-loop centering)
 CENTER_CONF        = 0.60     # Per-frame minimum confidence
 CENTER_EPSILON_PX  = 25       # Pixel error tolerance for success
 CENTER_MOVE_NORM   = 0.035    # Normalized motion stability
 CENTER_FRAMES      = 12       # Number of good frames (not necessarily consecutive)
-CENTER_DEADZONE    = 30       # HUD/visual deadzone (px); also helps avoid micro-hunting
-CENTER_MIN_MOVEMENT_MM = 5.0  # Minimum movement threshold: if movement < 5mm, consider centered
+CENTER_MIN_MOVEMENT_MM = 3.0  # Minimum movement threshold: if movement < 5mm, consider centered
 CENTER_MEASURE_WAIT_TIME_S = 2.0  # Time to wait after movement command before measuring (arm must be stopped)
 
 # Retry / safety
@@ -96,26 +95,26 @@ SEARCH_PITCH_DEG = 5
 # Explicit search path points (x_mm, y_mm) - all valid poses the arm can move to
 SEARCH_PATH_POINTS = [
     # Start points
-    (100.0, -225.0),    # Pose 0
-    (100.0, -350.0),    # Pose 1
-    (100.0, -450.0),    # Pose 2
+
     # Middle points
-    (350.0, -350.0),  # Pose 5
-    (270.0, -270.0),  # Pose 4
     (170,-170),  # Pose 3
+    (270.0, -270.0),  # Pose 4
+    (350.0, -350.0),  # Pose 5
     
-    (250.0, 0.0),     # Pose 6
-    (350.0, 0.0),     # Pose 7
+    
     (450.0, 0.0),     # Pose 8
-    (350.0, 350.0),   # Pose 11
-    (270.0, 270.0),   # Pose 10
+    (350.0, 0.0),     # Pose 7
+    (250.0, 0.0),     # Pose 6
+    
+    
     (170, 170),   # Pose 9
+    (270.0, 270.0),   # Pose 10
+    (350.0, 350.0),   # Pose 11
     
     
-    # End points
-    (100.0, 225.0),     # Pose 12
-    (100.0, 350.0),     # Pose 13
-    (100, 450.0),     # Pose 14
+    (250.0, 0.0),  
+    
+
 ]
 
 # Relative nudge scaling (converted from normalized [-1,1] commands on the RPi)
@@ -140,7 +139,7 @@ SERVO_CLAW_MIN_US     = 1000
 SERVO_CLAW_MAX_US     = 2000
 
 # Idle/auto-search behavior (laptop)
-IDLE_TIMEOUT_S = 20.0   # seconds of inactivity before auto SEARCH
+IDLE_TIMEOUT_S = 60.0   # seconds of inactivity before auto SEARCH
 
 # -----------------------------
 # LLM / Semantic Enrichment

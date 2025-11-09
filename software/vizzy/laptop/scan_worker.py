@@ -214,6 +214,26 @@ class ScanWorker(threading.Thread):
             # Calculate grasp orientation from collected frames
             orientation_data = self._calculate_orientation_from_collected_frames(collected_frames)
             
+            # Apply yaw transformation: positive yaw - 90°, negative yaw + 90°
+            # Then convert to radians for storage
+            import math
+            yaw_deg = orientation_data.get("grasp_yaw", 0.0)
+            
+            if yaw_deg > 0:
+                corrected_yaw_deg = yaw_deg - 90.0
+            elif yaw_deg < 0:
+                corrected_yaw_deg = yaw_deg + 90.0
+            else:
+                corrected_yaw_deg = yaw_deg  # yaw is exactly 0, no change needed
+            
+            # Convert to radians for storage
+            corrected_yaw_rad = math.radians(corrected_yaw_deg)
+            
+            print(f"[ScanWorker] Yaw transformation: {yaw_deg:.2f}° -> {corrected_yaw_deg:.2f}° -> {corrected_yaw_rad:.4f} rad")
+            
+            # Update orientation data with corrected yaw in radians
+            orientation_data["grasp_yaw"] = corrected_yaw_rad
+            
             # Create object entry with unique ID
             object_id = self.memory.update_entry(
                 cls_id=cls_id,
