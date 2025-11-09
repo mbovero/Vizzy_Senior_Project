@@ -94,9 +94,9 @@ REST3               = 3.25
 STEP_SIZE_RAD       = 0.08
 STEP_DELAY_S        = 0.01
 
-ACCEL_LIMIT         = 1.2
-VEL_LIMIT           = 8.0
-HOLD_ACCEL_LIMIT    = 1.0
+ACCEL_LIMIT         = 3
+VEL_LIMIT           = 10.0
+HOLD_ACCEL_LIMIT    = 2.0
 HOLD_VEL_LIMIT      = 4.0
 WATCHDOG            = 15.0
 
@@ -105,7 +105,7 @@ ACCEL_MULT          = 2.4
 MIN_SPEED           = 0.02
 POS_TOL             = 0.01
 SYNC_POLL_S         = 0.05
-SYNC_TIMEOUT_EXTRA  = 1.0
+SYNC_TIMEOUT_EXTRA  = 0.1
 
 TEMP_LIMIT          = 50.0
 COOL_RESUME_TEMP    = 40.0
