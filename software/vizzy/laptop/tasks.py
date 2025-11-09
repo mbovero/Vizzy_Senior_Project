@@ -311,8 +311,24 @@ def convert_to_ik_format(plan: List[Dict]) -> List[Dict]:
     Strategy: Process commands and combine GRAB/RELEASE with adjacent MOVE_TO commands.
     
     All coordinates are converted from mm to meters for IK.
+    
+    Note: Automatically prepends a MOVE_TO rest position at the beginning of any sequence.
     """
     import math
+    
+    # Prepend MOVE_TO rest position at the beginning of the sequence
+    if plan:
+        rest_pos = C.REST_POSITION
+        rest_move_to = {
+            "command": "MOVE_TO",
+            "x": float(rest_pos[0]),
+            "y": float(rest_pos[1]),
+            "z": float(rest_pos[2]),
+            "pitch": C.REST_PITCH_ANGLE,
+        }
+        # Insert at the beginning
+        plan = [rest_move_to] + plan
+        print(f"[Tasks] Prepend MOVE_TO rest position: [{rest_pos[0]}, {rest_pos[1]}, {rest_pos[2]}] mm, pitch={C.REST_PITCH_ANGLE}°")
     
     ik_commands = []
     
