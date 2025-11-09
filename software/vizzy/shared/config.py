@@ -26,14 +26,19 @@ OBJ_BLACKLIST = [
     "dining table",
 ]
 
-# Duration knobs (ms)
-SCAN_DURATION_MS   = 1750   # Per-pose scan window
-CENTER_DURATION_MS = 3000   # Max time to attempt centering
+# Duration knobs (ms) - reduced for faster iteration
+SCAN_DURATION_MS   = 1000   # Per-pose scan window (reduced from 1750)
+CENTER_DURATION_MS = 10000  # Max time to attempt centering (10 seconds)
+
+# Centering movement calculation (matching object_centering.py)
+PIXEL_TO_MM = 1.0 / 2.90  # mm per pixel
+WORKING_DISTANCE_MM = 600.0  # mm (typical working distance for arm operations)
+MOVEMENT_SCALE_FACTOR = 1.7  # Scale factor for movement calculation
 
 # Explicit scan gates (selection before attempting to center)
 # (Use these to filter scan results; centering thresholds remain separate.)
-SCAN_MIN_CONF   = 0.60
-SCAN_MIN_FRAMES = 4
+SCAN_MIN_CONF   = 0.70  # 70% confidence threshold for object detection
+SCAN_MIN_FRAMES = 3  # Reduced from 4 for faster detection
 
 # Centering verification thresholds (used during closed-loop centering)
 CENTER_CONF        = 0.60     # Per-frame minimum confidence
@@ -41,12 +46,17 @@ CENTER_EPSILON_PX  = 25       # Pixel error tolerance for success
 CENTER_MOVE_NORM   = 0.035    # Normalized motion stability
 CENTER_FRAMES      = 12       # Number of good frames (not necessarily consecutive)
 CENTER_DEADZONE    = 30       # HUD/visual deadzone (px); also helps avoid micro-hunting
+CENTER_MIN_MOVEMENT_MM = 5.0  # Minimum movement threshold: if movement < 5mm, consider centered
+CENTER_MEASURE_WAIT_TIME_S = 2.0  # Time to wait after movement command before measuring (arm must be stopped)
 
 # Retry / safety
 MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a single pose
 
 # Object memory
 MEM_FILE = str(LAPTOP_DIR / "object_memory.json")
+
+# Valid objects to center on during search (only fork and cup)
+SEARCH_VALID_CLASS_NAMES = ["fork", "cup"]  # Only center on these objects
 
 # -----------------------------
 # Networking
@@ -63,17 +73,26 @@ LISTEN_PORT = 65432
 # Cartesian Search & Arm Geometry
 # -----------------------------
 # Workspace bounds used to build the search path (millimetres, laptop-side)
-SEARCH_X_MIN_MM = 150.0
-SEARCH_X_MAX_MM = 450.0
-SEARCH_X_STEP_MM = 40.0
+# Constraints: 
+#   - x >= 0 (non-negative, cannot go negative)
+#   - y can be negative or positive (can go negative)
+#   - Magnitude of (x, y) must be >= 300mm: sqrt(x^2 + y^2) >= 300mm
+#   - Magnitude of (x, y) must be <= 500mm: sqrt(x^2 + y^2) <= 500mm
+# Invalid poses are filtered out by build_search_path()
+# NOTE: Commands are sent to server in meters (mm/1000.0)
+SEARCH_X_MIN_MM = 0.0    # Starting x: 0mm (x cannot be negative)
+SEARCH_X_MAX_MM = 500.0  # Maximum x: 500mm (constrained by max magnitude)
+SEARCH_X_STEP_MM = 50.0  # Step size: 50mm (reduced by 50% from 100mm)
 
-SEARCH_Y_MIN_MM = -150.0
-SEARCH_Y_MAX_MM = 150.0
-SEARCH_Y_STEP_MM = 40.0
+SEARCH_Y_MIN_MM = -500.0  # Minimum y: -500mm (y can be negative)
+SEARCH_Y_MAX_MM = 500.0   # Maximum y: 500mm (constrained by max magnitude)
+SEARCH_Y_STEP_MM = 50.0   # Step size: 50mm (reduced by 50% from 100mm)
 
-# Z is often constrained to a plane during scanning; allow step if needed
-SEARCH_Z_MIN_MM = 550.0
-SEARCH_Z_MAX_MM = 650.0
+# Z is fixed at 275mm (0.275m) for the entire scan cycle
+SEARCH_Z_FIXED_MM = 275.0
+# Legacy z range (not used when SEARCH_Z_FIXED_MM is set)
+SEARCH_Z_MIN_MM = 275.0
+SEARCH_Z_MAX_MM = 275.0
 SEARCH_Z_STEP_MM = 50.0
 
 # Default pitch for search poses (degrees)
@@ -82,9 +101,9 @@ SEARCH_PITCH_DEG = 0.0
 # Relative nudge scaling (converted from normalized [-1,1] commands on the RPi)
 SCAN_NUDGE_STEP_MM = 5.0
 
-# Target settle/dwell times
-MOVE_SETTLE_S = 0.30          # allow time after a commanded move before accepting nudges
-RETURN_TO_POSE_DWELL_S = 0.25 # dwell after returning to baseline before next scan window
+# Target settle/dwell times (reduced for faster iteration)
+MOVE_SETTLE_S = 0.15          # allow time after a commanded move before accepting nudges (reduced from 0.30)
+RETURN_TO_POSE_DWELL_S = 0.10 # dwell after returning to baseline before next scan window (reduced from 0.25)
 
 # Physical servo PWM bounds for the new arm (documentation for IK output clamping)
 SERVO_PITCH_CENTER_US = 1500

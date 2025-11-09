@@ -8,7 +8,7 @@ import numpy as np
 
 from .hud import draw_wrapped_text
 from .yolo_runner import clear_class_filter
-from ..shared import config
+from ..shared import config as C
 
 
 # ------------------------------ helpers ------------------------------------- #
@@ -47,6 +47,48 @@ def instance_center(box_xyxy, mask_tensor, frame_w: int, frame_h: int) -> Tuple[
     return int((x1 + x2) / 2), int((y1 + y2) / 2)
 
 
+def calculate_movement_needed(
+    obj_offset_x_camera_mm: float,
+    obj_offset_y_camera_mm: float,
+    working_distance_mm: float,
+    scale_factor: float = 1.0
+) -> Tuple[float, float]:
+    """
+    Calculate the movement needed in x and y to center the object.
+    This matches object_centering.py exactly.
+    
+    Camera orientation:
+    - Camera y-axis (top/bottom in image) maps to global x-axis movement
+    - Camera x-axis (left/right in image) maps to global y-axis movement (negated)
+    
+    Movement calculation (matching object_centering.py):
+    - Camera y offset (top/bottom) → x movement
+    - Camera x offset (left/right) → y movement (negated)
+    
+    Args:
+        obj_offset_x_camera_mm: Object offset in camera x direction (left/right) in mm
+        obj_offset_y_camera_mm: Object offset in camera y direction (top/bottom) in mm
+        working_distance_mm: Working distance from camera to objects (mm) - kept for compatibility
+        scale_factor: Scale factor to multiply movement values (default 1.0)
+    
+    Returns:
+        Tuple of (movement_x_mm, movement_y_mm)
+        - movement_x_mm: Movement needed in global x direction (scaled)
+        - movement_y_mm: Movement needed in global y direction (scaled)
+    """
+    # Camera y offset (top/bottom) → x movement
+    movement_x_mm = obj_offset_y_camera_mm
+    
+    # Camera x offset → y movement (negated)
+    movement_y_mm = -obj_offset_x_camera_mm
+    
+    # Apply scale factor to both movements
+    movement_x_mm *= scale_factor
+    movement_y_mm *= scale_factor
+    
+    return movement_x_mm, movement_y_mm
+
+
 # ----------------------------- main routine --------------------------------- #
 
 def center_on_class(
@@ -60,45 +102,108 @@ def center_on_class(
     label: str,
     frame_sink: Callable[[np.ndarray], None],
     collect_frames: bool = False,
-) -> Tuple[bool, list]:
+    current_x_mm: float = 0.0,
+    current_y_mm: float = 0.0,
+    current_z_mm: float = 275.0,
+    current_pitch_deg: float = 0.0,
+    motion=None,
+) -> Tuple[bool, list, float, float]:
     """
-    Closed-loop centering on a class for up to config.CENTER_DURATION_MS.
+    Closed-loop centering on a class for up to C.CENTER_DURATION_MS.
 
     Args:
         cap: OpenCV VideoCapture.
         model: YOLO model instance (Ultralytics).
         target_cls: Class ID to center on.
         center_x, center_y: Pixel coordinates of frame center.
-        send_move: Callback taking normalized (dx, dy) in [-1,1].
+        send_move: Callback taking normalized (dx, dy) in [-1,1] (legacy, not used if motion is provided).
         display_scale: Scale factor for displayed frames.
         label: HUD label prefix.
         frame_sink: Callback to publish frames to main/UI thread.
         collect_frames: If True, collect stable frames with masks for orientation calculation.
+        current_x_mm: Current x position in mm (for absolute moves).
+        current_y_mm: Current y position in mm (for absolute moves).
+        current_z_mm: Current z position in mm (for absolute moves).
+        current_pitch_deg: Current pitch angle in degrees (for absolute moves).
+        motion: Motion object for absolute moves (if None, uses send_move callback).
 
     Returns:
-        (success, collected_frames): success is bool, collected_frames is list of dicts with "frame" and "mask"
+        (success, collected_frames, final_x_mm, final_y_mm): 
+        - success: bool
+        - collected_frames: list of dicts with "frame" and "mask"
+        - final_x_mm: final x position after centering (mm)
+        - final_y_mm: final y position after centering (mm)
     """
     t0 = time.time()
     good_frames = 0
     success = False
     captured_frames = []
+    # Initialize last_move_time to a time in the past so first measurement can happen immediately
+    last_move_time = time.time() - (C.CENTER_MEASURE_WAIT_TIME_S + 1.0)  # Start with arm already "settled"
+    arm_is_moving = False  # Track if arm is currently moving
+    
+    # Track current position for absolute moves (relative to baseline pose, not origin)
+    # Start from the baseline pose passed in - this is where the arm currently is
+    x_mm = current_x_mm  # Current x position relative to origin (mm) - baseline pose
+    y_mm = current_y_mm  # Current y position relative to origin (mm) - baseline pose
+    z_mm = current_z_mm  # Current z position relative to origin (mm) - baseline pose
+    pitch_deg = current_pitch_deg  # Current pitch (degrees) - baseline pose
+    
+    print(f"[Centering] Starting centering at baseline position: x={x_mm:.2f}mm, y={y_mm:.2f}mm, z={z_mm:.2f}mm")
+    print(f"[Centering] Measurements will only occur when arm is stopped")
+    print(f"[Centering] Wait time after movement command: {C.CENTER_MEASURE_WAIT_TIME_S}s before next measurement")
 
     # Loop until time budget is exhausted or success achieved
-    while (time.time() - t0) < (config.CENTER_DURATION_MS / 1000.0) and not success:
+    while (time.time() - t0) < (C.CENTER_DURATION_MS / 1000.0) and not success:
+        current_time = time.time()
+        
+        # Check if arm has settled after last movement
+        # Only measure movement when 2 seconds have passed since the movement command
+        time_since_last_move = current_time - last_move_time
+        
+        # If enough time has passed since last movement, arm is no longer moving
+        if arm_is_moving and time_since_last_move >= C.CENTER_MEASURE_WAIT_TIME_S:
+            arm_is_moving = False
+            print(f"[Centering] Arm has stopped moving ({time_since_last_move:.2f}s elapsed) - ready for measurement")
+        
+        arm_is_settled = (time_since_last_move >= C.CENTER_MEASURE_WAIT_TIME_S) and not arm_is_moving
+        
         ok, frame = cap.read()
         if not ok:
             break
 
-        # Model inference filtered to the target class
-        results = model(frame, [int(target_cls)], verbose = config.YOLO_VERBOSE)
+        # Skip YOLO inference and movement measurement if arm is still moving or hasn't settled
+        # Just show status and publish frame for live feed
+        if not arm_is_settled:
+            # Skip YOLO inference to save computation - just show status
+            annotated = frame.copy()
+            h, w = annotated.shape[:2]
+            cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
+            remaining_time = C.CENTER_MEASURE_WAIT_TIME_S - time_since_last_move
+            if remaining_time > 0:
+                status = f"Waiting for arm to stop ({time_since_last_move:.1f}s/{C.CENTER_MEASURE_WAIT_TIME_S}s)..."
+            else:
+                status = "Arm ready for measurement"
+            hud = f"{label}  {status}"
+            max_w = int(annotated.shape[1] * 0.92)
+            draw_wrapped_text(annotated, hud, 10, 24, max_w)
+            resized = cv2.resize(annotated, (int(w * display_scale), int(h * display_scale)))
+            frame_sink(resized)
+            time.sleep(0.016)  # ~60 FPS update rate for smooth GUI
+            continue
+        
+        # Model inference filtered to the target class (only when arm is settled)
+        results = model(frame, [int(target_cls)], verbose=False)  # Disable verbose for speed
+        annotated = frame  # fallback
+        best_conf = 0.0
+        best_area = 0
+        best_xy = None
+        best_mask_tensor = None
+        
         for result in results:
             annotated = result.plot()
 
             # Choose highest-confidence instance (break ties by larger bbox area)
-            best_conf = 0.0
-            best_area = 0
-            best_xy = None
-
             if len(result.boxes) > 0:
                 masks = getattr(result, "masks", None)
                 mask_list = list(masks.data) if (masks is not None and masks.data is not None) else None
@@ -121,48 +226,173 @@ def center_on_class(
                         best_conf = conf
                         best_area = area
                         best_xy = (int(cx), int(cy))
+                        best_mask_tensor = mask_tensor
+        
+        # Process best detection (outside the result loop)
+        # Only process measurements when arm is settled (stopped)
+        movement_x_mm = 0.0
+        movement_y_mm = 0.0
+        best_xy_valid = (best_xy is not None)
+        movement_small_enough = False
+        conf_ok = False
+        err_ok = False
+        move_ok = False
+        dx_px = 0
+        dy_px = 0
+        err_px = 0
+        
+        if best_xy_valid:
+            bx, by = best_xy
+            # Note: bx is column (image x), by is row (image y)
+            # center_x is column (image x), center_y is row (image y)
 
-            if best_xy is not None:
-                bx, by = best_xy
+            # Pixel error relative to frame center (for display/stability checks)
+            dx_px = center_x - bx     # >0 → object left of center (in image)
+            dy_px = by - center_y     # >0 → object below center (in image)
+            err_px = max(abs(dx_px), abs(dy_px))
 
-                # Pixel error relative to frame center
-                dx_px = center_x - bx     # >0 → object left of center
-                dy_px = by - center_y     # >0 → object below center
-                err_px = max(abs(dx_px), abs(dy_px))
+            # Calculate camera coordinate offsets (matching object_centering.py exactly)
+            # Note: In object_centering.py:
+            #   - center_x = frame_h // 2 (row, y-coordinate in image)
+            #   - center_y = frame_w // 2 (column, x-coordinate in image)
+            #   - cx is column (x-coordinate), cy is row (y-coordinate)
+            #   - cam_to_obj_x_camera = cx - center_y (column - center_column)
+            #   - cam_to_obj_y_camera = cy - center_x (row - center_row)
+            # In our code (from scan_worker):
+            #   - center_x = w0 // 2 (column, x-coordinate in image)
+            #   - center_y = h0 // 2 (row, y-coordinate in image)
+            #   - bx is column (x-coordinate), by is row (y-coordinate)
+            # To match object_centering.py calculation:
+            #   - cam_to_obj_x_camera = bx - center_x (column - center_column)
+            #   - cam_to_obj_y_camera = by - center_y (row - center_row)
+            cam_to_obj_x_camera = bx - center_x  # column offset (camera x direction, left/right)
+            cam_to_obj_y_camera = by - center_y  # row offset (camera y direction, top/bottom)
+            
+            # Convert to millimeters
+            obj_offset_x_camera_mm = cam_to_obj_x_camera * C.PIXEL_TO_MM
+            obj_offset_y_camera_mm = cam_to_obj_y_camera * C.PIXEL_TO_MM
+            
+            # Calculate movement needed in mm (using same logic as object_centering.py)
+            movement_x_mm, movement_y_mm = calculate_movement_needed(
+                obj_offset_x_camera_mm=obj_offset_x_camera_mm,
+                obj_offset_y_camera_mm=obj_offset_y_camera_mm,
+                working_distance_mm=C.WORKING_DISTANCE_MM,
+                scale_factor=C.MOVEMENT_SCALE_FACTOR
+            )
+            
+            # Normalized error for display/stability checks
+            ndx = dx_px / max(1, center_x)
+            ndy = dy_px / max(1, center_y)
+            move_norm = max(abs(ndx), abs(ndy))
 
-                # Normalized error to [-1, 1]
-                ndx = dx_px / max(1, center_x)
-                ndy = dy_px / max(1, center_y)
-                move_norm = max(abs(ndx), abs(ndy))
+            # Threshold checks
+            conf_ok = (best_conf >= C.CENTER_CONF)
+            err_ok = (abs(dx_px) <= C.CENTER_EPSILON_PX and abs(dy_px) <= C.CENTER_EPSILON_PX)
+            move_ok = (abs(ndx) < C.CENTER_MOVE_NORM and abs(ndy) < C.CENTER_MOVE_NORM)
+            
+            # NEW: Check if movement is less than 5mm in each direction
+            # Movement must be < 5mm in both x and y to be considered "centered"
+            movement_small_enough = (abs(movement_x_mm) < C.CENTER_MIN_MOVEMENT_MM and 
+                                     abs(movement_y_mm) < C.CENTER_MIN_MOVEMENT_MM)
 
-                # Threshold checks
-                conf_ok = (best_conf >= config.CENTER_CONF)
-                err_ok = (abs(dx_px) <= config.CENTER_EPSILON_PX and abs(dy_px) <= config.CENTER_EPSILON_PX)
-                move_ok = (abs(ndx) < config.CENTER_MOVE_NORM and abs(ndy) < config.CENTER_MOVE_NORM)
-
-                # Command movement if not within stability thresholds
-                if not (err_ok and move_ok):
+            # Command movement if movement is too large (>= 5mm in either direction)
+            # OR if not within pixel/stability thresholds
+            if not movement_small_enough or not (err_ok and move_ok):
+                if motion is not None:
+                    # Only move if movement is >= 5mm in at least one direction
+                    if not movement_small_enough:
+                        # Calculate new absolute position by adding movement to CURRENT position
+                        # This is relative to the current arm position, not the origin
+                        # We accumulate movements from the baseline pose
+                        new_x_mm = x_mm + movement_x_mm  # Add movement to current x
+                        new_y_mm = y_mm + movement_y_mm  # Add movement to current y
+                        
+                        # Send absolute move command (new position relative to origin)
+                        print(f"[Centering] Current pos: ({x_mm:.2f}, {y_mm:.2f})mm")
+                        print(f"[Centering] Movement: dx={movement_x_mm:.2f}mm dy={movement_y_mm:.2f}mm")
+                        print(f"[Centering] Movement too large (>= {C.CENTER_MIN_MOVEMENT_MM}mm) - moving arm")
+                        print(f"[Centering] New pos: ({new_x_mm:.2f}, {new_y_mm:.2f})mm")
+                        
+                        ok = motion.move_to_target(new_x_mm, new_y_mm, z_mm, pitch_deg)
+                        if ok:
+                            # Update tracked position after successful move (accumulate from baseline)
+                            x_mm = new_x_mm
+                            y_mm = new_y_mm
+                            print(f"[Centering] Move command sent and acknowledged")
+                            print(f"[Centering] Updated target position to ({x_mm:.2f}, {y_mm:.2f})mm")
+                            # Mark that arm is moving and record move time
+                            # The ACK means the server received the command, but arm is still physically moving
+                            arm_is_moving = True
+                            last_move_time = time.time()
+                            print(f"[Centering] Arm movement started - will wait {C.CENTER_MEASURE_WAIT_TIME_S}s before next measurement")
+                        else:
+                            print(f"[Centering] Warning: Move command failed or timed out, keeping old position ({x_mm:.2f}, {y_mm:.2f})mm")
+                            # If command failed, don't mark as moving
+                            # But still wait a bit in case there's residual motion
+                            last_move_time = time.time()
+                            arm_is_moving = True
+                        
+                        # Don't set arm_is_moving = False here!
+                        # The arm is physically moving even after ACK is received
+                        # We'll check the time in the next iteration to see if enough time has passed
+                        # Publish current frame with movement info before continuing to keep GUI live
+                        if best_xy_valid:
+                            bx, by = best_xy
+                            cv2.circle(annotated, (bx, by), 6, (0, 0, 255), -1)
+                            cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
+                            cv2.line(annotated, (bx, by), (center_x, center_y), (0, 255, 0), 2)
+                        else:
+                            cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
+                        hud = f"{label}  Moving arm... waiting {C.CENTER_MEASURE_WAIT_TIME_S}s"
+                        max_w = int(annotated.shape[1] * 0.92)
+                        draw_wrapped_text(annotated, hud, 10, 24, max_w)
+                        h, w = annotated.shape[:2]
+                        resized = cv2.resize(annotated, (int(w * display_scale), int(h * display_scale)))
+                        frame_sink(resized)
+                        # Continue to next iteration to wait for movement to complete
+                        continue
+                    else:
+                        # Movement is small but pixel/stability thresholds not met
+                        # This is okay, we'll keep checking
+                        print(f"[Centering] Movement small (dx={movement_x_mm:.2f}mm dy={movement_y_mm:.2f}mm) but not fully stable yet")
+                else:
+                    # Legacy: use normalized moves (if motion not provided)
                     send_move(ndx, ndy)
+            else:
+                # Movement is small enough AND thresholds are met
+                if best_xy_valid:
+                    print(f"[Centering] Movement is small enough: dx={movement_x_mm:.2f}mm dy={movement_y_mm:.2f}mm (< {C.CENTER_MIN_MOVEMENT_MM}mm)")
 
-                # Count stable frames toward quota
-                if conf_ok and err_ok and move_ok:
-                    good_frames += 1
-                    
-                    # Collect frames with masks if requested (only up to CENTER_FRAMES)
-                    if collect_frames and len(captured_frames) < config.CENTER_FRAMES:
-                        # Find the mask tensor for this detection
-                        mask_tensor = mask_list[i] if mask_list is not None and i < len(mask_list) else None
-                        if mask_tensor is not None:
-                            captured_frames.append({
-                                "frame": frame.copy(),
-                                "mask": mask_tensor
-                            })
-                    
-                    if good_frames >= config.CENTER_FRAMES:
-                        success = True
-                        break  # Exit immediately when quota reached
+            # Count stable frames toward quota
+            # Only count frames where:
+            # 1. Object is detected (best_xy_valid)
+            # 2. Confidence is high enough (conf_ok)
+            # 3. Object is centered within tolerance (err_ok)
+            # 4. Movement is stable (move_ok)
+            # 5. Movement is small enough (< 5mm) - NEW REQUIREMENT
+            # This ensures the item is still in frame and successfully centered with minimal movement
+            if best_xy_valid and conf_ok and err_ok and move_ok and movement_small_enough:
+                good_frames += 1
+                
+                # Collect frames with masks if requested (only up to CENTER_FRAMES)
+                # Only collect frames where item is successfully centered (still in frame)
+                if collect_frames and len(captured_frames) < C.CENTER_FRAMES:
+                    # Use the best mask tensor we found (item is in frame)
+                    if best_mask_tensor is not None:
+                        captured_frames.append({
+                            "frame": frame.copy(),
+                            "mask": best_mask_tensor
+                        })
+                
+                # Success criteria: enough stable frames where item is centered, in frame, and movement < 5mm
+                if good_frames >= C.CENTER_FRAMES:
+                    success = True
+                    print(f"[Centering] Success! Item centered (movement < {C.CENTER_MIN_MOVEMENT_MM}mm) for {good_frames} frames")
+                    break  # Exit immediately when quota reached
 
-                # ---------------- HUD ----------------
+            # ---------------- HUD ----------------
+            if best_xy_valid:
+                bx, by = best_xy
                 # Object center (red)
                 cv2.circle(annotated, (bx, by), 6, (0, 0, 255), -1)
                 # Frame center (blue)
@@ -170,23 +400,41 @@ def center_on_class(
                 # Line between them (green)
                 cv2.line(annotated, (bx, by), (center_x, center_y), (0, 255, 0), 2)
 
+                # Show movement status in HUD
+                if movement_small_enough:
+                    movement_status = f"OK (<{C.CENTER_MIN_MOVEMENT_MM}mm)"
+                else:
+                    movement_status = f"LARGE (>= {C.CENTER_MIN_MOVEMENT_MM}mm)"
+                
                 hud = (
-                    f"{label}  quota {good_frames}/{config.CENTER_FRAMES}  "
-                    f"conf {best_conf:.2f}  err {err_px:.0f}px  move {move_norm:.3f}"
+                    f"{label}  quota {good_frames}/{C.CENTER_FRAMES}  "
+                    f"conf {best_conf:.2f}  err {err_px:.0f}px  "
+                    f"move_x {movement_x_mm:.1f}mm move_y {movement_y_mm:.1f}mm [{movement_status}]"
                 )
             else:
-                # No detection — still draw camera center
+                # No detection — item not in frame
+                # Don't count this toward success (item must be in frame to be registered)
                 cv2.circle(annotated, (center_x, center_y), 6, (255, 0, 0), -1)
-                hud = f"{label}  quota {good_frames}/{config.CENTER_FRAMES}"
+                hud = f"{label}  quota {good_frames}/{C.CENTER_FRAMES}  (NO DETECTION - item not in frame)"
 
-            # Draw HUD and publish frame
-            max_w = int(annotated.shape[1] * 0.92)
-            draw_wrapped_text(annotated, hud, 10, 24, max_w)
-            h, w = annotated.shape[:2]
-            resized = cv2.resize(annotated, (int(w * display_scale), int(h * display_scale)))
-            frame_sink(resized)
+        # Draw HUD and publish frame (always, regardless of detection)
+        max_w = int(annotated.shape[1] * 0.92)
+        draw_wrapped_text(annotated, hud, 10, 24, max_w)
+        h, w = annotated.shape[:2]
+        resized = cv2.resize(annotated, (int(w * display_scale), int(h * display_scale)))
+        frame_sink(resized)
 
     # Clear any class filter set during this centering attempt
     clear_class_filter(model)
+    
+    # Return final position after centering (so caller can return to baseline if needed)
+    if success:
+        print(f"[Centering] Centering SUCCESS - item was in frame and centered")
+        print(f"[Centering] Final centered position: x={x_mm:.2f}mm, y={y_mm:.2f}mm")
+        print(f"[Centering] Object location will be registered at this position")
+    else:
+        print(f"[Centering] Centering FAILED - item not centered or no longer in frame")
+        print(f"[Centering] Final position: x={x_mm:.2f}mm, y={y_mm:.2f}mm (NOT registering object)")
+    print(f"[Centering] Scan cycle will RESUME after returning to baseline pose")
 
-    return success, captured_frames
+    return success, captured_frames, x_mm, y_mm

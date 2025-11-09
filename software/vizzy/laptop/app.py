@@ -89,7 +89,13 @@ class StateManager:
         import socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.sock.connect((C.PI_IP, C.PI_PORT))
+        try:
+            print(f"[StateManager] Connecting to RPi server at {C.PI_IP}:{C.PI_PORT}...")
+            self.sock.connect((C.PI_IP, C.PI_PORT))
+            print(f"[StateManager] Connected to RPi server successfully")
+        except Exception as e:
+            print(f"[StateManager] ERROR: Failed to connect to RPi server: {e}")
+            raise
 
         # Thread handles (filled later)
         self.receiver_thread: Optional[threading.Thread] = None     # Networking
@@ -100,7 +106,8 @@ class StateManager:
         self.motion = None
 
         # NEW: Frame bus for worker->main display handoff
-        self.frame_bus = FrameBus(maxsize=4)
+        # Larger buffer for smoother GUI (reduces frame drops)
+        self.frame_bus = FrameBus(maxsize=8)
 
         # NEW: Shared memory and LLM worker manager
         print("[StateManager] Initializing object memory...")
@@ -186,65 +193,138 @@ class StateManager:
     # --------------------------- Receiver thread ------------------------------
 
     def _receiver_loop(self) -> None:
-        """Continuously read JSONL from RPi and fill mailboxes / events."""
+        """
+        Continuously read text responses from rpi_control_server.
+        Server sends text lines like "ACK ik\n" or "ERR ...\n"
+        Also handles JSON protocol for backward compatibility.
+        """
+        import socket
         buf = b""
         from queue import Empty
+        print("[Receiver] Receiver thread started, waiting for server responses...")
 
         while True:
             try:
-                msgs, buf, closed = recv_lines(self.sock, buf)
-                if closed:
-                    # Attempt a blocking reconnect; simple strategy for now
-                    import socket
+                # Try to read data (text protocol - newline-delimited)
+                # This will block until data is available, which is fine
+                try:
+                    data = self.sock.recv(4096)
+                    if not data:
+                        # Connection closed
+                        print("[Receiver] Connection closed by server, attempting reconnect...")
+                        raise ConnectionError("Connection closed by server")
+                except (ConnectionError, OSError, socket.error) as e:
+                    # Attempt a blocking reconnect
+                    print(f"[Receiver] Connection error: {e}, attempting reconnect...")
                     try:
                         self.sock.close()
                     except Exception:
                         pass
-                    self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    self.sock.connect((C.PI_IP, C.PI_PORT))
-                    buf = b""
-                    continue
+                    try:
+                        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                        self.sock.connect((C.PI_IP, C.PI_PORT))
+                        print(f"[Receiver] Reconnected to server at {C.PI_IP}:{C.PI_PORT}")
+                        buf = b""
+                        continue
+                    except Exception as reconnect_err:
+                        print(f"[Receiver] Reconnect failed: {reconnect_err}, retrying in 1s...")
+                        time.sleep(1.0)
+                        continue
 
-                for msg in msgs:
-                    mtype = msg.get("type")
-                    mcmd = msg.get("cmd")
-
-                    if mtype == P.TYPE_CMD_COMPLETE:
-                        # NEW: Route primitive command completion to dispatcher queue
+                # Accumulate data in buffer
+                buf += data
+                
+                # Process complete lines
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line_str = line.decode("utf-8", errors="ignore").strip()
+                    if not line_str:
+                        continue
+                    
+                    # Parse text protocol responses from rpi_control_server
+                    if line_str.startswith("ACK"):
+                        # Format: "ACK ik" or "ACK rest"
+                        print(f"[Receiver] Received: {line_str}")
+                        # Put string message in queue for motion.py to handle
                         try:
-                            self.mail.cmd_complete_q.put_nowait(msg)
+                            self.mail.cmd_complete_q.put_nowait(line_str)
                         except Exception:
                             # Queue full, drop oldest and try again
                             try:
                                 self.mail.cmd_complete_q.get_nowait()
                             except Empty:
                                 pass
-                            self.mail.cmd_complete_q.put_nowait(msg)
-
-                    elif mtype == P.TYPE_OBJ_LOC:
+                            try:
+                                self.mail.cmd_complete_q.put_nowait(line_str)
+                            except Exception:
+                                pass
+                    elif line_str.startswith("ERR"):
+                        # Format: "ERR ..."
+                        print(f"[Receiver] Received ERROR: {line_str}")
+                        # Put error message in queue
                         try:
-                            self.mail.obj_loc_payload.clear()
-                            self.mail.obj_loc_payload.update({
-                                "x": float(msg["x"]),
-                                "y": float(msg["y"]),
-                                "z": float(msg["z"]),
-                            })
-                            self.mail.obj_loc_event.set()
+                            self.mail.cmd_complete_q.put_nowait(line_str)
                         except Exception:
+                            try:
+                                self.mail.cmd_complete_q.get_nowait()
+                            except Empty:
+                                pass
+                            try:
+                                self.mail.cmd_complete_q.put_nowait(line_str)
+                            except Exception:
+                                pass
+                    else:
+                        # Try to parse as JSON (backward compatibility)
+                        try:
+                            import json
+                            msg = json.loads(line_str)
+                            mtype = msg.get("type")
+                            mcmd = msg.get("cmd")
+
+                            if mtype == P.TYPE_CMD_COMPLETE:
+                                try:
+                                    self.mail.cmd_complete_q.put_nowait(msg)
+                                except Exception:
+                                    try:
+                                        self.mail.cmd_complete_q.get_nowait()
+                                    except Empty:
+                                        pass
+                                    self.mail.cmd_complete_q.put_nowait(msg)
+
+                            elif mtype == P.TYPE_OBJ_LOC:
+                                try:
+                                    self.mail.obj_loc_payload.clear()
+                                    self.mail.obj_loc_payload.update({
+                                        "x": float(msg["x"]),
+                                        "y": float(msg["y"]),
+                                        "z": float(msg["z"]),
+                                    })
+                                    self.mail.obj_loc_event.set()
+                                except Exception:
+                                    pass
+                        except (json.JSONDecodeError, ValueError):
+                            # Not JSON, ignore
                             pass
 
-            except Exception:
+            except Exception as e:
                 # Reconnect path (simple)
-                import socket
+                print(f"[Receiver] Unexpected error in receiver loop: {e}")
+                import traceback
+                traceback.print_exc()
                 try:
                     self.sock.close()
                 except Exception:
                     pass
-                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                self.sock.connect((C.PI_IP, C.PI_PORT))
-                buf = b""
+                try:
+                    self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    self.sock.connect((C.PI_IP, C.PI_PORT))
+                    print(f"[Receiver] Reconnected after error")
+                    buf = b""
+                except Exception as reconnect_err:
+                    print(f"[Receiver] Reconnect failed: {reconnect_err}")
+                    time.sleep(1.0)  # Wait before retrying
 
     # ----------------------------- Idle preview -------------------------------
     @staticmethod
@@ -396,18 +476,21 @@ class StateManager:
                             cv2.destroyWindow("Vizzy (IDLE Preview)")
                         except Exception:
                             pass
-                    # Drain frames from the bus and render the latest one
+                    # Drain frames from the bus and render the latest one (faster GUI)
                     last = None
                     frame_count = 0
                     for frame in self.frame_bus.drain():
                         last = frame
                         frame_count += 1
-                    # if frame_count > 0:
-                    #     print(f"[StateManager] Drained {frame_count} frame(s) from bus")
                     if last is not None:
                         cv2.imshow("Vizzy (SEARCH)", last)  # reuse one window for all active modes
+                        # Use waitKey(1) for faster GUI updates (non-blocking)
+                    else:
+                        # No frame available, use minimal delay
+                        pass
 
                 # Minimal UI handling (only 'q' to quit for now)
+                # waitKey(1) is non-blocking and allows fast GUI updates
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     break
@@ -415,7 +498,8 @@ class StateManager:
                 # remember previous state for next tick
                 self._prev_state = self.state
 
-                time.sleep(0.01)
+                # Reduced sleep for faster GUI responsiveness
+                time.sleep(0.005)  # Faster main loop for responsive GUI
 
         finally:
             # Stop LLM worker gracefully

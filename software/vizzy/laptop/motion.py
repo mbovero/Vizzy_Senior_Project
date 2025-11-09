@@ -2,12 +2,17 @@
 # -----------------------------------------------------------------------------
 # Motion facade used by ScanWorker and TaskAgent/EXECUTE_TASK.
 # - nudge_scan(dx, dy): send normalized [-1, 1] deltas (RPi converts to mm offsets)
-# - move_to_target(x, y, z, pitch): absolute Cartesian move (waits for CMD_COMPLETE)
+# - move_to_target(x, y, z, pitch): absolute Cartesian move (waits for ACK from server)
 # - request_obj_location(): fetch current commanded Cartesian target from the RPi
+# 
+# NOTE: This now sends text-based 'ik' commands to rpi_control_server.py
+# Commands are in format: "ik x y z pitch_rad yaw_rad O|C\n"
+# Server responds with: "ACK ik\n" or "ERR ...\n"
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
 
+import math
 import time
 from queue import Empty, Queue
 from threading import Event
@@ -50,12 +55,21 @@ class Motion:
 
     # ------------------------------------------------------------------ utils
 
+    def _send_text(self, text: str) -> None:
+        """Send text command to rpi_control_server (text-based protocol)."""
+        try:
+            self.sock.sendall(text.encode("utf-8"))
+        except Exception as e:
+            # Don't crash worker threads on transient socket errors, but log them
+            print(f"[Motion] ERROR sending command: {e}")
+            raise
+
     def _send(self, payload: Dict[str, Any]) -> None:
-        """Best-effort send; reconnects are orchestrator's responsibility."""
+        """Best-effort send JSON (kept for backward compatibility, but not used for search)."""
         try:
             send_json(self.sock, payload)
         except Exception:
-            # Don’t crash worker threads on transient socket errors.
+            # Don't crash worker threads on transient socket errors.
             pass
 
     def _drain_cmd_queue(self) -> None:
@@ -71,7 +85,11 @@ class Motion:
             pass
 
     def _wait_cmd_complete(self, expected_cmd: str, timeout_s: float) -> bool:
-        """Wait for TYPE_CMD_COMPLETE matching expected_cmd."""
+        """
+        Wait for command completion from the server.
+        For rpi_control_server, this waits for "ACK ik" or "ERR ..." messages
+        that are parsed by the receiver thread and put into the cmd_complete_q.
+        """
         if self._cmd_complete_q is None:
             raise RuntimeError("Motion.move_to_target requires a cmd_complete queue")
 
@@ -87,16 +105,27 @@ class Motion:
             except Exception:
                 continue
 
-            if not isinstance(msg, dict):
-                continue
-
-            cmd = str(msg.get("cmd", "")).upper()
-            if cmd != expected_cmd:
-                # Unexpected completion (likely belongs to another flow); drop it.
-                continue
-
-            status = str(msg.get("status", "success")).lower()
-            return status == "success"
+            # Handle both JSON protocol (old) and text protocol (new)
+            if isinstance(msg, dict):
+                cmd = str(msg.get("cmd", "")).upper()
+                if cmd != expected_cmd:
+                    continue
+                status = str(msg.get("status", "success")).lower()
+                return status == "success"
+            elif isinstance(msg, str):
+                # Text protocol: "ACK ik" or "ERR ..."
+                # For "IK" commands, server responds with "ACK ik" or "ERR ..."
+                if expected_cmd == "IK":
+                    if msg.strip().upper() == "ACK IK" or msg.strip().upper().startswith("ACK IK"):
+                        return True
+                    elif msg.strip().upper().startswith("ERR"):
+                        return False
+                else:
+                    # For other commands, accept any ACK
+                    if msg.strip().upper().startswith("ACK"):
+                        return True
+                    elif msg.strip().upper().startswith("ERR"):
+                        return False
 
         return False
 
@@ -105,11 +134,14 @@ class Motion:
     def nudge_scan(self, dx: float, dy: float) -> None:
         """
         Send a SCAN_MOVE with normalized deltas in [-1, 1].
-        The RPi converts these values to millimetre offsets.
+        NOTE: This is not used with rpi_control_server. For search, we use move_to_target
+        with absolute coordinates. This is kept for backward compatibility but does nothing
+        with the new server architecture.
         """
-        h = max(-1.0, min(1.0, float(dx)))
-        v = max(-1.0, min(1.0, float(dy)))
-        self._send({"type": P.TYPE_SCAN_MOVE, "horizontal": h, "vertical": v})
+        # For rpi_control_server, nudges should be converted to absolute moves
+        # This method is kept for API compatibility but doesn't send commands
+        # The centering code should call move_to_target with updated absolute coordinates
+        pass
 
     def move_to_target(
         self,
@@ -119,23 +151,57 @@ class Motion:
         pitch: float,
         *,
         timeout_s: Optional[float] = None,
+        yaw: float = 0.0,
+        claw: str = "O",
     ) -> bool:
         """
-        Send a MOVE_TO command to the RPi and wait for TYPE_CMD_COMPLETE.
-        Returns True on success, False on timeout/abort/failure.
+        Send an 'ik' command to rpi_control_server and wait for ACK.
+        
+        Parameters
+        ----------
+        x, y, z : float
+            Target position in MILLIMETERS (converted to meters for server)
+        pitch : float
+            Pitch angle in DEGREES (converted to radians for server)
+        yaw : float
+            Yaw angle in DEGREES (converted to radians for server). Default 0.0.
+        claw : str
+            Claw state: "O" (open) or "C" (closed). Default "O".
+        timeout_s : float, optional
+            Timeout in seconds. Defaults to C.PRIMITIVE_CMD_TIMEOUT.
+        
+        Returns
+        -------
+        bool
+            True on success (ACK received), False on timeout/abort/failure.
         """
         timeout = float(timeout_s or C.PRIMITIVE_CMD_TIMEOUT)
 
+        # Convert units: mm -> meters, degrees -> radians
+        x_m = float(x) / 1000.0
+        y_m = float(y) / 1000.0
+        z_m = float(z) / 1000.0
+        pitch_rad = math.radians(float(pitch))
+        yaw_rad = math.radians(float(yaw))
+        
+        # Validate claw state
+        claw_upper = str(claw).strip().upper()
+        if claw_upper not in ("O", "C"):
+            claw_upper = "O"
+
         self._drain_cmd_queue()
-        payload: Dict[str, Any] = {
-            "cmd": P.CMD_MOVE_TO,
-            "x": float(x),
-            "y": float(y),
-            "z": float(z),
-            "pitch": float(pitch),
-        }
-        self._send(payload)
-        return self._wait_cmd_complete(P.CMD_MOVE_TO, timeout)
+        
+        # Format: "ik x y z pitch_rad yaw_rad O|C\n"
+        cmd_text = f"ik {x_m:.6f} {y_m:.6f} {z_m:.6f} {pitch_rad:.6f} {yaw_rad:.6f} {claw_upper}\n"
+        print(f"[Motion] Sending ik command: {cmd_text.strip()}")
+        self._send_text(cmd_text)
+        
+        result = self._wait_cmd_complete("IK", timeout)
+        if result:
+            print(f"[Motion] Command acknowledged by server")
+        else:
+            print(f"[Motion] Command timeout or error (timeout={timeout}s)")
+        return result
 
     def request_obj_location(self, timeout_s: float = 0.5) -> Optional[Dict[str, float]]:
         """

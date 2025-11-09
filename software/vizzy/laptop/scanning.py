@@ -29,55 +29,143 @@ def _draw_scan_hud(frame, text: str, *, display_scale: float) -> Any:
 # ---------------------------------------------------------------------------
 def build_search_path() -> list[dict]:
     """
-    Build the serpentine search path as a list of Cartesian poses:
-      [{"pose_id": int, "x": float, "y": float, "z": float, "pitch": float}, ...]
-
-    Traversal mirrors the previous PWM grid:
-      - Inclusive ranges between configured min/max values (step <= 0 -> treated as 1)
-      - Serpentine traversal across X for each Y row to minimise long reversals
-      - Iterate Z layers outermost, reusing the serpentine plan per layer
+    Build a custom arch search path with 15 total points:
+      - Start: (0, -300mm), (0, -400mm), (0, -500mm) - 3 points
+      - Middle: 9 interpolated points forming an arch from (0, -500mm) to (0, 500mm)
+      - End: (0, 500mm), (0, 400mm), (0, 300mm) - 3 points
+    
+    Constraints:
+      - x >= 0 (non-negative, 0mm is fully extended)
+      - y can be negative or positive
+      - Magnitude of (x, y) must be >= 300mm: sqrt(x^2 + y^2) >= 300mm
+      - Magnitude of (x, y) must be <= 500mm: sqrt(x^2 + y^2) <= 500mm
     """
-
-    def inclusive_range(lo: float, hi: float, step: float) -> list[float]:
-        """Return inclusive range from lo to hi with the provided step."""
-        if step == 0:
-            step = 1.0
-        step = float(abs(step))
-        values: list[float] = []
-        if lo <= hi:
-            x = float(lo)
-            while x <= hi + 1e-6:
-                values.append(round(x, 3))
-                x += step
-        else:
-            x = float(lo)
-            while x >= hi - 1e-6:
-                values.append(round(x, 3))
-                x -= step
-        return values
-
-    xs = inclusive_range(C.SEARCH_X_MIN_MM, C.SEARCH_X_MAX_MM, C.SEARCH_X_STEP_MM)
-    ys = inclusive_range(C.SEARCH_Y_MIN_MM, C.SEARCH_Y_MAX_MM, C.SEARCH_Y_STEP_MM)
-    zs = inclusive_range(C.SEARCH_Z_MIN_MM, C.SEARCH_Z_MAX_MM, C.SEARCH_Z_STEP_MM)
-
+    import math
+    
+    def is_valid_pose(x: float, y: float) -> bool:
+        """Check if pose meets constraints."""
+        # x must be non-negative (0mm is fully extended)
+        if x < 0:
+            return False
+        
+        # Calculate magnitude (distance from origin)
+        magnitude = math.sqrt(x * x + y * y)
+        
+        # Magnitude must be between 300-500mm
+        if magnitude < 300.0 or magnitude > 500.0:
+            return False
+        
+        return True
+    
+    # Z is fixed at 275mm for the entire scan cycle
+    z_fixed = getattr(C, 'SEARCH_Z_FIXED_MM', 275.0)
     pitch = float(C.SEARCH_PITCH_DEG)
-
+    
     path: list[dict] = []
     pose_id = 0
-    for z in zs:
-        reverse = False
-        for y in ys:
-            row = list(reversed(xs)) if reverse else xs
-            for x in row:
-                path.append({
-                    "pose_id": pose_id,
-                    "x": float(x),
-                    "y": float(y),
-                    "z": float(z),
-                    "pitch": pitch,
-                })
-                pose_id += 1
-            reverse = not reverse
+    
+    # Step 1: Start points (3 points)
+    # (0, -300), (0, -400), (0, -500)
+    start_points = [
+        (0.0, -300.0),
+        (0.0, -400.0),
+        (0.0, -500.0),
+    ]
+    
+    for x, y in start_points:
+        if is_valid_pose(x, y):
+            path.append({
+                "pose_id": pose_id,
+                "x": float(x),
+                "y": float(y),
+                "z": float(z_fixed),
+                "pitch": pitch,
+            })
+            pose_id += 1
+    
+    # Step 2: Interpolate 9 points between (0, -500mm) and (0, 500mm)
+    # Create points along an arch that maintains magnitude between 300-500mm
+    # We'll create points along a circular arc with radius ~450mm
+    # This gives us points that smoothly transition from negative y to positive y
+    
+    # Generate 9 intermediate points along an arch
+    # Using angles from -90 degrees (pointing down) to +90 degrees (pointing up)
+    # With radius ~450mm to stay within 300-500mm range
+    radius = 450.0  # Approximate radius for the arch
+    
+    # 9 points means 10 intervals (from -90 to +90 degrees)
+    # Angles: -90, -70, -50, -30, -10, 10, 30, 50, 70, 90 (9 intermediate points)
+    # But we want to exclude the endpoints since they're in start/end, so:
+    # We need 9 points between -90 and +90, so we use 10 intervals
+    num_middle_points = 9
+    start_angle = -90.0  # degrees (pointing down, y negative)
+    end_angle = 90.0     # degrees (pointing up, y positive)
+    angle_step = (end_angle - start_angle) / (num_middle_points + 1)  # +1 because we exclude endpoints
+    
+    for i in range(1, num_middle_points + 1):  # 1 to 9 (skip endpoints)
+        angle_deg = start_angle + (angle_step * i)
+        angle_rad = math.radians(angle_deg)
+        
+        # Calculate x and y along the arch
+        # x = radius * cos(angle), y = radius * sin(angle)
+        x = radius * math.cos(angle_rad)
+        y = radius * math.sin(angle_rad)
+        
+        # Ensure x >= 0 (if angle is in second quadrant, x would be negative)
+        # For angles from -90 to +90, cos is positive, so x should be positive
+        if x < 0:
+            x = 0.0  # Clamp to 0 if somehow negative
+        
+        # Adjust to maintain exact magnitude if needed
+        magnitude = math.sqrt(x * x + y * y)
+        if magnitude > 500.0:
+            # Scale down to fit within 500mm
+            scale = 500.0 / magnitude
+            x *= scale
+            y *= scale
+        elif magnitude < 300.0:
+            # Scale up to fit within 300mm minimum
+            scale = 300.0 / magnitude
+            x *= scale
+            y *= scale
+        
+        if is_valid_pose(x, y):
+            path.append({
+                "pose_id": pose_id,
+                "x": float(x),
+                "y": float(y),
+                "z": float(z_fixed),
+                "pitch": pitch,
+            })
+            pose_id += 1
+    
+    # Step 3: End points (3 points)
+    # (0, 300), (0, 400), (0, 500) - ending sequence
+    end_points = [
+        (0.0, 300.0),
+        (0.0, 400.0),
+        (0.0, 500.0),
+    ]
+    
+    for x, y in end_points:
+        if is_valid_pose(x, y):
+            path.append({
+                "pose_id": pose_id,
+                "x": float(x),
+                "y": float(y),
+                "z": float(z_fixed),
+                "pitch": pitch,
+            })
+            pose_id += 1
+    
+    print(f"[build_search_path] Created {len(path)} poses in custom arch path (should be 15)")
+    for i, p in enumerate(path):
+        mag = math.sqrt(p["x"]**2 + p["y"]**2)
+        print(f"  Pose {i}: ({p['x']:.1f}, {p['y']:.1f}) mm, magnitude={mag:.1f} mm")
+    
+    if len(path) != 15:
+        print(f"[build_search_path] WARNING: Expected 15 points, got {len(path)}")
+    
     return path
 
 def _result_iter(model_result, frame_w: int, frame_h: int):
@@ -154,8 +242,8 @@ def run_scan_window(
         frames += 1
         h, w = frame.shape[:2]
 
-        # Run YOLO and get an annotated image to display
-        results = model(frame, classes=allowed_ids, verbose = C.YOLO_VERBOSE)
+        # Run YOLO and get an annotated image to display (faster inference)
+        results = model(frame, classes=allowed_ids, verbose=False, half=False)  # Disable verbose for speed
 
         annotated = frame  # fallback if no results object behaves oddly
         for r in results:
@@ -173,7 +261,7 @@ def run_scan_window(
             except Exception:
                 pass  # if plot fails, show the raw frame + HUD
 
-        # Add a simple HUD ribbon and publish to the main thread
+        # Add a simple HUD ribbon and publish annotated frame (only publish once per loop)
         annotated = _draw_scan_hud(annotated, hud_text, display_scale=display_scale)
         rh, rw = annotated.shape[:2]
         resized = cv2.resize(annotated, (int(rw * display_scale), int(rh * display_scale)))
