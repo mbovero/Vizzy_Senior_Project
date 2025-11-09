@@ -67,13 +67,24 @@ LOW-LEVEL PRIMITIVES (use only when high-level commands don't apply):
 5. MOVE_TO - Move to XYZ position (millimeters)
    - Required field: "destination" (object ID or [x_mm, y_mm, z_mm])
    - Optional field: "offset" ([x_mm, y_mm, z_mm])
-   - Example: {{"command": "MOVE_TO", "destination": [1200, 800, 500]}}
+   - Optional field: "pitch" (degrees) - specify pitch angle for intelligent grasping
+   - Use MOVE_TO with pitch specified for intelligent positioning with proper claw orientation
+   - Example: {{"command": "MOVE_TO", "destination": [1200, 800, 500], "pitch": -90.0}}
+   - Example: {{"command": "MOVE_TO", "destination": [1200, 800, 500]}}  # Uses current pitch/yaw
 
-6. ROT_YAW - Rotate yaw axis
+6. ROT_YAW - Rotate yaw axis (servo only, no arm movement)
+   - Rotates only the yaw servo motor without moving the arm
+   - Keeps current arm position (x, y, z) and pitch unchanged
+   - Use for "arbitrary" claw rotations at a fixed position
+   - For intelligent grasping with specific pitch, use MOVE_TO with pitch specified instead
    - Required field: "angle" (degrees)
    - Example: {{"command": "ROT_YAW", "angle": 45.0}}
 
-7. ROT_PITCH - Rotate pitch axis
+7. ROT_PITCH - Rotate pitch axis (servo only, no arm movement)
+   - Rotates only the pitch servo motor without moving the arm
+   - Keeps current arm position (x, y, z) and yaw unchanged
+   - Use for "arbitrary" claw rotations at a fixed position
+   - For intelligent grasping with specific pitch, use MOVE_TO with pitch specified instead
    - Required field: "angle" (degrees)
    - Example: {{"command": "ROT_PITCH", "angle": 30.0}}
 
@@ -84,6 +95,9 @@ CRITICAL RULES:
 - Only use primitives when you need fine control
 - Offset is always optional and relative (e.g., [0, 0, 50] means 50mm above)
 - Command names must be exact: "PICK", "PLACE", "GRAB", "RELEASE", "MOVE_TO", "ROT_YAW", "ROT_PITCH"
+- For intelligent grasping: Use MOVE_TO with pitch specified to approach objects with proper claw orientation
+- For arbitrary rotations: Use ROT_YAW/ROT_PITCH only when you need to adjust claw orientation at a fixed position (servo-only, no arm movement)
+- ROT_YAW and ROT_PITCH are for fine-tuning claw orientation, not for intelligent positioning
 
 Memory context (objects currently in the workspace):
 {memory_context}

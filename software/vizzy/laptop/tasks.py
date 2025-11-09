@@ -302,13 +302,14 @@ def convert_to_ik_format(plan: List[Dict]) -> List[Dict]:
     Format: "ik x y z pitch_rad yaw_rad O|C"
     
     Rules:
-    - MOVE_TO: Includes x, y, z, pitch_rad, yaw_rad. Uses previous pitch/yaw if not specified.
-    - GRAB: Sets claw to "C" (closed). Combined with preceding or following MOVE_TO.
-    - RELEASE: Sets claw to "O" (open). Combined with preceding or following MOVE_TO.
-    - ROT_YAW: Updates yaw for subsequent MOVE_TO commands (doesn't send separate command).
-    - ROT_PITCH: Updates pitch for subsequent MOVE_TO commands (doesn't send separate command).
+    - MOVE_TO: Includes x, y, z, pitch_rad, yaw_rad. Uses current pitch/yaw state if not specified.
+    - GRAB: Creates IK command at same position as last command, only changing claw to "C" (closed).
+    - RELEASE: Creates IK command at same position as last command, only changing claw to "O" (open).
+    - ROT_YAW: Creates IK command at same position as last command, only changing yaw angle (servo-only movement).
+    - ROT_PITCH: Creates IK command at same position as last command, only changing pitch angle (servo-only movement).
     
-    Strategy: Process commands and combine GRAB/RELEASE with adjacent MOVE_TO commands.
+    Strategy: Each command creates its own IK command. ROT_YAW/ROT_PITCH keep arm position unchanged
+    and only move servo motors, allowing "arbitrary" claw rotations at a fixed position.
     
     All coordinates are converted from mm to meters for IK.
     
@@ -337,10 +338,6 @@ def convert_to_ik_format(plan: List[Dict]) -> List[Dict]:
     current_yaw_deg = C.REST_YAW_ANGLE  # degrees
     current_claw = "O"  # Open by default
     
-    # Track pending yaw/pitch changes that will apply to next MOVE_TO
-    pending_yaw_deg = None
-    pending_pitch_deg = None
-    
     i = 0
     while i < len(plan):
         task = plan[i]
@@ -356,18 +353,13 @@ def convert_to_ik_format(plan: List[Dict]) -> List[Dict]:
             y_m = y_mm / 1000.0
             z_m = z_mm / 1000.0
             
-            # Get pitch: use specified, pending, or current
+            # Get pitch: use specified or current (MOVE_TO doesn't specify yaw directly)
             pitch_deg = task.get("pitch")
             if pitch_deg is not None:
                 current_pitch_deg = float(pitch_deg)
-            elif pending_pitch_deg is not None:
-                current_pitch_deg = pending_pitch_deg
-                pending_pitch_deg = None
             
-            # Yaw: use pending or current (MOVE_TO doesn't specify yaw directly)
-            if pending_yaw_deg is not None:
-                current_yaw_deg = pending_yaw_deg
-                pending_yaw_deg = None
+            # Yaw: use current state (MOVE_TO doesn't specify yaw directly)
+            # Yaw changes come from ROT_YAW commands that create their own IK commands
             
             # Use current claw state (don't combine with next GRAB/RELEASE to allow separate commands)
             claw_state = current_claw
@@ -433,16 +425,50 @@ def convert_to_ik_format(plan: List[Dict]) -> List[Dict]:
                 print(f"[Tasks] RELEASE: claw set to {current_claw} (will apply to next MOVE_TO)")
         
         elif command == "ROT_YAW":
-            # Update yaw for next MOVE_TO command
+            # Create IK command at same position, only changing yaw (servo-only movement)
             yaw_deg = task.get("angle", 0.0)
-            pending_yaw_deg = float(yaw_deg)
-            print(f"[Tasks] ROT_YAW: yaw set to {yaw_deg:.1f}° (will apply to next MOVE_TO)")
+            current_yaw_deg = float(yaw_deg)
+            
+            if len(ik_commands) > 0:
+                # Get the last IK command's position and pose
+                last_cmd = ik_commands[-1]
+                # Create a new command with the same position/pose but new yaw
+                ik_commands.append({
+                    "type": "ik",
+                    "x": last_cmd["x"],
+                    "y": last_cmd["y"],
+                    "z": last_cmd["z"],
+                    "pitch_rad": last_cmd["pitch_rad"],  # Keep previous pitch
+                    "yaw_rad": math.radians(current_yaw_deg),  # New yaw
+                    "claw": last_cmd["claw"],  # Keep previous claw state
+                })
+                print(f"[Tasks] ROT_YAW: created IK command at same position with yaw={current_yaw_deg:.1f}° (servo-only)")
+            else:
+                # No previous command - use rest position (shouldn't happen due to prepended rest, but handle gracefully)
+                print(f"[Tasks] ROT_YAW: no previous command, yaw set to {current_yaw_deg:.1f}° (will apply to next MOVE_TO)")
         
         elif command == "ROT_PITCH":
-            # Update pitch for next MOVE_TO command
+            # Create IK command at same position, only changing pitch (servo-only movement)
             pitch_deg = task.get("angle", 0.0)
-            pending_pitch_deg = float(pitch_deg)
-            print(f"[Tasks] ROT_PITCH: pitch set to {pitch_deg:.1f}° (will apply to next MOVE_TO)")
+            current_pitch_deg = float(pitch_deg)
+            
+            if len(ik_commands) > 0:
+                # Get the last IK command's position and pose
+                last_cmd = ik_commands[-1]
+                # Create a new command with the same position/pose but new pitch
+                ik_commands.append({
+                    "type": "ik",
+                    "x": last_cmd["x"],
+                    "y": last_cmd["y"],
+                    "z": last_cmd["z"],
+                    "pitch_rad": math.radians(current_pitch_deg),  # New pitch
+                    "yaw_rad": last_cmd["yaw_rad"],  # Keep previous yaw
+                    "claw": last_cmd["claw"],  # Keep previous claw state
+                })
+                print(f"[Tasks] ROT_PITCH: created IK command at same position with pitch={current_pitch_deg:.1f}° (servo-only)")
+            else:
+                # No previous command - use rest position (shouldn't happen due to prepended rest, but handle gracefully)
+                print(f"[Tasks] ROT_PITCH: no previous command, pitch set to {current_pitch_deg:.1f}° (will apply to next MOVE_TO)")
         
         else:
             print(f"[Tasks] Warning: Unknown command {command} in IK conversion")
