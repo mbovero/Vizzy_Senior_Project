@@ -33,10 +33,10 @@ CLAW_PWM_OPEN   = 1650
 CLAW_PWM_CLOSED = 1300
 
 # Tween timing for servos
-SERVO_TWEEN_MIN_DT = 0.02   # s
-SERVO_TWEEN_MAX_DT = 0.05   # s
+SERVO_TWEEN_MIN_DT = 0.01   # s
+SERVO_TWEEN_MAX_DT = 0.025  # s
 IDLE_SLEEP          = 0.02   # s
-DURATION_FLOOR_S    = 0.2    # s (if motors barely move)
+DURATION_FLOOR_S    = 0.1    # s (if motors barely move)
 
 # ---------- Moteus / IK ----------
 import moteus
@@ -92,15 +92,15 @@ REST2               = 1.0
 REST3               = 3.25
 
 STEP_SIZE_RAD       = 0.08
-STEP_DELAY_S        = 0.02
+STEP_DELAY_S        = 0.01
 
-ACCEL_LIMIT         = 2.0
-VEL_LIMIT           = 4.0
+ACCEL_LIMIT         = 4.0
+VEL_LIMIT           = 8.0
 WATCHDOG            = 15.0
 
-GROUP_SPEED_RAD_S   = 0.8
-ACCEL_MULT          = 1.2
-MIN_SPEED           = 0.01
+GROUP_SPEED_RAD_S   = 1.6
+ACCEL_MULT          = 2.4
+MIN_SPEED           = 0.02
 POS_TOL             = 0.01
 SYNC_POLL_S         = 0.05
 SYNC_TIMEOUT_EXTRA  = 1.0
