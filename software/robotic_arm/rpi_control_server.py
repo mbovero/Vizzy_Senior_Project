@@ -96,6 +96,8 @@ STEP_DELAY_S        = 0.01
 
 ACCEL_LIMIT         = 4.0
 VEL_LIMIT           = 8.0
+HOLD_ACCEL_LIMIT    = 2.0
+HOLD_VEL_LIMIT      = 4.0
 WATCHDOG            = 15.0
 
 GROUP_SPEED_RAD_S   = 1.6
@@ -141,8 +143,8 @@ async def hold(ctrl: moteus.Controller, pos: float):
     await ctrl.set_position(
         position=float(pos),
         velocity=float('nan'),
-        accel_limit=ACCEL_LIMIT,
-        velocity_limit=VEL_LIMIT,
+        accel_limit=HOLD_ACCEL_LIMIT,
+        velocity_limit=HOLD_VEL_LIMIT,
         watchdog_timeout=WATCHDOG,
         query=False,
     )
