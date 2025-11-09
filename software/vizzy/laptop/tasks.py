@@ -58,14 +58,14 @@ def execute_plan(
     resolved_plan = resolve_object_ids_and_offsets(expanded_plan, memory)
     print(f"[Tasks] Resolved {len(resolved_plan)} command(s)")
     
-    # Step 3: Convert to protocol format
-    print("[Tasks] Step 3: Converting to protocol format...")
-    protocol_commands = convert_to_protocol_format(resolved_plan)
-    print(f"[Tasks] Generated {len(protocol_commands)} protocol command(s)")
+    # Step 3: Convert to IK text format (6-parameter: x, y, z, pitch_rad, yaw_rad, O|C)
+    print("[Tasks] Step 3: Converting to IK format...")
+    ik_commands = convert_to_ik_format(resolved_plan)
+    print(f"[Tasks] Generated {len(ik_commands)} IK command(s)")
     
     # Step 4: Execute via dispatcher
     print("[Tasks] Step 4: Executing via dispatcher...")
-    success = dispatcher.execute_primitives(protocol_commands)
+    success = dispatcher.execute_ik_commands(ik_commands)
     
     if success:
         print("[Tasks] Plan execution completed successfully!")
@@ -110,18 +110,34 @@ def expand_high_level_commands(plan: List[Dict], memory: ObjectMemory) -> List[D
             # Get grasp orientation for this object
             grasp_angle = get_grasp_orientation(target, memory)
             
-            # Expand to primitive sequence with approach offset
+            # Get object's actual z coordinate (without offset)
+            obj_xyz = _resolve_to_xyz(target, memory)
+            if obj_xyz is None:
+                print(f"[Tasks] Warning: Could not resolve target {target} for PICK, skipping")
+                continue
+            
+            obj_z = obj_xyz[2]  # Object's actual z coordinate
+            
+            # Expand to primitive sequence:
+            # 1. RELEASE (ensure claw is open)
+            # 2. ROT_YAW to optimal grasp orientation
+            # 3. MOVE_TO above object with approach offset, pitch down, with optimal yaw
+            # 4. MOVE_TO to object's actual z coordinate (no offset), pitch down, keep yaw
+            # 5. GRAB (close claw)
+            # 6. MOVE_TO rest position with rest pitch/yaw
             vertical_offset = [0, 0, C.APPROACH_OFFSET_Z]
             expanded.extend([
                 {"command": "RELEASE"},
+                {"command": "ROT_YAW", "angle": grasp_angle},  # Set yaw before approaching
                 {"command": "MOVE_TO", "destination": target, "offset": vertical_offset, "pitch": -90.0},
-                {"command": "ROT_YAW", "angle": grasp_angle},
-                {"command": "MOVE_TO", "destination": target, "pitch": -90.0},
+                # Second MOVE_TO: go to object's actual z coordinate (no offset), keep pitch down and yaw
+                {"command": "MOVE_TO", "destination": [obj_xyz[0], obj_xyz[1], 0], "pitch": -90.0},
                 {"command": "GRAB"},
                 {"command": "MOVE_TO", "destination": C.REST_POSITION, "pitch": C.REST_PITCH_ANGLE},
                 {"command": "ROT_YAW", "angle": C.REST_YAW_ANGLE},
             ])
             print(f"[Tasks]   Expanded to 7 primitives")
+            print(f"[Tasks]   Sequence: RELEASE -> ROT_YAW({grasp_angle:.1f}°) -> MOVE_TO(above, z={obj_z + C.APPROACH_OFFSET_Z:.1f}mm) -> MOVE_TO(pick, z={obj_z:.1f}mm) -> GRAB -> REST")
         
         elif command == "PLACE":
             print(f"[Tasks] Expanding PLACE command {i}...")
@@ -276,62 +292,145 @@ def _resolve_to_xyz(target: Any, memory: ObjectMemory) -> Optional[List[float]]:
 
 
 # ============================================================================
-# Step 3: Convert to Protocol Format
+# Step 3: Convert to IK Text Format (6-parameter: x, y, z, pitch_rad, yaw_rad, O|C)
 # ============================================================================
 
-def convert_to_protocol_format(plan: List[Dict]) -> List[Dict]:
+def convert_to_ik_format(plan: List[Dict]) -> List[Dict]:
     """
-    Convert resolved commands to protocol format using P.CMD_* constants.
+    Convert resolved commands to IK text format.
     
-    Input format (from resolve step):
-      {"command": "MOVE_TO", "x": 1200, "y": 800, "z": 500, "pitch": 0.0}
-      {"command": "GRAB"}
-      {"command": "ROT_YAW", "angle": 45.0}
+    Format: "ik x y z pitch_rad yaw_rad O|C"
     
-    Output format (for network transmission):
-      {"cmd": P.CMD_MOVE_TO, "x": 1200, "y": 800, "z": 500, "pitch": 0.0}
-      {"cmd": P.CMD_GRAB}
-      {"cmd": P.CMD_ROT_YAW, "angle": 45.0}
+    Rules:
+    - MOVE_TO: Includes x, y, z, pitch_rad, yaw_rad. Uses previous pitch/yaw if not specified.
+    - GRAB: Sets claw to "C" (closed). Combined with preceding or following MOVE_TO.
+    - RELEASE: Sets claw to "O" (open). Combined with preceding or following MOVE_TO.
+    - ROT_YAW: Updates yaw for subsequent MOVE_TO commands (doesn't send separate command).
+    - ROT_PITCH: Updates pitch for subsequent MOVE_TO commands (doesn't send separate command).
     
-    Where P.CMD_MOVE_TO = "MOVE_TO", P.CMD_GRAB = "GRAB", etc.
+    Strategy: Process commands and combine GRAB/RELEASE with adjacent MOVE_TO commands.
+    
+    All coordinates are converted from mm to meters for IK.
     """
-    protocol_commands = []
+    import math
     
-    for task in plan:
+    ik_commands = []
+    
+    # State tracking (defaults from REST position)
+    current_pitch_deg = C.REST_PITCH_ANGLE  # degrees
+    current_yaw_deg = C.REST_YAW_ANGLE  # degrees
+    current_claw = "O"  # Open by default
+    
+    # Track pending yaw/pitch changes that will apply to next MOVE_TO
+    pending_yaw_deg = None
+    pending_pitch_deg = None
+    
+    i = 0
+    while i < len(plan):
+        task = plan[i]
         command = task.get("command", "").upper()
         
         if command == "MOVE_TO":
-            protocol_commands.append({
-                "cmd": P.CMD_MOVE_TO,
-                "x": task["x"],
-                "y": task["y"],
-                "z": task["z"],
-                "pitch": task["pitch"],
+            # Get coordinates (in mm) and convert to meters
+            x_mm = task.get("x", 0.0)
+            y_mm = task.get("y", 0.0)
+            z_mm = task.get("z", 0.0)
+            
+            x_m = x_mm / 1000.0
+            y_m = y_mm / 1000.0
+            z_m = z_mm / 1000.0
+            
+            # Get pitch: use specified, pending, or current
+            pitch_deg = task.get("pitch")
+            if pitch_deg is not None:
+                current_pitch_deg = float(pitch_deg)
+            elif pending_pitch_deg is not None:
+                current_pitch_deg = pending_pitch_deg
+                pending_pitch_deg = None
+            
+            # Yaw: use pending or current (MOVE_TO doesn't specify yaw directly)
+            if pending_yaw_deg is not None:
+                current_yaw_deg = pending_yaw_deg
+                pending_yaw_deg = None
+            
+            # Use current claw state (don't combine with next GRAB/RELEASE to allow separate commands)
+            claw_state = current_claw
+            
+            # Convert to radians
+            pitch_rad = math.radians(current_pitch_deg)
+            yaw_rad = math.radians(current_yaw_deg)
+            
+            # Create IK command
+            ik_commands.append({
+                "type": "ik",
+                "x": x_m,
+                "y": y_m,
+                "z": z_m,
+                "pitch_rad": pitch_rad,
+                "yaw_rad": yaw_rad,
+                "claw": claw_state,
             })
+            print(f"[Tasks] IK command: x={x_m:.3f}m y={y_m:.3f}m z={z_m:.3f}m pitch={current_pitch_deg:.1f}° ({pitch_rad:.3f}rad) yaw={current_yaw_deg:.1f}° ({yaw_rad:.3f}rad) claw={claw_state}")
         
         elif command == "GRAB":
-            protocol_commands.append({
-                "cmd": P.CMD_GRAB,
-            })
+            # Create a new IK command at the same position as the last MOVE_TO, but with claw closed
+            if len(ik_commands) > 0:
+                # Get the last IK command's position and pose
+                last_cmd = ik_commands[-1]
+                # Create a new command with the same position/pose but claw closed
+                ik_commands.append({
+                    "type": "ik",
+                    "x": last_cmd["x"],
+                    "y": last_cmd["y"],
+                    "z": last_cmd["z"],
+                    "pitch_rad": last_cmd["pitch_rad"],
+                    "yaw_rad": last_cmd["yaw_rad"],
+                    "claw": "C",
+                })
+                current_claw = "C"
+                print(f"[Tasks] GRAB: created new IK command at same position with claw closed")
+            else:
+                # No previous MOVE_TO, update state for next MOVE_TO
+                current_claw = "C"
+                print(f"[Tasks] GRAB: claw set to {current_claw} (will apply to next MOVE_TO)")
         
         elif command == "RELEASE":
-            protocol_commands.append({
-                "cmd": P.CMD_RELEASE,
-            })
+            # Create a new IK command at the same position as the last MOVE_TO, but with claw open
+            if len(ik_commands) > 0:
+                # Get the last IK command's position and pose
+                last_cmd = ik_commands[-1]
+                # Create a new command with the same position/pose but claw open
+                ik_commands.append({
+                    "type": "ik",
+                    "x": last_cmd["x"],
+                    "y": last_cmd["y"],
+                    "z": last_cmd["z"],
+                    "pitch_rad": last_cmd["pitch_rad"],
+                    "yaw_rad": last_cmd["yaw_rad"],
+                    "claw": "O",
+                })
+                current_claw = "O"
+                print(f"[Tasks] RELEASE: created new IK command at same position with claw open")
+            else:
+                # No previous MOVE_TO, update state for next MOVE_TO
+                current_claw = "O"
+                print(f"[Tasks] RELEASE: claw set to {current_claw} (will apply to next MOVE_TO)")
         
         elif command == "ROT_YAW":
-            protocol_commands.append({
-                "cmd": P.CMD_ROT_YAW,
-                "angle": task["angle"],
-            })
+            # Update yaw for next MOVE_TO command
+            yaw_deg = task.get("angle", 0.0)
+            pending_yaw_deg = float(yaw_deg)
+            print(f"[Tasks] ROT_YAW: yaw set to {yaw_deg:.1f}° (will apply to next MOVE_TO)")
         
         elif command == "ROT_PITCH":
-            protocol_commands.append({
-                "cmd": P.CMD_ROT_PITCH,
-                "angle": task["angle"],
-            })
+            # Update pitch for next MOVE_TO command
+            pitch_deg = task.get("angle", 0.0)
+            pending_pitch_deg = float(pitch_deg)
+            print(f"[Tasks] ROT_PITCH: pitch set to {pitch_deg:.1f}° (will apply to next MOVE_TO)")
         
         else:
-            print(f"[Tasks] Warning: Unknown command {command} in protocol conversion")
+            print(f"[Tasks] Warning: Unknown command {command} in IK conversion")
+        
+        i += 1
     
-    return protocol_commands
+    return ik_commands

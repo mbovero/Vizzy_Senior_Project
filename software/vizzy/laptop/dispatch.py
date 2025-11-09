@@ -6,6 +6,7 @@ Waits for confirmation before sending the next command.
 
 import time
 import queue
+import socket
 from typing import List, Dict, Optional
 
 from ..shared import protocol as P
@@ -153,5 +154,119 @@ class CommandDispatcher:
         
         # Timeout reached
         print(f"[Dispatcher] Timeout waiting for {expected_cmd} confirmation ({self.timeout}s)")
+        return "timeout"
+    
+    def execute_ik_commands(self, ik_commands: List[Dict]) -> bool:
+        """
+        Execute a list of IK commands by sending them as text to the arm server.
+        Includes a 2-second delay between commands.
+        
+        Parameters
+        ----------
+        ik_commands : List[Dict]
+            List of IK command dicts with format:
+            {"type": "ik", "x": 0.3, "y": 0.2, "z": 0.125, "pitch_rad": -1.571, "yaw_rad": 0.0, "claw": "O"}
+        
+        Returns
+        -------
+        bool
+            True if all commands succeeded, False if any failed
+        """
+        print(f"[Dispatcher] Executing {len(ik_commands)} IK command(s)")
+        
+        for i, cmd in enumerate(ik_commands, 1):
+            if cmd.get("type") != "ik":
+                print(f"[Dispatcher] Warning: Skipping non-IK command: {cmd}")
+                continue
+            
+            # Format: "ik x y z pitch_rad yaw_rad O|C\n"
+            x = cmd.get("x", 0.0)
+            y = cmd.get("y", 0.0)
+            z = cmd.get("z", 0.0)
+            pitch_rad = cmd.get("pitch_rad", 0.0)
+            yaw_rad = cmd.get("yaw_rad", 0.0)
+            claw = cmd.get("claw", "O")
+            
+            cmd_text = f"ik {x:.6f} {y:.6f} {z:.6f} {pitch_rad:.6f} {yaw_rad:.6f} {claw}\n"
+            print(f"[Dispatcher] [{i}/{len(ik_commands)}] Sending IK command: {cmd_text.strip()}")
+            
+            try:
+                # Send text command directly to socket
+                self.sock.sendall(cmd_text.encode("utf-8"))
+                
+                # Wait for ACK (arm server sends "ACK ik\n" or "ERR ...\n")
+                ack = self._wait_for_ik_ack()
+                
+                if ack == "success":
+                    print(f"[Dispatcher] IK command {i} confirmed")
+                elif ack == "error":
+                    print(f"[Dispatcher] IK command {i} FAILED")
+                    return False
+                else:
+                    print(f"[Dispatcher] IK command {i} TIMEOUT")
+                    return False
+                
+                # Add 2-second delay between commands (except after the last one)
+                if i < len(ik_commands):
+                    print(f"[Dispatcher] Waiting 2 seconds before next command...")
+                    time.sleep(2.0)
+                    
+            except Exception as e:
+                print(f"[Dispatcher] Exception sending IK command: {e}")
+                return False
+        
+        print(f"[Dispatcher] All {len(ik_commands)} IK commands completed successfully")
+        return True
+    
+    def _wait_for_ik_ack(self) -> str:
+        """
+        Wait for ACK/ERR response from arm server for IK command.
+        Responses are received by the receiver thread and put in the queue as strings.
+        
+        Returns
+        -------
+        str
+            "success", "error", or "timeout"
+        """
+        deadline = time.time() + self.timeout
+        
+        while time.time() < deadline:
+            timeout_remaining = deadline - time.time()
+            if timeout_remaining <= 0:
+                break
+            
+            try:
+                # Wait for message from receiver thread (queue contains strings for text protocol)
+                msg = self._cmd_complete_q.get(timeout=min(timeout_remaining, 0.1))
+                
+                # Handle text protocol responses (strings)
+                if isinstance(msg, str):
+                    if msg.startswith("ACK"):
+                        return "success"
+                    elif msg.startswith("ERR"):
+                        print(f"[Dispatcher] Server error: {msg}")
+                        return "error"
+                    # Otherwise continue waiting
+                
+                # Handle JSON protocol responses (dicts) - backward compatibility
+                elif isinstance(msg, dict):
+                    if msg.get("type") == P.TYPE_CMD_COMPLETE:
+                        status = msg.get("status", "unknown")
+                        if status == "success":
+                            return "success"
+                        else:
+                            error_msg = msg.get("message", "Unknown error")
+                            print(f"[Dispatcher] Server error: {error_msg}")
+                            return "error"
+                
+            except queue.Empty:
+                # No message yet, continue waiting
+                continue
+            except Exception as e:
+                print(f"[Dispatcher] Error waiting for response: {e}")
+                return "error"
+        
+        # Timeout reached
+        print(f"[Dispatcher] Timeout waiting for IK ACK ({self.timeout}s)")
         return "timeout"
 

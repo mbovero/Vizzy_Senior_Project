@@ -172,7 +172,7 @@ TASK_SCHEDULER_OUTPUT_FILE = str(LAPTOP_DIR / "task_scheduler_output.json")
 # Task Execution - Rest Position
 # -----------------------------
 # Rest/home position for robotic arm (all coordinates in millimeters)
-REST_POSITION = [0, 0, 800]      # [x_mm, y_mm, z_mm]
+REST_POSITION = [.3, 0, 800]      # [x_mm, y_mm, z_mm]
 REST_YAW_ANGLE = 0.0             # degrees
 REST_PITCH_ANGLE = 0.0           # degrees
 
