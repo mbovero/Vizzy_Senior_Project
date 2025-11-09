@@ -22,7 +22,7 @@ SERVO_MAX    = 2500
 SERVO_PITCH_CENTER = 1755
 
 # Yaw PWM mapping (your exact endpoints)
-YAW_PWM_CENTER = 1730
+YAW_PWM_CENTER = 1700
 YAW_PWM_MIN    = 1025   # clockwise (negative)
 YAW_PWM_MAX    = 2375   # counter-clockwise (positive)
 YAW_RAD_MIN    = -math.pi/2   # -90°

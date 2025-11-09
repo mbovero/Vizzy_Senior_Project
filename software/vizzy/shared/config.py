@@ -33,7 +33,7 @@ CENTER_DURATION_MS = 10000  # Max time to attempt centering (10 seconds)
 # Centering movement calculation (matching object_centering.py)
 PIXEL_TO_MM = 1.0 / 2.90  # mm per pixel
 WORKING_DISTANCE_MM = 600.0  # mm (typical working distance for arm operations)
-MOVEMENT_SCALE_FACTOR = 1.5  # Scale factor for movement calculation
+MOVEMENT_SCALE_FACTOR = 1.2  # Scale factor for movement calculation
 
 # Explicit scan gates (selection before attempting to center)
 # (Use these to filter scan results; centering thresholds remain separate.)
@@ -56,7 +56,7 @@ MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a sing
 MEM_FILE = str(LAPTOP_DIR / "object_memory.json")
 
 # Valid objects to center on during search (fork, cup, and knife)
-SEARCH_VALID_CLASS_NAMES = ["fork", "cup", "knife"]  # Only center on these objects
+SEARCH_VALID_CLASS_NAMES = ["fork", "cup", "knife", "spoon"]  # Only center on these objects
 
 # -----------------------------
 # Networking
@@ -96,9 +96,9 @@ SEARCH_PITCH_DEG = 5
 # Explicit search path points (x_mm, y_mm) - all valid poses the arm can move to
 SEARCH_PATH_POINTS = [
     # Start points
-    (0.0, -225.0),    # Pose 0
-    (0.0, -350.0),    # Pose 1
-    (0.0, -450.0),    # Pose 2
+    (100.0, -225.0),    # Pose 0
+    (100.0, -350.0),    # Pose 1
+    (100.0, -450.0),    # Pose 2
     # Middle points
     (350.0, -350.0),  # Pose 5
     (270.0, -270.0),  # Pose 4
@@ -113,9 +113,9 @@ SEARCH_PATH_POINTS = [
     
     
     # End points
-    (0.0, 225.0),     # Pose 12
-    (0.0, 350.0),     # Pose 13
-    (0.0, 450.0),     # Pose 14
+    (100.0, 225.0),     # Pose 12
+    (100.0, 350.0),     # Pose 13
+    (100, 450.0),     # Pose 14
 ]
 
 # Relative nudge scaling (converted from normalized [-1,1] commands on the RPi)
@@ -131,7 +131,7 @@ SERVO_PITCH_CENTER_US = 1500
 SERVO_PITCH_MIN_US    = 1000
 SERVO_PITCH_MAX_US    = 2000
 
-SERVO_YAW_CENTER_US   = 1500
+SERVO_YAW_CENTER_US   = 1700
 SERVO_YAW_MIN_US      = 1000
 SERVO_YAW_MAX_US      = 2000
 
@@ -188,3 +188,10 @@ PRIMITIVE_CMD_TIMEOUT = 30.0
 # -----------------------------
 # Note: Orientation is calculated from frames collected during centering (CENTER_FRAMES)
 # No additional frame capture needed - reuses centering frames for efficiency
+
+# -----------------------------
+# Camera to Gripper Offset
+# -----------------------------
+# Physical offset from camera center to gripper center (millimeters)
+# When camera is centered on object, gripper is offset by this distance along the radius
+CAMERA_TO_GRIPPER_OFFSET_MM = 34.5  # mm
