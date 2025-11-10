@@ -261,11 +261,33 @@ class ScanWorker(threading.Thread):
             print(f"[ScanWorker] Object centered and registered successfully")
             
             # Return to baseline pose after successful centering and registration
+            # Continuously publish frames while returning to baseline
             print(f"[ScanWorker] Returning to baseline pose: x={x:.2f}mm, y={y:.2f}mm, z={z:.2f}mm")
             returned = self.motion.move_to_target(x, y, z, pitch)
             if not returned:
                 print("[ScanWorker] Warning: Baseline MOVE_TO did not confirm; continuing after dwell")
-            time.sleep(C.RETURN_TO_POSE_DWELL_S)
+            
+            # Wait for dwell time while continuously publishing frames
+            dwell_start = time.time()
+            while (time.time() - dwell_start) < C.RETURN_TO_POSE_DWELL_S:
+                grabbed = self.cap.grab()
+                if grabbed:
+                    ok, frame = self.cap.retrieve()
+                else:
+                    ok, frame = self.cap.read()
+                if ok and self.frame_sink:
+                    h, w = frame.shape[:2]
+                    from .hud import draw_wrapped_text
+                    elapsed = time.time() - dwell_start
+                    status = f"Returning to baseline... {C.RETURN_TO_POSE_DWELL_S - elapsed:.1f}s"
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                    draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                    resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                    self.frame_sink(resized)
+                time.sleep(0.033)  # ~30 FPS while waiting
+            
             self._flush_capture()
             print(f"[ScanWorker] Returned to baseline pose - ready to resume scan")
         else:
@@ -278,11 +300,33 @@ class ScanWorker(threading.Thread):
             print(f"[ScanWorker] Object NOT registered")
             
             # Still return to baseline pose even if centering was aborted
+            # Continuously publish frames while returning to baseline
             print(f"[ScanWorker] Returning to baseline pose: x={x:.2f}mm, y={y:.2f}mm, z={z:.2f}mm")
             returned = self.motion.move_to_target(x, y, z, pitch)
             if not returned:
                 print("[ScanWorker] Warning: Baseline MOVE_TO did not confirm; continuing after dwell")
-            time.sleep(C.RETURN_TO_POSE_DWELL_S)
+            
+            # Wait for dwell time while continuously publishing frames
+            dwell_start = time.time()
+            while (time.time() - dwell_start) < C.RETURN_TO_POSE_DWELL_S:
+                grabbed = self.cap.grab()
+                if grabbed:
+                    ok, frame = self.cap.retrieve()
+                else:
+                    ok, frame = self.cap.read()
+                if ok and self.frame_sink:
+                    h, w = frame.shape[:2]
+                    from .hud import draw_wrapped_text
+                    elapsed = time.time() - dwell_start
+                    status = f"Returning to baseline... {C.RETURN_TO_POSE_DWELL_S - elapsed:.1f}s"
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                    draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                    resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                    self.frame_sink(resized)
+                time.sleep(0.033)  # ~30 FPS while waiting
+            
             self._flush_capture()
             print(f"[ScanWorker] Returned to baseline pose")
     
@@ -582,22 +626,82 @@ class ScanWorker(threading.Thread):
                 if not ok:
                     print("[ScanWorker] Warning: MOVE_TO baseline timed out or failed; continuing after settle")
 
-                # Wait for arm to settle (movement complete)
+                # Wait for arm to settle while continuously publishing frames to keep GUI live
                 settle_time = C.MOVE_SETTLE_S + getattr(C, 'POSE_CV_DELAY_S', 0.3)
                 print(f"[ScanWorker] Waiting {settle_time:.1f}s for arm to settle at pose {pid}...")
-                time.sleep(settle_time)
+                settle_start = time.time()
+                while (time.time() - settle_start) < settle_time:
+                    # Continuously read and publish frames to prevent GUI freezing
+                    grabbed = self.cap.grab()
+                    if grabbed:
+                        ok, frame = self.cap.retrieve()
+                    else:
+                        ok, frame = self.cap.read()
+                    if ok:
+                        # Publish frame with status (no YOLO during movement)
+                        h, w = frame.shape[:2]
+                        from .hud import draw_wrapped_text
+                        elapsed = time.time() - settle_start
+                        status = f"Moving to pose {pid}... waiting {settle_time - elapsed:.1f}s"
+                        overlay = frame.copy()
+                        cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                        draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                        resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                        if self.frame_sink:
+                            self.frame_sink(resized)
+                    time.sleep(0.033)  # ~30 FPS while waiting
                 
-                # Add 5 second delay after first command (pose 0)
+                # Add 5 second delay after first command (pose 0) - but keep publishing frames
                 if pid == 0:
                     print("[ScanWorker] First pose reached - waiting 5 seconds...")
-                    time.sleep(5.0)
+                    wait_start = time.time()
+                    while (time.time() - wait_start) < 5.0:
+                        # Continuously read and publish frames
+                        grabbed = self.cap.grab()
+                        if grabbed:
+                            ok, frame = self.cap.retrieve()
+                        else:
+                            ok, frame = self.cap.read()
+                        if ok:
+                            h, w = frame.shape[:2]
+                            from .hud import draw_wrapped_text
+                            elapsed = time.time() - wait_start
+                            status = f"First pose - waiting {5.0 - elapsed:.1f}s"
+                            overlay = frame.copy()
+                            cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                            cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                            draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                            resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                            if self.frame_sink:
+                                self.frame_sink(resized)
+                        time.sleep(0.033)  # ~30 FPS while waiting
                 
                 # Mark arm as stopped (ready for YOLO detection)
                 self._arm_moving.clear()
                 print(f"[ScanWorker] Arm stopped at pose {pid} - YOLO detection enabled")
                 
-                # Wait a bit more to ensure arm is fully settled before detection
-                time.sleep(0.2)
+                # Wait a bit more to ensure arm is fully settled before detection - but keep publishing frames
+                wait_start = time.time()
+                while (time.time() - wait_start) < 0.2:
+                    grabbed = self.cap.grab()
+                    if grabbed:
+                        ok, frame = self.cap.retrieve()
+                    else:
+                        ok, frame = self.cap.read()
+                    if ok:
+                        # Publish frame (no YOLO yet, just status)
+                        h, w = frame.shape[:2]
+                        from .hud import draw_wrapped_text
+                        status = f"Arm settling at pose {pid}..."
+                        overlay = frame.copy()
+                        cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                        draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                        resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                        if self.frame_sink:
+                            self.frame_sink(resized)
+                    time.sleep(0.033)  # ~30 FPS while waiting
                 
                 # CRITICAL: Check if object of interest is in frame BEFORE starting scan loop
                 # If detected, STOP scan cycle immediately - do NOT proceed with scanning or centering
@@ -617,7 +721,14 @@ class ScanWorker(threading.Thread):
                     detected_cls_id = None
                     detected_conf = 0.0
                     
+                    # Annotate frame with YOLO results and publish it so user can see what YOLO sees
+                    annotated_frame = check_frame.copy()
                     for r in check_results:
+                        try:
+                            annotated_frame = r.plot()  # YOLO-annotated frame
+                        except Exception:
+                            pass
+                        
                         if len(r.boxes) > 0:
                             for i in range(len(r.boxes)):
                                 cls_id = int(r.boxes.cls[i].item())
@@ -630,6 +741,21 @@ class ScanWorker(threading.Thread):
                                     break
                             if object_detected:
                                 break
+                    
+                    # Always publish the annotated frame so user can see YOLO detections
+                    h, w = annotated_frame.shape[:2]
+                    from .hud import draw_wrapped_text
+                    if object_detected:
+                        status = f"Object detected: {detected_cls_name} (conf: {detected_conf:.2f})"
+                    else:
+                        status = f"Scanning at pose {pid}..."
+                    overlay = annotated_frame.copy()
+                    cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.35, annotated_frame, 0.65, 0, annotated_frame)
+                    draw_wrapped_text(annotated_frame, status, 8, 8, int(w * 0.8))
+                    resized = cv2.resize(annotated_frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                    if self.frame_sink:
+                        self.frame_sink(resized)
                     
                     if object_detected:
                         # Check if objects of this class have already been registered
@@ -672,7 +798,17 @@ class ScanWorker(threading.Thread):
                 while not self.events.scan_abort.is_set():
                     if self._centering_active:
                         # Defensive: should never run when centering flag is set.
-                        time.sleep(0.01)
+                        # But still publish frames to keep GUI live
+                        grabbed = self.cap.grab()
+                        if grabbed:
+                            ok, frame = self.cap.retrieve()
+                        else:
+                            ok, frame = self.cap.read()
+                        if ok and self.frame_sink:
+                            h, w = frame.shape[:2]
+                            resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                            self.frame_sink(resized)
+                        time.sleep(0.033)  # ~30 FPS while centering is active
                         continue
                     
                     # BEFORE scanning, check again if object is in frame
@@ -695,7 +831,14 @@ class ScanWorker(threading.Thread):
                             detected_cls_id_pre = None
                             detected_conf_pre = 0.0
                             
+                            # Annotate frame with YOLO results and publish it
+                            annotated_pre_frame = pre_scan_frame.copy()
                             for r in pre_scan_results:
+                                try:
+                                    annotated_pre_frame = r.plot()  # YOLO-annotated frame
+                                except Exception:
+                                    pass
+                                
                                 if len(r.boxes) > 0:
                                     for i in range(len(r.boxes)):
                                         cls_id = int(r.boxes.cls[i].item())
@@ -715,6 +858,21 @@ class ScanWorker(threading.Thread):
                                             break
                                     if object_detected_pre:
                                         break
+                            
+                            # Always publish the annotated frame so user can see YOLO detections
+                            h, w = annotated_pre_frame.shape[:2]
+                            from .hud import draw_wrapped_text
+                            if object_detected_pre:
+                                status = f"Object detected: {detected_cls_name_pre} (conf: {detected_conf_pre:.2f})"
+                            else:
+                                status = f"Scanning at pose {pid}..."
+                            overlay = annotated_pre_frame.copy()
+                            cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                            cv2.addWeighted(overlay, 0.35, annotated_pre_frame, 0.65, 0, annotated_pre_frame)
+                            draw_wrapped_text(annotated_pre_frame, status, 8, 8, int(w * 0.8))
+                            resized = cv2.resize(annotated_pre_frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                            if self.frame_sink:
+                                self.frame_sink(resized)
                             
                             if object_detected_pre:
                                 print(f"[ScanWorker] Object detected during scan: {detected_cls_name_pre} (conf={detected_conf_pre:.2f})")

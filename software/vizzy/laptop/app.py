@@ -353,10 +353,19 @@ class StateManager:
             if not ok:
                 return  # Skip if retrieve fails
         
-        # Skip YOLO inference in IDLE mode to prevent GUI freezing
-        # YOLO inference can take 100-500ms+ and blocks the GUI thread
-        # Just show the raw frame with HUD for responsive GUI
+        # Run YOLO inference in IDLE mode so users can see object detections
+        # Use half precision for faster inference to prevent GUI freezing
         annotated = frame.copy()
+        try:
+            results = self.model(frame, classes=self.allowed_class_ids, verbose=False, half=True)
+            for r in results:
+                try:
+                    annotated = r.plot()  # YOLO-annotated frame with bounding boxes
+                except Exception:
+                    pass  # If plot fails, show raw frame
+        except Exception:
+            # If YOLO fails, show raw frame
+            annotated = frame.copy()
 
         secs_left = max(0.0, self.idle_deadline - time.time())
         status = f"IDLE | auto-search in {secs_left:0.1f}s"
@@ -451,41 +460,39 @@ class StateManager:
                     self.finish_search()
 
                 # --- Display handling (main-thread only) ---
-                if self.state == "IDLE":
-                    # Close active-view window when returning to IDLE
-                    if self._prev_state in ("SEARCH", "EXECUTE_TASK"):
-                        try:
-                            cv2.destroyWindow("Vizzy (SEARCH)")
-                        except Exception:
-                            pass
+                # Use a single window name for all states to prevent window destruction/recreation
+                # This ensures the video feed is never interrupted
+                WINDOW_NAME = "Vizzy"
+                
+                # Only read camera in IDLE mode (when ScanWorker is not active)
+                # In SEARCH mode, ScanWorker reads camera and publishes to frame_bus
+                # This prevents camera access conflicts between threads
+                if self.state == "IDLE" and not self.events.scan_active.is_set():
                     # Publish an IDLE frame via the display bus
+                    # This continuously reads from camera and runs YOLO
                     self._run_idle_preview_once()
-                    # Drain and display the latest IDLE frame on main thread
-                    last = None
+                
+                # Always drain frames from bus and display (works for both IDLE and SEARCH)
+                # In IDLE: frames come from _run_idle_preview_once()
+                # In SEARCH: frames come from ScanWorker thread (continuous video feed)
+                last = None
+                frame_count = 0
+                for frame in self.frame_bus.drain():
+                    last = frame
+                    frame_count += 1
+                
+                # Display the latest frame in the single window (never destroy/recreate)
+                # This ensures continuous video feed regardless of state
+                if last is not None:
+                    cv2.imshow(WINDOW_NAME, last)
+                elif self.state == "IDLE" and not self.events.scan_active.is_set():
+                    # If no frame available in IDLE, try to read one immediately
+                    # This ensures we always have a frame to display
+                    self._run_idle_preview_once()
                     for frame in self.frame_bus.drain():
                         last = frame
                     if last is not None:
-                        cv2.imshow("Vizzy (IDLE Preview)", last)
-
-                elif self.state in ("SEARCH", "EXECUTE_TASK"):
-                    # Close IDLE window when entering an active view
-                    if self._prev_state == "IDLE":
-                        try:
-                            cv2.destroyWindow("Vizzy (IDLE Preview)")
-                        except Exception:
-                            pass
-                    # Drain frames from the bus and render the latest one (faster GUI)
-                    last = None
-                    frame_count = 0
-                    for frame in self.frame_bus.drain():
-                        last = frame
-                        frame_count += 1
-                    if last is not None:
-                        cv2.imshow("Vizzy (SEARCH)", last)  # reuse one window for all active modes
-                        # Use waitKey(1) for faster GUI updates (non-blocking)
-                    else:
-                        # No frame available, use minimal delay
-                        pass
+                        cv2.imshow(WINDOW_NAME, last)
 
                 # Minimal UI handling (only 'q' to quit for now)
                 # waitKey(1) is non-blocking and allows fast GUI updates
@@ -496,15 +503,10 @@ class StateManager:
                 # remember previous state for next tick
                 self._prev_state = self.state
 
-                # Adaptive sleep: shorter when displaying, longer when idle
-                # This keeps GUI responsive while reducing CPU usage
-                # Always use small sleep to keep GUI responsive and prevent freezing
-                if self.state in ("SEARCH", "EXECUTE_TASK") and last is not None:
-                    time.sleep(0.001)  # Very short sleep when actively displaying frames
-                elif self.state == "IDLE":
-                    time.sleep(0.01)  # Slightly longer sleep in IDLE (10ms) to reduce CPU, but still responsive
-                else:
-                    time.sleep(0.005)  # Default sleep
+                # Always use minimal sleep to keep GUI responsive and prevent freezing
+                # The video feed should update smoothly at ~30 FPS
+                # Use very short sleep to ensure frequent GUI updates regardless of state
+                time.sleep(0.001)  # 1ms sleep for maximum GUI responsiveness
 
         finally:
             # Stop LLM worker gracefully
