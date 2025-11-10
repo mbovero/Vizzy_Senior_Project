@@ -27,13 +27,17 @@ OBJ_BLACKLIST = [
 ]
 
 # Duration knobs (ms) - reduced for faster iteration
-SCAN_DURATION_MS   = 500   # Per-pose scan window (reduced from 1750)
+SCAN_DURATION_MS   = 400  # Per-pose scan window (reduced from 1750)
 CENTER_DURATION_MS = 10000  # Max time to attempt centering (10 seconds)
 
 # Centering movement calculation (matching object_centering.py)
 PIXEL_TO_MM = 1.0 / 2.90  # mm per pixel
 WORKING_DISTANCE_MM = 600.0  # mm (typical working distance for arm operations)
 MOVEMENT_SCALE_FACTOR = 1.2  # Scale factor for movement calculation
+
+# Camera to grasp position offset (mm)
+# Distance between camera center and actual grasp position on the end effector
+CAMERA_TO_GRASP_OFFSET_MM = 34.5  # mm offset to account for camera-to-grasp distance
 
 # Explicit scan gates (selection before attempting to center)
 # (Use these to filter scan results; centering thresholds remain separate.)
@@ -56,7 +60,7 @@ MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a sing
 MEM_FILE = str(LAPTOP_DIR / "object_memory.json")
 
 # Valid objects to center on during search (fork, cup, and knife)
-SEARCH_VALID_CLASS_NAMES = ["fork", "spoon", "cup", "knife"]  # Only center on these objects
+SEARCH_VALID_CLASS_NAMES = ["fork", "spoon", "cup", "knife", "frisbee", "bowl"]  # Only center on these objects
 
 # -----------------------------
 # Networking
@@ -160,7 +164,7 @@ SERVO_CLAW_MIN_US     = 1000
 SERVO_CLAW_MAX_US     = 2000
 
 # Idle/auto-search behavior (laptop)
-IDLE_TIMEOUT_S = 20.0   # seconds of inactivity before auto SEARCH
+IDLE_TIMEOUT_S = 60.0   # seconds of inactivity before auto SEARCH
 
 # -----------------------------
 # LLM / Semantic Enrichment
@@ -198,7 +202,7 @@ REST_YAW_ANGLE = 0.0             # degrees
 REST_PITCH_ANGLE = 0.0           # degrees
 
 # Vertical offset for approach/retract moves (millimeters)
-APPROACH_OFFSET_Z = 350.0        # mm above object for safe approach
+APPROACH_OFFSET_Z = 300.0        # mm above object for safe approach
 
 # Timeout for primitive command execution (seconds)
 PRIMITIVE_CMD_TIMEOUT = 30.0

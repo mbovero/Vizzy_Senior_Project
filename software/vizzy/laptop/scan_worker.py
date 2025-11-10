@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from typing import Dict, Optional, Any, Callable
@@ -206,12 +207,31 @@ class ScanWorker(threading.Thread):
             print(f"[ScanWorker] Centering SUCCESS - movement < {C.CENTER_MIN_MOVEMENT_MM}mm")
             print(f"[ScanWorker] Final centered position: x={final_x_mm:.2f}mm, y={final_y_mm:.2f}mm, z=0.0mm (stored as 0)")
             
-            # Use the final centered position for object location
+            # Apply camera-to-grasp offset transformation
+            # Calculate angle from positive x-axis: theta_B = arctan2(y, x)
+            theta_B = math.atan2(final_y_mm, final_x_mm)
+            
+            # Calculate radius from base to object center
+            r = math.sqrt(final_x_mm**2 + final_y_mm**2)
+            
+            # Apply offset: subtract camera-to-grasp distance
+            r_offset = r - C.CAMERA_TO_GRASP_OFFSET_MM
+            
+            # Calculate corrected object center coordinates
+            corrected_x_mm = r_offset * math.cos(theta_B)
+            corrected_y_mm = r_offset * math.sin(theta_B)
+            
+            print(f"[ScanWorker] Camera-to-grasp offset applied:")
+            print(f"[ScanWorker]   Original: r={r:.2f}mm, theta={math.degrees(theta_B):.2f}°")
+            print(f"[ScanWorker]   Offset: {C.CAMERA_TO_GRASP_OFFSET_MM}mm")
+            print(f"[ScanWorker]   Corrected: x={corrected_x_mm:.2f}mm, y={corrected_y_mm:.2f}mm")
+            
+            # Use the corrected position for object location
             # Z coordinate is always stored as 0 (objects are on the table/work surface)
             loc = {
-                "x": final_x_mm,  # Final x after centering
-                "y": final_y_mm,  # Final y after centering
-                "z": 0.0,         # Z always stored as 0 (object is on table/work surface)
+                "x": corrected_x_mm,  # Corrected x after camera-to-grasp offset
+                "y": corrected_y_mm,  # Corrected y after camera-to-grasp offset
+                "z": 0.0,             # Z always stored as 0 (object is on table/work surface)
             }
             
             # Calculate grasp orientation from collected frames
@@ -219,7 +239,6 @@ class ScanWorker(threading.Thread):
             
             # Apply yaw transformation: positive yaw - 90°, negative yaw + 90°
             # Then convert to radians for storage
-            import math
             yaw_deg = orientation_data.get("grasp_yaw", 0.0)
             
             if yaw_deg > 0:
