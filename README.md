@@ -73,36 +73,36 @@
 <table align="center">
   <tr>
     <td align="center">
-      <img src="docs/images/C1Gearbox.jpg" width="250" height="250"
+      <img src="docs/images/whole_system.f.jpg" width="250" height="250"
            style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Arm Assembly">
-      <div style="font-size:12px;color:#999;margin-top:6px;">2-Stage Planetary GearBox</div>
+      <div style="font-size:12px;color:#999;margin-top:6px;">Vizzy System</div>
     </td>
     <td align="center">
-      <img src="docs/images/gripper.jpg" width="250" height="250"
+      <img src="docs/images/camera_distance_f.jpg" width="250" height="250"
            style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Joint Close-Up">
-      <div style="font-size:12px;color:#999;margin-top:6px;">End Effector</div>
+      <div style="font-size:12px;color:#999;margin-top:6px;">Camera and ToF Sensor</div>
     </td>
     <td align="center">
-      <img src="docs/CAD/screenshots/UpperArm.jpg" width="250" height="250"
+      <img src="docs/images/topview_f.jpg" width="250" height="250"
            style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Moteus Controllers">
-      <div style="font-size:12px;color:#999;margin-top:6px;">Upper Arm Linkage</div>
+      <div style="font-size:12px;color:#999;margin-top:6px;">Upper Assembly</div>
     </td>
   </tr>
   <tr>
     <td align="center">
-      <img src="docs/images/ArmOnDesk.jpg" width="250" height="250"
+      <img src="docs/images/fan_side_f.jpg" width="250" height="250"
            style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Electronics Hub">
-      <div style="font-size:12px;color:#999;margin-top:6px;">System with Power Box</div>
+      <div style="font-size:12px;color:#999;margin-top:6px;">Cooling System</div>
     </td>
     <td align="center">
-      <img src="docs/images/GripperHolding.jpg" width="250" height="250"
+      <img src="docs/images/gripper_f.jpg" width="250" height="250"
            style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Camera Mount">
-      <div style="font-size:12px;color:#999;margin-top:6px;">Printed End Effector</div>
+      <div style="font-size:12px;color:#999;margin-top:6px;">End Effector</div>
     </td>
     <td align="center">
-      <img src="docs/images/ArmExtended.jpeg" width="250" height="250"
+      <img src="docs/images/power_box_f.jpg" width="250" height="250"
            style="object-fit:cover;border:3px solid white;border-radius:6px;" alt="Power System">
-      <div style="font-size:12px;color:#999;margin-top:6px;">Arm Extended with Aluminum</div>
+      <div style="font-size:12px;color:#999;margin-top:6px;">"Black Box" Power</div>
     </td>
   </tr>
 </table>
