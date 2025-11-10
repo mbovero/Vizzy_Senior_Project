@@ -46,7 +46,7 @@ CENTER_EPSILON_PX  = 25       # Pixel error tolerance for success
 CENTER_MOVE_NORM   = 0.035    # Normalized motion stability
 CENTER_FRAMES      = 12       # Number of good frames (not necessarily consecutive)
 CENTER_MIN_MOVEMENT_MM = 3.0  # Minimum movement threshold: if movement < 5mm, consider centered
-CENTER_MEASURE_WAIT_TIME_S = 2.0  # Time to wait after movement command before measuring (arm must be stopped)
+CENTER_MEASURE_WAIT_TIME_S = 1.0  # Time to wait after movement command before measuring (arm must be stopped)
 
 # Retry / safety
 MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a single pose

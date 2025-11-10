@@ -84,12 +84,11 @@ def expand_high_level_commands(plan: List[Dict], memory: ObjectMemory) -> List[D
     
     PICK(target) expands to:
       1. RELEASE
-      2. MOVE_TO(target + vertical_offset, pitch=0)  # Approach from above while keeping claw out straight
-      3. ROT_YAW(grasp_angle)  # from object's orientation in memory
-      4. MOVE_TO(target, pitch=-π/2)  # Descend to object
-      5. GRAB
-      6. MOVE_TO(REST_POSITION, pitch=REST_PITCH_ANGLE)
-      7. ROT_YAW(REST_YAW_ANGLE)
+      2. MOVE_TO(target + vertical_offset, pitch=0, yaw=center_yaw, claw=O)  # Approach from above with claw straight
+      3. MOVE_TO(pitch=-π/2, yaw=grasp_angle)  # Change pitch and yaw, keep position and claw
+      4. MOVE_TO(target)  # Move to target, keep pitch/yaw/claw from step 3
+      5. GRAB  # Close claw, keep position and orientation
+      6. MOVE_TO(REST_POSITION, pitch=REST_PITCH_ANGLE, yaw=REST_YAW_ANGLE)  # Move to rest, claw still closed
     
     PLACE(destination, offset?, yaw_rot?) expands to:
       1. ROT_YAW(yaw_rot)  # Optional rotation before placing
@@ -118,26 +117,23 @@ def expand_high_level_commands(plan: List[Dict], memory: ObjectMemory) -> List[D
             
             obj_z = obj_xyz[2]  # Object's actual z coordinate
             
-            # Expand to primitive sequence:
-            # 1. RELEASE (ensure claw is open)
-            # 2. MOVE_TO above object with approach offset, pitch=0 (claw out straight)
-            # 3. ROT_YAW to optimal grasp orientation
-            # 4. MOVE_TO to object (descend with pitch=-π/2)
-            # 5. GRAB (close claw)
-            # 6. MOVE_TO rest position with rest pitch
-            # 7. ROT_YAW to rest yaw angle
+            # Expand to primitive sequence using enhanced MOVE_TO with partial parameters:
+            # 1. MOVE_TO(target + vertical_offset, pitch=0, yaw=center_yaw, claw=O)
+            # 2. MOVE_TO(pitch=-π/2, yaw=grasp_angle)  # Use other prev parameters (x, y, z, claw from step 1)
+            # 3. MOVE_TO(target)  # Use other prev parameters (pitch, yaw, claw from step 2)
+            # 4. GRAB  # Use other prev parameters (all from step 3)
+            # 5. MOVE_TO(REST_POS, REST_PITCH, REST_YAW)  # Still closed
             vertical_offset = [0, 0, C.APPROACH_OFFSET_Z]
             expanded.extend([
-                {"command": "RELEASE"},
-                {"command": "MOVE_TO", "destination": target, "offset": vertical_offset, "pitch": 0.0},  # Approach from above with claw straight
-                {"command": "ROT_YAW", "angle": grasp_angle},  # Rotate to grasp orientation
-                {"command": "MOVE_TO", "destination": target, "pitch": -90.0},  # Descend to object (pitch = -π/2)
-                {"command": "GRAB"},
-                {"command": "MOVE_TO", "destination": C.REST_POSITION, "pitch": C.REST_PITCH_ANGLE},
-                {"command": "ROT_YAW", "angle": C.REST_YAW_ANGLE},
+                {"command": "RELEASE"},  # Ensure claw is open initially
+                {"command": "MOVE_TO", "destination": target, "offset": vertical_offset, "pitch": 0.0, "yaw": 0.0, "claw": "O"},  # Approach from above with claw straight (center yaw = 0°)
+                {"command": "MOVE_TO", "pitch": -90.0, "yaw": grasp_angle},  # Change pitch and yaw, keep position and claw from step 1
+                {"command": "MOVE_TO", "destination": target},  # Move to target, keep pitch/yaw/claw from step 2
+                {"command": "GRAB"},  # Close claw, keep position and orientation from step 3
+                {"command": "MOVE_TO", "destination": C.REST_POSITION, "pitch": C.REST_PITCH_ANGLE, "yaw": C.REST_YAW_ANGLE},  # Move to rest, claw still closed from step 4
             ])
-            print(f"[Tasks]   Expanded to 7 primitives")
-            print(f"[Tasks]   Sequence: RELEASE -> MOVE_TO(above, z={obj_z + C.APPROACH_OFFSET_Z:.1f}mm, pitch=0°) -> ROT_YAW({grasp_angle:.1f}°) -> MOVE_TO(pick, z={obj_z:.1f}mm, pitch=-90°) -> GRAB -> REST")
+            print(f"[Tasks]   Expanded to 6 primitives")
+            print(f"[Tasks]   Sequence: RELEASE -> MOVE_TO(above, z={obj_z + C.APPROACH_OFFSET_Z:.1f}mm, pitch=0°, yaw=0°) -> MOVE_TO(pitch=-90°, yaw={grasp_angle:.1f}°) -> MOVE_TO(target, z={obj_z:.1f}mm) -> GRAB -> MOVE_TO(rest)")
         
         elif command == "PLACE":
             print(f"[Tasks] Expanding PLACE command {i}...")
@@ -229,22 +225,54 @@ def resolve_object_ids_and_offsets(plan: List[Dict], memory: ObjectMemory) -> Li
         new_task = {"command": command}
         
         if command == "MOVE_TO":
-            # Resolve destination and apply offset
-            destination = task.get("destination")
-            offset = task.get("offset", [0, 0, 0])
-            pitch = task.get("pitch", C.REST_PITCH_ANGLE)  # Use specified pitch or default
+            # Enhanced MOVE_TO: Can specify any subset of x, y, z, pitch, yaw, claw
+            # OR use destination/offset (backwards compatible)
+            # Unspecified parameters will be filled from last known values in convert_to_ik_format
             
-            xyz = _resolve_to_xyz(destination, memory)
-            if xyz:
-                # Apply offset
-                new_task["x"] = xyz[0] + offset[0]
-                new_task["y"] = xyz[1] + offset[1]
-                new_task["z"] = xyz[2] + offset[2]
-                new_task["pitch"] = pitch
-                print(f"[Tasks] MOVE_TO resolved: xyz=[{new_task['x']:.1f}, {new_task['y']:.1f}, {new_task['z']:.1f}] mm pitch={new_task['pitch']:.1f}°")
-            else:
-                print(f"[Tasks] Warning: Could not resolve MOVE_TO destination: {destination}")
-                continue  # Skip this command
+            # Check if x, y, z are specified directly
+            if "x" in task or "y" in task or "z" in task:
+                # Direct coordinate specification
+                new_task["x"] = task.get("x")
+                new_task["y"] = task.get("y")
+                new_task["z"] = task.get("z")
+            elif "destination" in task:
+                # Resolve destination and apply offset
+                destination = task.get("destination")
+                offset = task.get("offset", [0, 0, 0])
+                xyz = _resolve_to_xyz(destination, memory)
+                if xyz:
+                    # Apply offset
+                    new_task["x"] = xyz[0] + offset[0]
+                    new_task["y"] = xyz[1] + offset[1]
+                    new_task["z"] = xyz[2] + offset[2]
+                else:
+                    print(f"[Tasks] Warning: Could not resolve MOVE_TO destination: {destination}")
+                    continue  # Skip this command
+            # If neither x/y/z nor destination specified, leave them as None (will use last known)
+            
+            # Optional parameters: pitch, yaw, claw
+            if "pitch" in task:
+                new_task["pitch"] = task.get("pitch")
+            if "yaw" in task:
+                new_task["yaw"] = task.get("yaw")
+            if "claw" in task:
+                new_task["claw"] = task.get("claw")
+            
+            # Build description for logging
+            params = []
+            if "x" in new_task and new_task["x"] is not None:
+                params.append(f"x={new_task['x']:.1f}")
+            if "y" in new_task and new_task["y"] is not None:
+                params.append(f"y={new_task['y']:.1f}")
+            if "z" in new_task and new_task["z"] is not None:
+                params.append(f"z={new_task['z']:.1f}")
+            if "pitch" in new_task:
+                params.append(f"pitch={new_task['pitch']:.1f}°")
+            if "yaw" in new_task:
+                params.append(f"yaw={new_task['yaw']:.1f}°")
+            if "claw" in new_task:
+                params.append(f"claw={new_task['claw']}")
+            print(f"[Tasks] MOVE_TO resolved: {', '.join(params) if params else 'partial (using last known values)'}")
         
         elif command in ("ROT_YAW", "ROT_PITCH"):
             # Copy angle parameter
@@ -334,6 +362,10 @@ def convert_to_ik_format(plan: List[Dict]) -> List[Dict]:
     ik_commands = []
     
     # State tracking (defaults from REST position)
+    # Track all 6 IK parameters from last command for partial MOVE_TO support
+    last_x_m = C.REST_POSITION[0] / 1000.0  # meters
+    last_y_m = C.REST_POSITION[1] / 1000.0  # meters
+    last_z_m = C.REST_POSITION[2] / 1000.0  # meters
     current_pitch_deg = C.REST_PITCH_ANGLE  # degrees
     current_yaw_deg = C.REST_YAW_ANGLE  # degrees
     current_claw = "O"  # Open by default
@@ -344,25 +376,33 @@ def convert_to_ik_format(plan: List[Dict]) -> List[Dict]:
         command = task.get("command", "").upper()
         
         if command == "MOVE_TO":
-            # Get coordinates (in mm) and convert to meters
-            x_mm = task.get("x", 0.0)
-            y_mm = task.get("y", 0.0)
-            z_mm = task.get("z", 0.0)
+            # Enhanced MOVE_TO: Use specified parameters or fall back to last known values
+            # Get coordinates: use specified or last known
+            if task.get("x") is not None:
+                last_x_m = float(task.get("x")) / 1000.0
+            if task.get("y") is not None:
+                last_y_m = float(task.get("y")) / 1000.0
+            if task.get("z") is not None:
+                last_z_m = float(task.get("z")) / 1000.0
             
-            x_m = x_mm / 1000.0
-            y_m = y_mm / 1000.0
-            z_m = z_mm / 1000.0
+            # Get pitch: use specified or last known
+            if task.get("pitch") is not None:
+                current_pitch_deg = float(task.get("pitch"))
             
-            # Get pitch: use specified or current (MOVE_TO doesn't specify yaw directly)
-            pitch_deg = task.get("pitch")
-            if pitch_deg is not None:
-                current_pitch_deg = float(pitch_deg)
+            # Get yaw: use specified or last known (now MOVE_TO can specify yaw directly)
+            if task.get("yaw") is not None:
+                current_yaw_deg = float(task.get("yaw"))
             
-            # Yaw: use current state (MOVE_TO doesn't specify yaw directly)
-            # Yaw changes come from ROT_YAW commands that create their own IK commands
-            
-            # Use current claw state (don't combine with next GRAB/RELEASE to allow separate commands)
-            claw_state = current_claw
+            # Get claw: use specified or last known
+            if task.get("claw") is not None:
+                claw_state = task.get("claw").upper()
+                if claw_state not in ("O", "C"):
+                    print(f"[Tasks] Warning: Invalid claw state '{claw_state}', using '{current_claw}'")
+                    claw_state = current_claw
+                else:
+                    current_claw = claw_state
+            else:
+                claw_state = current_claw
             
             # Convert to radians
             pitch_rad = math.radians(current_pitch_deg)
@@ -371,57 +411,73 @@ def convert_to_ik_format(plan: List[Dict]) -> List[Dict]:
             # Create IK command
             ik_commands.append({
                 "type": "ik",
-                "x": x_m,
-                "y": y_m,
-                "z": z_m,
+                "x": last_x_m,
+                "y": last_y_m,
+                "z": last_z_m,
                 "pitch_rad": pitch_rad,
                 "yaw_rad": yaw_rad,
                 "claw": claw_state,
             })
-            print(f"[Tasks] IK command: x={x_m:.3f}m y={y_m:.3f}m z={z_m:.3f}m pitch={current_pitch_deg:.1f}° ({pitch_rad:.3f}rad) yaw={current_yaw_deg:.1f}° ({yaw_rad:.3f}rad) claw={claw_state}")
+            print(f"[Tasks] IK command: x={last_x_m:.3f}m y={last_y_m:.3f}m z={last_z_m:.3f}m pitch={current_pitch_deg:.1f}° ({pitch_rad:.3f}rad) yaw={current_yaw_deg:.1f}° ({yaw_rad:.3f}rad) claw={claw_state}")
         
         elif command == "GRAB":
-            # Create a new IK command at the same position as the last MOVE_TO, but with claw closed
+            # Create a new IK command at the same position as the last command, but with claw closed
+            # Update state tracking
+            current_claw = "C"
+            
             if len(ik_commands) > 0:
                 # Get the last IK command's position and pose
                 last_cmd = ik_commands[-1]
+                # Update last known values
+                last_x_m = last_cmd["x"]
+                last_y_m = last_cmd["y"]
+                last_z_m = last_cmd["z"]
+                current_pitch_deg = math.degrees(last_cmd["pitch_rad"])
+                current_yaw_deg = math.degrees(last_cmd["yaw_rad"])
+                
                 # Create a new command with the same position/pose but claw closed
                 ik_commands.append({
                     "type": "ik",
-                    "x": last_cmd["x"],
-                    "y": last_cmd["y"],
-                    "z": last_cmd["z"],
+                    "x": last_x_m,
+                    "y": last_y_m,
+                    "z": last_z_m,
                     "pitch_rad": last_cmd["pitch_rad"],
                     "yaw_rad": last_cmd["yaw_rad"],
                     "claw": "C",
                 })
-                current_claw = "C"
                 print(f"[Tasks] GRAB: created new IK command at same position with claw closed")
             else:
-                # No previous MOVE_TO, update state for next MOVE_TO
-                current_claw = "C"
+                # No previous command, update state for next MOVE_TO
                 print(f"[Tasks] GRAB: claw set to {current_claw} (will apply to next MOVE_TO)")
         
         elif command == "RELEASE":
-            # Create a new IK command at the same position as the last MOVE_TO, but with claw open
+            # Create a new IK command at the same position as the last command, but with claw open
+            # Update state tracking
+            current_claw = "O"
+            
             if len(ik_commands) > 0:
                 # Get the last IK command's position and pose
                 last_cmd = ik_commands[-1]
+                # Update last known values
+                last_x_m = last_cmd["x"]
+                last_y_m = last_cmd["y"]
+                last_z_m = last_cmd["z"]
+                current_pitch_deg = math.degrees(last_cmd["pitch_rad"])
+                current_yaw_deg = math.degrees(last_cmd["yaw_rad"])
+                
                 # Create a new command with the same position/pose but claw open
                 ik_commands.append({
                     "type": "ik",
-                    "x": last_cmd["x"],
-                    "y": last_cmd["y"],
-                    "z": last_cmd["z"],
+                    "x": last_x_m,
+                    "y": last_y_m,
+                    "z": last_z_m,
                     "pitch_rad": last_cmd["pitch_rad"],
                     "yaw_rad": last_cmd["yaw_rad"],
                     "claw": "O",
                 })
-                current_claw = "O"
                 print(f"[Tasks] RELEASE: created new IK command at same position with claw open")
             else:
-                # No previous MOVE_TO, update state for next MOVE_TO
-                current_claw = "O"
+                # No previous command, update state for next MOVE_TO
                 print(f"[Tasks] RELEASE: claw set to {current_claw} (will apply to next MOVE_TO)")
         
         elif command == "ROT_YAW":
@@ -432,12 +488,18 @@ def convert_to_ik_format(plan: List[Dict]) -> List[Dict]:
             if len(ik_commands) > 0:
                 # Get the last IK command's position and pose
                 last_cmd = ik_commands[-1]
+                # Update last known values
+                last_x_m = last_cmd["x"]
+                last_y_m = last_cmd["y"]
+                last_z_m = last_cmd["z"]
+                current_pitch_deg = math.degrees(last_cmd["pitch_rad"])
+                
                 # Create a new command with the same position/pose but new yaw
                 ik_commands.append({
                     "type": "ik",
-                    "x": last_cmd["x"],
-                    "y": last_cmd["y"],
-                    "z": last_cmd["z"],
+                    "x": last_x_m,
+                    "y": last_y_m,
+                    "z": last_z_m,
                     "pitch_rad": last_cmd["pitch_rad"],  # Keep previous pitch
                     "yaw_rad": math.radians(current_yaw_deg),  # New yaw
                     "claw": last_cmd["claw"],  # Keep previous claw state
@@ -455,12 +517,18 @@ def convert_to_ik_format(plan: List[Dict]) -> List[Dict]:
             if len(ik_commands) > 0:
                 # Get the last IK command's position and pose
                 last_cmd = ik_commands[-1]
+                # Update last known values
+                last_x_m = last_cmd["x"]
+                last_y_m = last_cmd["y"]
+                last_z_m = last_cmd["z"]
+                current_yaw_deg = math.degrees(last_cmd["yaw_rad"])
+                
                 # Create a new command with the same position/pose but new pitch
                 ik_commands.append({
                     "type": "ik",
-                    "x": last_cmd["x"],
-                    "y": last_cmd["y"],
-                    "z": last_cmd["z"],
+                    "x": last_x_m,
+                    "y": last_y_m,
+                    "z": last_z_m,
                     "pitch_rad": math.radians(current_pitch_deg),  # New pitch
                     "yaw_rad": last_cmd["yaw_rad"],  # Keep previous yaw
                     "claw": last_cmd["claw"],  # Keep previous claw state
