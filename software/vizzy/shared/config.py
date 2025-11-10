@@ -27,7 +27,7 @@ OBJ_BLACKLIST = [
 ]
 
 # Duration knobs (ms) - reduced for faster iteration
-SCAN_DURATION_MS   = 50   # Per-pose scan window (reduced from 1750)
+SCAN_DURATION_MS   = 500   # Per-pose scan window (reduced from 1750)
 CENTER_DURATION_MS = 10000  # Max time to attempt centering (10 seconds)
 
 # Centering movement calculation (matching object_centering.py)
@@ -38,15 +38,16 @@ MOVEMENT_SCALE_FACTOR = 1.2  # Scale factor for movement calculation
 # Explicit scan gates (selection before attempting to center)
 # (Use these to filter scan results; centering thresholds remain separate.)
 SCAN_MIN_CONF   = 0.80  # confidence threshold for object detection
-SCAN_MIN_FRAMES = 2  # Reduced from 4 for faster detection
+SCAN_MIN_FRAMES = 2  
 
 # Centering verification thresholds (used during closed-loop centering)
-CENTER_CONF        = 0.30     # Per-frame minimum confidence
+CENTER_CONF        = 0.40     # Per-frame minimum confidence
 CENTER_EPSILON_PX  = 25       # Pixel error tolerance for success
 CENTER_MOVE_NORM   = 0.035    # Normalized motion stability
 CENTER_FRAMES      = 12       # Number of good frames (not necessarily consecutive)
 CENTER_MIN_MOVEMENT_MM = 3.0  # Minimum movement threshold: if movement < 5mm, consider centered
 CENTER_MEASURE_WAIT_TIME_S = 1.0  # Time to wait after movement command before measuring (arm must be stopped)
+CENTER_TIMEOUT_S = 3.0  # Maximum time per movement cycle before canceling (seconds). Timer resets after each movement toward object.
 
 # Retry / safety
 MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a single pose
@@ -55,7 +56,7 @@ MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a sing
 MEM_FILE = str(LAPTOP_DIR / "object_memory.json")
 
 # Valid objects to center on during search (fork, cup, and knife)
-SEARCH_VALID_CLASS_NAMES = ["fork", "cup", "knife", "spoon"]  # Only center on these objects
+SEARCH_VALID_CLASS_NAMES = ["fork", "spoon", "cup", "knife"]  # Only center on these objects
 
 # -----------------------------
 # Networking

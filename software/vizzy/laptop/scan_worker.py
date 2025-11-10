@@ -323,12 +323,11 @@ class ScanWorker(threading.Thread):
             self._flush_capture()
             print(f"[ScanWorker] Returned to baseline pose - ready to resume scan")
         else:
-            # Centering was aborted or camera failed - should not happen in normal operation
-            # since centering now continues until success
+            # Centering was aborted, timed out, or camera failed
             if self.events.scan_abort.is_set():
                 print(f"[ScanWorker] Centering ABORTED - scan cycle cancelled")
             else:
-                print(f"[ScanWorker] Centering EXITED unexpectedly (camera failure?)")
+                print(f"[ScanWorker] Centering FAILED (timeout, camera failure, or other error)")
             print(f"[ScanWorker] Object NOT registered")
             
             # Still return to baseline pose even if centering was aborted
