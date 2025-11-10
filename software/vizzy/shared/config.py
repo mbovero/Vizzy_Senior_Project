@@ -94,22 +94,42 @@ SEARCH_PITCH_DEG = 5
 
 # Explicit search path points (x_mm, y_mm) - all valid poses the arm can move to
 SEARCH_PATH_POINTS = [
-    # Start points
+    
+    # Pass 1: negative diagonal (x+25, y+25)
+    (175.0, -125.0),
+    (225.0, -175.0),
+    (275.0, -225.0),
+    (325.0, -275.0),
+    (375.0, -325.0),
 
-    # Middle points
-    (170,-170),  # Pose 3
-    (270.0, -270.0),  # Pose 4
-    (350.0, -350.0),  # Pose 5
-    
-    
-    (450.0, 0.0),     # Pose 8
-    (350.0, 0.0),     # Pose 7
-    (250.0, 0.0),     # Pose 6
-    
-    
-    (170, 170),   # Pose 9
-    (270.0, 270.0),   # Pose 10
-    (350.0, 350.0),   # Pose 11
+    # Pass 1.5: between Pass 1 and Pass 2, reversed (x+25, y+25)
+    (400.0, -150.0),
+    (350.0, -125.0),
+    (300.0, -100.0),
+    (250.0, -75.0),
+    (200.0, -50.0),
+
+    # Pass 2: middle row (x +25, y unchanged)
+    (225.0, 0.0),
+    (275.0, 0.0),
+    (325.0, 0.0),
+    (375.0, 0.0),
+    (425.0, 0.0),
+
+    # Pass 2.5: between Pass 2 and Pass 3, reversed (x+25, y+25)
+    (400.0, 200.0),
+    (350.0, 175.0),
+    (300.0, 150.0),
+    (250.0, 125.0),
+    (200.0, 100.0),
+
+    # Pass 3: positive diagonal (x+25, y+25)
+    (175.0, 175.0),
+    (225.0, 225.0),
+    (275.0, 275.0),
+    (325.0, 325.0),
+    (375.0, 375.0),
+
     
     
     (250.0, 0.0),  
@@ -121,9 +141,9 @@ SEARCH_PATH_POINTS = [
 SCAN_NUDGE_STEP_MM = 5.0
 
 # Target settle/dwell times (reduced for faster iteration)
-MOVE_SETTLE_S = 0.15          # allow time after a commanded move before accepting nudges (reduced from 0.30)
+MOVE_SETTLE_S = .05          # allow time after a commanded move before accepting nudges (reduced from 0.30)
 RETURN_TO_POSE_DWELL_S = 0.10 # dwell after returning to baseline before next scan window (reduced from 0.25)
-POSE_CV_DELAY_S = 0.3         # extra delay at each pose to give CV model time to identify objects
+POSE_CV_DELAY_S = 0         # extra delay at each pose to give CV model time to identify objects
 
 # Physical servo PWM bounds for the new arm (documentation for IK output clamping)
 SERVO_PITCH_CENTER_US = 1500
