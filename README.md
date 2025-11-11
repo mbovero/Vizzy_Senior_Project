@@ -158,7 +158,7 @@
     <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
       <strong>Miles Bovero</strong><br>
       <em style="color:#57606a;">Computer Engineering</em><br>
-      Designed subsystem interfaces, YOLO-based vision pipeline, object centering / location / orientation algorithms.
+      Designed subsystem interfaces, YOLO-based vision pipeline, object centering / location / orientation estimation algorithms.
     </td>
     <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
       <strong>Lawrence Ponce</strong><br>
