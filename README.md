@@ -38,7 +38,7 @@
 </div>
 
 <p align="center" style="font-size:14px; color:#666;">
-  <em>Figure 1.1 — Left: Arm motion demonstration · Right: Vision-based object detection in action.</em>
+  <em>Figure 1 — Left: Arm motion demonstration · Right: Vision-based object detection in action.</em>
 </p>
 
 
