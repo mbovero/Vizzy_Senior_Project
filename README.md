@@ -25,6 +25,22 @@
 
 
 ## System Showcase
+<!-- Two side-by-side GIFs -->
+<div align="center" style="display:flex; justify-content:center; gap:20px; margin-top:20px; margin-bottom:16px;">
+  <img src="docs/gifs/vizzy_grab.gif" 
+       alt="Vizzy motion demo" 
+       width="48%" 
+       style="border:3px solid white; border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.15);">
+  <img src="docs/gifs/vizzy_centering.gif" 
+       alt="Vizzy vision detection demo" 
+       width="48%" 
+       style="border:3px solid white; border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.15);">
+</div>
+
+<p align="center" style="font-size:14px; color:#666;">
+  <em>Figure 1.1 — Left: Arm motion demonstration · Right: Vision-based object detection in action.</em>
+</p>
+
 
 ## Overview
 
