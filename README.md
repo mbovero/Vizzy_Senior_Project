@@ -155,7 +155,7 @@
   <tr align="center" valign="top">
     <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
       <strong>Brian Stites</strong><br>
-      <em style="color:#57606a;">Electrical Engineering</em><br>
+      <em style="color:#57606a;">Computer Engineering</em><br>
       Designed and assembled the power distribution and safety systems for the robotic arm.
     </td>
     <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
