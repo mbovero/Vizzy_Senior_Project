@@ -144,6 +144,8 @@ def center_on_class(
     # Initialize last_move_time to a time in the past so first measurement can happen immediately
     last_move_time = time.time() - (C.CENTER_MEASURE_WAIT_TIME_S + 1.0)  # Start with arm already "settled"
     arm_is_moving = False  # Track if arm is currently moving
+    # Track when current movement cycle started - timeout resets after each movement
+    last_movement_cycle_start = time.time()  # Start of current movement cycle (resets after each move)
     
     # Track current position for absolute moves (relative to baseline pose, not origin)
     # Start from the baseline pose passed in - this is where the arm currently is
@@ -155,16 +157,25 @@ def center_on_class(
     print(f"[Centering] Starting centering at baseline position: x={x_mm:.2f}mm, y={y_mm:.2f}mm, z={z_mm:.2f}mm")
     print(f"[Centering] Measurements will only occur when arm is stopped")
     print(f"[Centering] Wait time after movement command: {C.CENTER_MEASURE_WAIT_TIME_S}s before next measurement")
-    print(f"[Centering] Will continue until item is successfully centered (no timeout)")
+    print(f"[Centering] Timeout: {C.CENTER_TIMEOUT_S}s per movement cycle - resets after each movement toward object")
 
-    # Loop until success achieved (no timeout - will continue until item is centered)
-    # Only exit on: success, abort event, or camera failure
+    # Loop until success achieved or timeout
+    # Exit on: success, timeout, abort event, or camera failure
     while not success:
         # Check for abort signal
         if abort_event is not None and abort_event.is_set():
             print(f"[Centering] Abort signal received - exiting centering mode")
             break
+        
         current_time = time.time()
+        
+        # Check for timeout - based on time since last movement cycle start (resets after each move)
+        time_since_last_cycle = current_time - last_movement_cycle_start
+        if time_since_last_cycle >= C.CENTER_TIMEOUT_S:
+            print(f"[Centering] Timeout exceeded ({time_since_last_cycle:.2f}s >= {C.CENTER_TIMEOUT_S}s) since last movement cycle - canceling centering")
+            print(f"[Centering] Returning to scan pose")
+            success = False
+            break
         
         # Check if arm has settled after last movement
         # Only measure movement when 2 seconds have passed since the movement command
@@ -334,7 +345,10 @@ def center_on_class(
                         # The ACK means the server received the command, but arm is still physically moving
                         arm_is_moving = True
                         last_move_time = time.time()
+                        # Reset timeout timer - new movement cycle starts now
+                        last_movement_cycle_start = time.time()
                         print(f"[Centering] Arm movement started - will wait {C.CENTER_MEASURE_WAIT_TIME_S}s before next measurement")
+                        print(f"[Centering] Timeout timer reset - {C.CENTER_TIMEOUT_S}s per movement cycle")
                     else:
                         print(f"[Centering] Warning: Move command failed or timed out, keeping old position ({x_mm:.2f}, {y_mm:.2f})mm")
                         # If command failed, don't mark as moving
@@ -439,13 +453,19 @@ def center_on_class(
     clear_class_filter(model)
     
     # Return final position after centering (so caller can return to baseline if needed)
+    elapsed_total = time.time() - t0
+    time_since_last_cycle_final = time.time() - last_movement_cycle_start
     if success:
         print(f"[Centering] Centering SUCCESS - item was in frame and centered")
         print(f"[Centering] Final centered position: x={x_mm:.2f}mm, y={y_mm:.2f}mm")
         print(f"[Centering] Object location will be registered at this position")
+        print(f"[Centering] Total centering time: {elapsed_total:.2f}s")
     else:
         if abort_event is not None and abort_event.is_set():
             print(f"[Centering] Centering ABORTED by user/system")
+        elif time_since_last_cycle_final >= C.CENTER_TIMEOUT_S:
+            print(f"[Centering] Centering TIMED OUT - no movement within {time_since_last_cycle_final:.2f}s (limit: {C.CENTER_TIMEOUT_S}s per cycle)")
+            print(f"[Centering] Returning to scan pose without registering object")
         else:
             print(f"[Centering] Centering EXITED - camera failure or other error")
         print(f"[Centering] Final position: x={x_mm:.2f}mm, y={y_mm:.2f}mm")

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from typing import Dict, Optional, Any, Callable
@@ -174,6 +175,7 @@ class ScanWorker(threading.Thread):
         
         # Set centering flag
         self._centering_active = True
+        print(f"[ScanWorker] DEBUG: _centering_active set to True")
         
         # Centering loop - continues until movement < 5mm and object is centered
         # Will NOT exit until item is successfully centered (no timeout)
@@ -198,18 +200,38 @@ class ScanWorker(threading.Thread):
         
         # Clear centering flag
         self._centering_active = False
+        print(f"[ScanWorker] DEBUG: _centering_active set to False")
         
         # Only register object if centering was successful (movement < 5mm and object centered)
         if center_success:
             print(f"[ScanWorker] Centering SUCCESS - movement < {C.CENTER_MIN_MOVEMENT_MM}mm")
             print(f"[ScanWorker] Final centered position: x={final_x_mm:.2f}mm, y={final_y_mm:.2f}mm, z=0.0mm (stored as 0)")
             
-            # Use the final centered position for object location
+            # Apply camera-to-grasp offset transformation
+            # Calculate angle from positive x-axis: theta_B = arctan2(y, x)
+            theta_B = math.atan2(final_y_mm, final_x_mm)
+            
+            # Calculate radius from base to object center
+            r = math.sqrt(final_x_mm**2 + final_y_mm**2)
+            
+            # Apply offset: subtract camera-to-grasp distance
+            r_offset = r - C.CAMERA_TO_GRASP_OFFSET_MM
+            
+            # Calculate corrected object center coordinates
+            corrected_x_mm = r_offset * math.cos(theta_B)
+            corrected_y_mm = r_offset * math.sin(theta_B)
+            
+            print(f"[ScanWorker] Camera-to-grasp offset applied:")
+            print(f"[ScanWorker]   Original: r={r:.2f}mm, theta={math.degrees(theta_B):.2f}°")
+            print(f"[ScanWorker]   Offset: {C.CAMERA_TO_GRASP_OFFSET_MM}mm")
+            print(f"[ScanWorker]   Corrected: x={corrected_x_mm:.2f}mm, y={corrected_y_mm:.2f}mm")
+            
+            # Use the corrected position for object location
             # Z coordinate is always stored as 0 (objects are on the table/work surface)
             loc = {
-                "x": final_x_mm,  # Final x after centering
-                "y": final_y_mm,  # Final y after centering
-                "z": 0.0,         # Z always stored as 0 (object is on table/work surface)
+                "x": corrected_x_mm,  # Corrected x after camera-to-grasp offset
+                "y": corrected_y_mm,  # Corrected y after camera-to-grasp offset
+                "z": 0.0,             # Z always stored as 0 (object is on table/work surface)
             }
             
             # Calculate grasp orientation from collected frames
@@ -217,7 +239,6 @@ class ScanWorker(threading.Thread):
             
             # Apply yaw transformation: positive yaw - 90°, negative yaw + 90°
             # Then convert to radians for storage
-            import math
             yaw_deg = orientation_data.get("grasp_yaw", 0.0)
             
             if yaw_deg > 0:
@@ -261,28 +282,130 @@ class ScanWorker(threading.Thread):
             print(f"[ScanWorker] Object centered and registered successfully")
             
             # Return to baseline pose after successful centering and registration
+            # Continuously publish frames while returning to baseline
             print(f"[ScanWorker] Returning to baseline pose: x={x:.2f}mm, y={y:.2f}mm, z={z:.2f}mm")
+            # Mark arm as moving before returning to baseline
+            self._arm_moving.set()
             returned = self.motion.move_to_target(x, y, z, pitch)
             if not returned:
                 print("[ScanWorker] Warning: Baseline MOVE_TO did not confirm; continuing after dwell")
-            time.sleep(C.RETURN_TO_POSE_DWELL_S)
+            
+            # Wait for arm to settle after returning to baseline
+            # Use same settle time as when moving to a pose
+            settle_time = C.MOVE_SETTLE_S + getattr(C, 'POSE_CV_DELAY_S', 0.3)
+            print(f"[ScanWorker] Waiting {settle_time:.1f}s for arm to settle at baseline after centering...")
+            settle_start = time.time()
+            while (time.time() - settle_start) < settle_time:
+                grabbed = self.cap.grab()
+                if grabbed:
+                    ok, frame = self.cap.retrieve()
+                else:
+                    ok, frame = self.cap.read()
+                if ok and self.frame_sink:
+                    h, w = frame.shape[:2]
+                    from .hud import draw_wrapped_text
+                    elapsed = time.time() - settle_start
+                    status = f"Returning to baseline... {settle_time - elapsed:.1f}s"
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                    draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                    resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                    self.frame_sink(resized)
+                time.sleep(0.033)  # ~30 FPS while waiting
+            
+            # Mark arm as stopped after settling
+            self._arm_moving.clear()
+            print(f"[ScanWorker] Arm stopped at baseline after centering")
+            
+            # Wait for dwell time while continuously publishing frames
+            dwell_start = time.time()
+            while (time.time() - dwell_start) < C.RETURN_TO_POSE_DWELL_S:
+                grabbed = self.cap.grab()
+                if grabbed:
+                    ok, frame = self.cap.retrieve()
+                else:
+                    ok, frame = self.cap.read()
+                if ok and self.frame_sink:
+                    h, w = frame.shape[:2]
+                    from .hud import draw_wrapped_text
+                    elapsed = time.time() - dwell_start
+                    status = f"Baseline dwell... {C.RETURN_TO_POSE_DWELL_S - elapsed:.1f}s"
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                    draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                    resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                    self.frame_sink(resized)
+                time.sleep(0.033)  # ~30 FPS while waiting
+            
             self._flush_capture()
             print(f"[ScanWorker] Returned to baseline pose - ready to resume scan")
         else:
-            # Centering was aborted or camera failed - should not happen in normal operation
-            # since centering now continues until success
+            # Centering was aborted, timed out, or camera failed
             if self.events.scan_abort.is_set():
                 print(f"[ScanWorker] Centering ABORTED - scan cycle cancelled")
             else:
-                print(f"[ScanWorker] Centering EXITED unexpectedly (camera failure?)")
+                print(f"[ScanWorker] Centering FAILED (timeout, camera failure, or other error)")
             print(f"[ScanWorker] Object NOT registered")
             
             # Still return to baseline pose even if centering was aborted
+            # Continuously publish frames while returning to baseline
             print(f"[ScanWorker] Returning to baseline pose: x={x:.2f}mm, y={y:.2f}mm, z={z:.2f}mm")
+            # Mark arm as moving before returning to baseline
+            self._arm_moving.set()
             returned = self.motion.move_to_target(x, y, z, pitch)
             if not returned:
                 print("[ScanWorker] Warning: Baseline MOVE_TO did not confirm; continuing after dwell")
-            time.sleep(C.RETURN_TO_POSE_DWELL_S)
+            
+            # Wait for arm to settle after returning to baseline
+            settle_time = C.MOVE_SETTLE_S + getattr(C, 'POSE_CV_DELAY_S', 0.3)
+            print(f"[ScanWorker] Waiting {settle_time:.1f}s for arm to settle at baseline after centering abort...")
+            settle_start = time.time()
+            while (time.time() - settle_start) < settle_time:
+                grabbed = self.cap.grab()
+                if grabbed:
+                    ok, frame = self.cap.retrieve()
+                else:
+                    ok, frame = self.cap.read()
+                if ok and self.frame_sink:
+                    h, w = frame.shape[:2]
+                    from .hud import draw_wrapped_text
+                    elapsed = time.time() - settle_start
+                    status = f"Returning to baseline... {settle_time - elapsed:.1f}s"
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                    draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                    resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                    self.frame_sink(resized)
+                time.sleep(0.033)  # ~30 FPS while waiting
+            
+            # Mark arm as stopped after settling
+            self._arm_moving.clear()
+            print(f"[ScanWorker] Arm stopped at baseline after centering abort")
+            
+            # Wait for dwell time while continuously publishing frames
+            dwell_start = time.time()
+            while (time.time() - dwell_start) < C.RETURN_TO_POSE_DWELL_S:
+                grabbed = self.cap.grab()
+                if grabbed:
+                    ok, frame = self.cap.retrieve()
+                else:
+                    ok, frame = self.cap.read()
+                if ok and self.frame_sink:
+                    h, w = frame.shape[:2]
+                    from .hud import draw_wrapped_text
+                    elapsed = time.time() - dwell_start
+                    status = f"Baseline dwell... {C.RETURN_TO_POSE_DWELL_S - elapsed:.1f}s"
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                    draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                    resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                    self.frame_sink(resized)
+                time.sleep(0.033)  # ~30 FPS while waiting
+            
             self._flush_capture()
             print(f"[ScanWorker] Returned to baseline pose")
     
@@ -582,22 +705,82 @@ class ScanWorker(threading.Thread):
                 if not ok:
                     print("[ScanWorker] Warning: MOVE_TO baseline timed out or failed; continuing after settle")
 
-                # Wait for arm to settle (movement complete)
+                # Wait for arm to settle while continuously publishing frames to keep GUI live
                 settle_time = C.MOVE_SETTLE_S + getattr(C, 'POSE_CV_DELAY_S', 0.3)
                 print(f"[ScanWorker] Waiting {settle_time:.1f}s for arm to settle at pose {pid}...")
-                time.sleep(settle_time)
+                settle_start = time.time()
+                while (time.time() - settle_start) < settle_time:
+                    # Continuously read and publish frames to prevent GUI freezing
+                    grabbed = self.cap.grab()
+                    if grabbed:
+                        ok, frame = self.cap.retrieve()
+                    else:
+                        ok, frame = self.cap.read()
+                    if ok:
+                        # Publish frame with status (no YOLO during movement)
+                        h, w = frame.shape[:2]
+                        from .hud import draw_wrapped_text
+                        elapsed = time.time() - settle_start
+                        status = f"Moving to pose {pid}... waiting {settle_time - elapsed:.1f}s"
+                        overlay = frame.copy()
+                        cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                        draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                        resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                        if self.frame_sink:
+                            self.frame_sink(resized)
+                    time.sleep(0.033)  # ~30 FPS while waiting
                 
-                # Add 5 second delay after first command (pose 0)
+                # Add 5 second delay after first command (pose 0) - but keep publishing frames
                 if pid == 0:
                     print("[ScanWorker] First pose reached - waiting 5 seconds...")
-                    time.sleep(5.0)
+                    wait_start = time.time()
+                    while (time.time() - wait_start) < 5.0:
+                        # Continuously read and publish frames
+                        grabbed = self.cap.grab()
+                        if grabbed:
+                            ok, frame = self.cap.retrieve()
+                        else:
+                            ok, frame = self.cap.read()
+                        if ok:
+                            h, w = frame.shape[:2]
+                            from .hud import draw_wrapped_text
+                            elapsed = time.time() - wait_start
+                            status = f"First pose - waiting {5.0 - elapsed:.1f}s"
+                            overlay = frame.copy()
+                            cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                            cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                            draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                            resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                            if self.frame_sink:
+                                self.frame_sink(resized)
+                        time.sleep(0.033)  # ~30 FPS while waiting
                 
                 # Mark arm as stopped (ready for YOLO detection)
                 self._arm_moving.clear()
                 print(f"[ScanWorker] Arm stopped at pose {pid} - YOLO detection enabled")
                 
-                # Wait a bit more to ensure arm is fully settled before detection
-                time.sleep(0.2)
+                # Wait a bit more to ensure arm is fully settled before detection - but keep publishing frames
+                wait_start = time.time()
+                while (time.time() - wait_start) < 0.2:
+                    grabbed = self.cap.grab()
+                    if grabbed:
+                        ok, frame = self.cap.retrieve()
+                    else:
+                        ok, frame = self.cap.read()
+                    if ok:
+                        # Publish frame (no YOLO yet, just status)
+                        h, w = frame.shape[:2]
+                        from .hud import draw_wrapped_text
+                        status = f"Arm settling at pose {pid}..."
+                        overlay = frame.copy()
+                        cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                        draw_wrapped_text(frame, status, 8, 8, int(w * 0.8))
+                        resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                        if self.frame_sink:
+                            self.frame_sink(resized)
+                    time.sleep(0.033)  # ~30 FPS while waiting
                 
                 # CRITICAL: Check if object of interest is in frame BEFORE starting scan loop
                 # If detected, STOP scan cycle immediately - do NOT proceed with scanning or centering
@@ -616,8 +799,16 @@ class ScanWorker(threading.Thread):
                     detected_cls_name = None
                     detected_cls_id = None
                     detected_conf = 0.0
+                    existing_objects = []  # Initialize to avoid NameError
                     
+                    # Annotate frame with YOLO results and publish it so user can see what YOLO sees
+                    annotated_frame = check_frame.copy()
                     for r in check_results:
+                        try:
+                            annotated_frame = r.plot()  # YOLO-annotated frame
+                        except Exception:
+                            pass
+                        
                         if len(r.boxes) > 0:
                             for i in range(len(r.boxes)):
                                 cls_id = int(r.boxes.cls[i].item())
@@ -631,6 +822,21 @@ class ScanWorker(threading.Thread):
                             if object_detected:
                                 break
                     
+                    # Always publish the annotated frame so user can see YOLO detections
+                    h, w = annotated_frame.shape[:2]
+                    from .hud import draw_wrapped_text
+                    if object_detected:
+                        status = f"Object detected: {detected_cls_name} (conf: {detected_conf:.2f})"
+                    else:
+                        status = f"Scanning at pose {pid}..."
+                    overlay = annotated_frame.copy()
+                    cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.35, annotated_frame, 0.65, 0, annotated_frame)
+                    draw_wrapped_text(annotated_frame, status, 8, 8, int(w * 0.8))
+                    resized = cv2.resize(annotated_frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                    if self.frame_sink:
+                        self.frame_sink(resized)
+                    
                     if object_detected:
                         # Check if objects of this class have already been registered
                         existing_objects = self.memory.get_objects_by_class(detected_cls_id)
@@ -638,33 +844,40 @@ class ScanWorker(threading.Thread):
                             print(f"[ScanWorker] =========================================")
                             print(f"[ScanWorker] OBJECT DETECTED: {detected_cls_name} (conf={detected_conf:.2f})")
                             print(f"[ScanWorker] BUT: {len(existing_objects)} object(s) of class '{detected_cls_name}' already registered")
-                            print(f"[ScanWorker] SKIPPING centering to avoid re-registering same object type")
-                            print(f"[ScanWorker] Continuing scan cycle...")
+                            print(f"[ScanWorker] SKIPPING centering, but will still scan for other objects")
+                            print(f"[ScanWorker] Continuing to scan window...")
                             print(f"[ScanWorker] =========================================")
-                            # Skip centering and continue to next pose
-                            continue
-                        
-                        print(f"[ScanWorker] =========================================")
-                        print(f"[ScanWorker] OBJECT DETECTED: {detected_cls_name} (conf={detected_conf:.2f})")
-                        print(f"[ScanWorker] SCAN CYCLE PAUSED - Starting centering...")
-                        print(f"[ScanWorker] Current position: x={x:.1f}mm, y={y:.1f}mm, z={z:.1f}mm")
-                        print(f"[ScanWorker] =========================================")
-                        
-                        # CENTER on object - centering will continue until movement < 5mm
-                        # After centering succeeds and object is registered, scan will resume
-                        self._center_and_register_object(detected_cls_name, detected_cls_id, x, y, z, pitch)
-                        
-                        # Centering complete and object registered - resume scan cycle
-                        print(f"[ScanWorker] Object centered and registered - RESUMING scan cycle")
-                        print(f"[ScanWorker] Continuing to next pose in scan path...")
-                        # Continue with the scan cycle (next pose)
-                        continue  # Skip to next pose in the path
+                            # Object already registered - skip centering but STILL run scan window
+                            # to look for OTHER objects (e.g., cups, knives, spoons)
+                            # Fall through to scan loop below
+                        else:
+                            # Object detected and NOT registered - center on it immediately
+                            print(f"[ScanWorker] =========================================")
+                            print(f"[ScanWorker] OBJECT DETECTED: {detected_cls_name} (conf={detected_conf:.2f})")
+                            print(f"[ScanWorker] SCAN CYCLE PAUSED - Starting centering...")
+                            print(f"[ScanWorker] Current position: x={x:.1f}mm, y={y:.1f}mm, z={z:.1f}mm")
+                            print(f"[ScanWorker] =========================================")
+                            
+                            # CENTER on object - centering will continue until movement < 5mm
+                            # After centering succeeds and object is registered, scan will resume
+                            self._center_and_register_object(detected_cls_name, detected_cls_id, x, y, z, pitch)
+                            
+                            # Centering complete and object registered - continue scan cycle
+                            print(f"[ScanWorker] Object centered and registered - CONTINUING scan cycle to next pose")
+                            print(f"[ScanWorker] Skipping to next pose in scan path...")
+                            # Continue with the scan cycle (next pose)
+                            continue  # Skip to next pose in the path
                 
-                # Only proceed with scan loop if NO object detected
+                # Run scan loop to look for objects (even if one was detected but already registered)
+                # This ensures we scan for ALL object types (fork, cup, knife, spoon)
                 # Per-pose repeat: try to find and center multiple distinct classes
                 attempts = 0
                 fails_at_pose: Dict[int, int] = {}
-                print(f"[ScanWorker] No object detected - starting scan loop at pose {pid}...")
+                scan_window_count = 0  # Track number of scan windows run at this pose
+                if object_detected and len(existing_objects) > 0:
+                    print(f"[ScanWorker] Starting scan loop at pose {pid} to look for other objects...")
+                else:
+                    print(f"[ScanWorker] Starting scan loop at pose {pid}...")
 
                 # Ensure we start each scan loop with fresh frames from the baseline pose
                 self._flush_capture()
@@ -672,7 +885,18 @@ class ScanWorker(threading.Thread):
                 while not self.events.scan_abort.is_set():
                     if self._centering_active:
                         # Defensive: should never run when centering flag is set.
-                        time.sleep(0.01)
+                        # But still publish frames to keep GUI live
+                        print(f"[ScanWorker] DEBUG: Scan loop waiting - centering is active (pose {pid})")
+                        grabbed = self.cap.grab()
+                        if grabbed:
+                            ok, frame = self.cap.retrieve()
+                        else:
+                            ok, frame = self.cap.read()
+                        if ok and self.frame_sink:
+                            h, w = frame.shape[:2]
+                            resized = cv2.resize(frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                            self.frame_sink(resized)
+                        time.sleep(0.033)  # ~30 FPS while centering is active
                         continue
                     
                     # BEFORE scanning, check again if object is in frame
@@ -695,7 +919,14 @@ class ScanWorker(threading.Thread):
                             detected_cls_id_pre = None
                             detected_conf_pre = 0.0
                             
+                            # Annotate frame with YOLO results and publish it
+                            annotated_pre_frame = pre_scan_frame.copy()
                             for r in pre_scan_results:
+                                try:
+                                    annotated_pre_frame = r.plot()  # YOLO-annotated frame
+                                except Exception:
+                                    pass
+                                
                                 if len(r.boxes) > 0:
                                     for i in range(len(r.boxes)):
                                         cls_id = int(r.boxes.cls[i].item())
@@ -716,13 +947,30 @@ class ScanWorker(threading.Thread):
                                     if object_detected_pre:
                                         break
                             
+                            # Always publish the annotated frame so user can see YOLO detections
+                            h, w = annotated_pre_frame.shape[:2]
+                            from .hud import draw_wrapped_text
+                            if object_detected_pre:
+                                status = f"Object detected: {detected_cls_name_pre} (conf: {detected_conf_pre:.2f})"
+                            else:
+                                status = f"Scanning at pose {pid}..."
+                            overlay = annotated_pre_frame.copy()
+                            cv2.rectangle(overlay, (0, 0), (w, int(28 * self.display_scale)), (0, 0, 0), -1)
+                            cv2.addWeighted(overlay, 0.35, annotated_pre_frame, 0.65, 0, annotated_pre_frame)
+                            draw_wrapped_text(annotated_pre_frame, status, 8, 8, int(w * 0.8))
+                            resized = cv2.resize(annotated_pre_frame, (int(w * self.display_scale), int(h * self.display_scale)))
+                            if self.frame_sink:
+                                self.frame_sink(resized)
+                            
                             if object_detected_pre:
                                 print(f"[ScanWorker] Object detected during scan: {detected_cls_name_pre} (conf={detected_conf_pre:.2f})")
                                 print(f"[ScanWorker] PAUSING scan - starting centering...")
+                                print(f"[ScanWorker] DEBUG: Before centering - scan_window_count={scan_window_count} at pose {pid}")
                                 # Center on object - centering will continue until movement < 5mm
                                 self._center_and_register_object(detected_cls_name_pre, detected_cls_id_pre, x, y, z, pitch)
-                                # Object centered and registered - resume scan at this pose
-                                print(f"[ScanWorker] Object centered and registered - resuming scan at current pose")
+                                # Object centered and registered - continue to next pose
+                                print(f"[ScanWorker] Object centered and registered - CONTINUING to next pose in scan cycle")
+                                print(f"[ScanWorker] DEBUG: After centering - breaking out of scan loop, scan_window_count={scan_window_count} at pose {pid}")
                                 break  # Exit inner scan loop, continue to next pose
 
                     # Exclusions: already updated this session, or too many fails here
@@ -732,9 +980,32 @@ class ScanWorker(threading.Thread):
                         if fcount >= C.MAX_FAILS_PER_POSE:
                             exclude_ids.append(int(cid))
 
+                    # CRITICAL: Check if centering just completed - if so, don't run scan window
+                    # This prevents scan windows from running immediately after centering when arm might still be moving
+                    if self._centering_active:
+                        print(f"[ScanWorker] DEBUG: Skipping scan window - centering is still active (should not happen here)")
+                        continue
+                    
+                    # Also check if arm is moving - wait for it to stop before running scan window
+                    # This ensures scan windows only run when arm is fully settled
+                    if self._arm_moving.is_set():
+                        print(f"[ScanWorker] DEBUG: Arm is moving - waiting for arm to stop before scan window")
+                        # Wait for arm to stop (with timeout to prevent infinite wait)
+                        wait_start = time.time()
+                        while self._arm_moving.is_set() and (time.time() - wait_start) < 5.0:
+                            time.sleep(0.1)
+                            if self._centering_active:
+                                print(f"[ScanWorker] DEBUG: Centering started while waiting for arm - breaking")
+                                break
+                        if self._centering_active:
+                            continue
+                    
                     # Scan the window at this pose (publish frames via frame_sink)
                     # Only scan for fork and cup (use search_valid_class_ids instead of allowed_class_ids)
                     # Pass arm movement state checker - only run YOLO when arm is stopped
+                    scan_window_count += 1
+                    print(f"[ScanWorker] DEBUG: Starting scan window #{scan_window_count} at pose {pid} (centering_active: {self._centering_active}, arm_moving: {self._arm_moving.is_set()})")
+                    scan_start_time = time.time()
                     summary = run_scan_window(
                         cap=self.cap,
                         model=self.model,
@@ -746,6 +1017,13 @@ class ScanWorker(threading.Thread):
                         allowed_class_ids=self.search_valid_class_ids,  # Only fork and cup
                         arm_is_stopped=lambda: not self._arm_moving.is_set(),  # Only run YOLO when arm is stopped
                     )
+                    scan_duration = time.time() - scan_start_time
+                    print(f"[ScanWorker] DEBUG: Scan window #{scan_window_count} completed in {scan_duration:.3f}s at pose {pid} (expected: {C.SCAN_DURATION_MS/1000.0:.3f}s)")
+                    
+                    # Check if centering became active during scan window - if so, break immediately
+                    if self._centering_active:
+                        print(f"[ScanWorker] DEBUG: Centering became active during scan window - breaking out of scan loop")
+                        break
 
                     objs = summary.get("objects", [])
                     candidate = None
@@ -785,19 +1063,25 @@ class ScanWorker(threading.Thread):
                     
                     # CENTER on object - centering will continue until movement < 5mm
                     # After centering succeeds and object is registered, scan will resume
+                    print(f"[ScanWorker] DEBUG: Before centering (from scan window results) - scan_window_count={scan_window_count} at pose {pid}")
                     self._center_and_register_object(detected_cls_name, cls_id, x, y, z, pitch)
                     
-                    # Object centered and registered - resume scan at this pose
-                    print(f"[ScanWorker] Object centered and registered - RESUMING scan at current pose")
-                    # Break out of inner scan loop, but continue with next iteration of pose loop
+                    # Object centered and registered - continue to next pose
+                    print(f"[ScanWorker] Object centered and registered - CONTINUING to next pose in scan cycle")
+                    print(f"[ScanWorker] DEBUG: After centering (from scan window results) - breaking out of scan loop, scan_window_count={scan_window_count} at pose {pid}")
+                    # Break out of inner scan loop, continue with next iteration of pose loop
                     break  # Exit inner scan loop, continue to next pose
 
                 # end while per-pose
+                print(f"[ScanWorker] DEBUG: Exiting scan loop at pose {pid} - total scan windows run: {scan_window_count}")
+                print(f"[ScanWorker] Continuing to next pose in scan path...")
 
                 if self.events.scan_abort.is_set():
+                    print(f"[ScanWorker] Scan abort requested - stopping scan cycle")
                     break
 
             # end for pose in path
+            print(f"[ScanWorker] Completed scan cycle - all poses visited")
 
         finally:
             # Prune entries not updated this session (end-of-search behavior)

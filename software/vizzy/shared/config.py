@@ -27,7 +27,7 @@ OBJ_BLACKLIST = [
 ]
 
 # Duration knobs (ms) - reduced for faster iteration
-SCAN_DURATION_MS   = 1000   # Per-pose scan window (reduced from 1750)
+SCAN_DURATION_MS   = 400  # Per-pose scan window (reduced from 1750)
 CENTER_DURATION_MS = 10000  # Max time to attempt centering (10 seconds)
 
 # Centering movement calculation (matching object_centering.py)
@@ -35,18 +35,23 @@ PIXEL_TO_MM = 1.0 / 2.90  # mm per pixel
 WORKING_DISTANCE_MM = 600.0  # mm (typical working distance for arm operations)
 MOVEMENT_SCALE_FACTOR = 1.2  # Scale factor for movement calculation
 
+# Camera to grasp position offset (mm)
+# Distance between camera center and actual grasp position on the end effector
+CAMERA_TO_GRASP_OFFSET_MM = 34.5  # mm offset to account for camera-to-grasp distance
+
 # Explicit scan gates (selection before attempting to center)
 # (Use these to filter scan results; centering thresholds remain separate.)
-SCAN_MIN_CONF   = 0.60  # confidence threshold for object detection
-SCAN_MIN_FRAMES = 10  # Reduced from 4 for faster detection
+SCAN_MIN_CONF   = 0.80  # confidence threshold for object detection
+SCAN_MIN_FRAMES = 2  
 
 # Centering verification thresholds (used during closed-loop centering)
-CENTER_CONF        = 0.60     # Per-frame minimum confidence
+CENTER_CONF        = 0.40     # Per-frame minimum confidence
 CENTER_EPSILON_PX  = 25       # Pixel error tolerance for success
 CENTER_MOVE_NORM   = 0.035    # Normalized motion stability
 CENTER_FRAMES      = 12       # Number of good frames (not necessarily consecutive)
 CENTER_MIN_MOVEMENT_MM = 3.0  # Minimum movement threshold: if movement < 5mm, consider centered
 CENTER_MEASURE_WAIT_TIME_S = 1.0  # Time to wait after movement command before measuring (arm must be stopped)
+CENTER_TIMEOUT_S = 3.0  # Maximum time per movement cycle before canceling (seconds). Timer resets after each movement toward object.
 
 # Retry / safety
 MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a single pose
@@ -55,7 +60,7 @@ MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a sing
 MEM_FILE = str(LAPTOP_DIR / "object_memory.json")
 
 # Valid objects to center on during search (fork, cup, and knife)
-SEARCH_VALID_CLASS_NAMES = ["fork", "cup", "knife", "spoon"]  # Only center on these objects
+SEARCH_VALID_CLASS_NAMES = ["fork", "spoon", "cup", "knife", "frisbee", "bowl"]  # Only center on these objects
 
 # -----------------------------
 # Networking
@@ -94,22 +99,42 @@ SEARCH_PITCH_DEG = 5
 
 # Explicit search path points (x_mm, y_mm) - all valid poses the arm can move to
 SEARCH_PATH_POINTS = [
-    # Start points
+    
+    # Pass 1: negative diagonal (x+25, y+25)
+    (175.0, -125.0),
+    (225.0, -175.0),
+    (275.0, -225.0),
+    (325.0, -275.0),
+    (375.0, -325.0),
 
-    # Middle points
-    (170,-170),  # Pose 3
-    (270.0, -270.0),  # Pose 4
-    (350.0, -350.0),  # Pose 5
-    
-    
-    (450.0, 0.0),     # Pose 8
-    (350.0, 0.0),     # Pose 7
-    (250.0, 0.0),     # Pose 6
-    
-    
-    (170, 170),   # Pose 9
-    (270.0, 270.0),   # Pose 10
-    (350.0, 350.0),   # Pose 11
+    # Pass 1.5: between Pass 1 and Pass 2, reversed (x+25, y+25)
+    (400.0, -150.0),
+    (350.0, -125.0),
+    (300.0, -100.0),
+    (250.0, -75.0),
+    (200.0, -50.0),
+
+    # Pass 2: middle row (x +25, y unchanged)
+    (225.0, 0.0),
+    (275.0, 0.0),
+    (325.0, 0.0),
+    (375.0, 0.0),
+    (425.0, 0.0),
+
+    # Pass 2.5: between Pass 2 and Pass 3, reversed (x+25, y+25)
+    (400.0, 200.0),
+    (350.0, 175.0),
+    (300.0, 150.0),
+    (250.0, 125.0),
+    (200.0, 100.0),
+
+    # Pass 3: positive diagonal (x+25, y+25)
+    (175.0, 175.0),
+    (225.0, 225.0),
+    (275.0, 275.0),
+    (325.0, 325.0),
+    (375.0, 375.0),
+
     
     
     (250.0, 0.0),  
@@ -121,9 +146,9 @@ SEARCH_PATH_POINTS = [
 SCAN_NUDGE_STEP_MM = 5.0
 
 # Target settle/dwell times (reduced for faster iteration)
-MOVE_SETTLE_S = 0.15          # allow time after a commanded move before accepting nudges (reduced from 0.30)
+MOVE_SETTLE_S = .05          # allow time after a commanded move before accepting nudges (reduced from 0.30)
 RETURN_TO_POSE_DWELL_S = 0.10 # dwell after returning to baseline before next scan window (reduced from 0.25)
-POSE_CV_DELAY_S = 0.3         # extra delay at each pose to give CV model time to identify objects
+POSE_CV_DELAY_S = 0         # extra delay at each pose to give CV model time to identify objects
 
 # Physical servo PWM bounds for the new arm (documentation for IK output clamping)
 SERVO_PITCH_CENTER_US = 1500
@@ -139,7 +164,7 @@ SERVO_CLAW_MIN_US     = 1000
 SERVO_CLAW_MAX_US     = 2000
 
 # Idle/auto-search behavior (laptop)
-IDLE_TIMEOUT_S = 20.0   # seconds of inactivity before auto SEARCH
+IDLE_TIMEOUT_S = 60.0   # seconds of inactivity before auto SEARCH
 
 # -----------------------------
 # LLM / Semantic Enrichment
@@ -177,7 +202,7 @@ REST_YAW_ANGLE = 0.0             # degrees
 REST_PITCH_ANGLE = 0.0           # degrees
 
 # Vertical offset for approach/retract moves (millimeters)
-APPROACH_OFFSET_Z = 350.0        # mm above object for safe approach
+APPROACH_OFFSET_Z = 300.0        # mm above object for safe approach
 
 # Timeout for primitive command execution (seconds)
 PRIMITIVE_CMD_TIMEOUT = 30.0
