@@ -32,9 +32,6 @@ YAW_RAD_MAX    =  math.pi/2   # +90°
 CLAW_PWM_OPEN   = 1700
 CLAW_PWM_CLOSED = 1200
 
-# Claw hold behavior (continuous reinforcement)
-CLAW_HOLD_INTERVAL_S = 0.2
-
 # Tween timing for servos
 SERVO_TWEEN_MIN_DT = 0.01   # s
 SERVO_TWEEN_MAX_DT = 0.025  # s
@@ -320,8 +317,6 @@ class ArmServer:
         self._stop = asyncio.Event()
         self._servo_task: asyncio.Task | None = None
         self._pi_reconnect_backoff_s = 0.5
-        self._claw_hold_task: asyncio.Task | None = None
-        self._claw_hold_event: asyncio.Event | None = None
 
     # ===== pigpio resilience =====
     async def _ensure_pi(self):
@@ -393,8 +388,6 @@ class ArmServer:
         pwm = int(clamp(pwm_us, SERVO_MIN, SERVO_MAX))
         self.pi.set_servo_pulsewidth(ch["pin"], pwm)
         ch["current"] = pwm
-        if name == "claw":
-            self._notify_claw_hold()
 
     def set_servo_targets(self, *, pitch_pwm: int | None = None, yaw_pwm: int | None = None, claw_pwm: int | None = None):
         if pitch_pwm is not None:
@@ -403,48 +396,6 @@ class ArmServer:
             self.servos["yaw"]["target"]   = int(clamp(yaw_pwm,   SERVO_MIN, SERVO_MAX))
         if claw_pwm is not None:
             self.servos["claw"]["target"]  = int(clamp(claw_pwm,  SERVO_MIN, SERVO_MAX))
-
-    def _notify_claw_hold(self):
-        if self._claw_hold_event is not None:
-            self._claw_hold_event.set()
-
-    async def _claw_hold_loop(self):
-        try:
-            while not self._stop.is_set():
-                event = self._claw_hold_event
-                if event is not None:
-                    try:
-                        await asyncio.wait_for(event.wait(), timeout=CLAW_HOLD_INTERVAL_S)
-                        event.clear()
-                    except asyncio.TimeoutError:
-                        pass
-                else:
-                    await asyncio.sleep(CLAW_HOLD_INTERVAL_S)
-                if self._stop.is_set():
-                    break
-                try:
-                    pwm = int(self.servos["claw"]["current"])
-                    await self._safe_servo_write("claw", pwm)
-                except Exception as e:
-                    print(f"[rpi] CLAW-HOLD: write error: {e}", file=sys.stderr)
-        except asyncio.CancelledError:
-            pass
-
-    def _start_claw_hold_task(self):
-        if self._claw_hold_task is None:
-            if self._claw_hold_event is None:
-                self._claw_hold_event = asyncio.Event()
-            self._claw_hold_event.set()
-            self._claw_hold_task = asyncio.create_task(self._claw_hold_loop())
-
-    async def _stop_claw_hold_task(self):
-        if self._claw_hold_task:
-            if self._claw_hold_event is not None:
-                self._claw_hold_event.set()
-            self._claw_hold_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._claw_hold_task
-            self._claw_hold_task = None
 
     async def servos_tween_multi(self, duration: float):
         """Tween all servos linearly from their current to target PWM over 'duration' seconds."""
@@ -776,7 +727,6 @@ class ArmServer:
         await self.init_positions()
         ctrl_task = asyncio.create_task(self.control_loop())
         hb_task   = asyncio.create_task(self.heartbeat_loop())
-        self._start_claw_hold_task()
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
         addrs = ", ".join(str(sock.getsockname()) for sock in server.sockets)
         print(f"[rpi] listening on {addrs} | servos: pitch={SERVO_PITCH} yaw={SERVO_YAW} claw={SERVO_CLAW}")
@@ -789,7 +739,6 @@ class ArmServer:
             await ctrl_task; await hb_task
         with contextlib.suppress(Exception):
             await self._cancel_servo_task()
-        await self._stop_claw_hold_task()
 
 # ---- wiggle helper ----
 async def wiggle(ctrl: moteus.Controller, center: float, start_pos: float) -> float:
