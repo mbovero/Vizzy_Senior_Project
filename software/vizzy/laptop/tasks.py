@@ -118,22 +118,20 @@ def expand_high_level_commands(plan: List[Dict], memory: ObjectMemory) -> List[D
             obj_z = obj_xyz[2]  # Object's actual z coordinate
             
             # Expand to primitive sequence using enhanced MOVE_TO with partial parameters:
-            # 1. MOVE_TO(target + vertical_offset, pitch=-90°, yaw=center_yaw, claw=O)
-            # 2. MOVE_TO(pitch=-π/2, yaw=grasp_angle)  # Use other prev parameters (x, y, z, claw from step 1)
-            # 3. MOVE_TO(target)  # Use other prev parameters (pitch, yaw, claw from step 2)
-            # 4. GRAB  # Use other prev parameters (all from step 3)
-            # 5. MOVE_TO(REST_POS, REST_PITCH, REST_YAW)  # Still closed
-            vertical_offset = [0, 0, C.APPROACH_OFFSET_Z]
+            # 1. MOVE_TO(target + vertical_offset, pitch=-87°, yaw=grasp_angle, claw=O)
+            # 2. MOVE_TO(target)  # Use other prev parameters (pitch, yaw, claw from step 1)
+            # 3. GRAB  # Use other prev parameters (all from step 2)
+            # 4. MOVE_TO(REST_POS, REST_PITCH, REST_YAW)  # Still closed
+            vertical_offset = [0, 0, C.PICK_OFFSET_Z]
             expanded.extend([
                 {"command": "RELEASE"},  # Ensure claw is open initially
-                {"command": "MOVE_TO", "destination": target, "offset": vertical_offset, "pitch": -90.0, "yaw": 0.0, "claw": "O"},  # Approach from above with claw at -90° pitch (center yaw = 0°)
-                {"command": "MOVE_TO", "pitch": -90.0, "yaw": grasp_angle},  # Change pitch and yaw, keep position and claw from step 1
-                {"command": "MOVE_TO", "destination": target},  # Move to target, keep pitch/yaw/claw from step 2
-                {"command": "GRAB"},  # Close claw, keep position and orientation from step 3
-                {"command": "MOVE_TO", "destination": C.REST_POSITION, "pitch": C.REST_PITCH_ANGLE, "yaw": C.REST_YAW_ANGLE},  # Move to rest, claw still closed from step 4
+                {"command": "MOVE_TO", "destination": target, "offset": vertical_offset, "pitch": -87.0, "yaw": grasp_angle, "claw": "O"},  # Approach from above with claw at -90° pitch and grasp angle yaw
+                {"command": "MOVE_TO", "destination": target},  # Move to target, keep pitch/yaw/claw from step 1
+                {"command": "GRAB"},  # Close claw, keep position and orientation from step 2
+                {"command": "MOVE_TO", "destination": C.REST_POSITION, "pitch": C.REST_PITCH_ANGLE, "yaw": C.REST_YAW_ANGLE},  # Move to rest, claw still closed from step 3
             ])
-            print(f"[Tasks]   Expanded to 6 primitives")
-            print(f"[Tasks]   Sequence: RELEASE -> MOVE_TO(above, z={obj_z + C.APPROACH_OFFSET_Z:.1f}mm, pitch=-90°, yaw=0°) -> MOVE_TO(pitch=-90°, yaw={grasp_angle:.1f}°) -> MOVE_TO(target, z={obj_z:.1f}mm) -> GRAB -> MOVE_TO(rest)")
+            print(f"[Tasks]   Expanded to 5 primitives")
+            print(f"[Tasks]   Sequence: RELEASE -> MOVE_TO(above, z={obj_z + C.PICK_OFFSET_Z:.1f}mm, pitch=-90°, yaw={grasp_angle:.1f}°) -> MOVE_TO(target, z={obj_z:.1f}mm) -> GRAB -> MOVE_TO(rest)")
         
         elif command == "PLACE":
             print(f"[Tasks] Expanding PLACE command {i}...")
