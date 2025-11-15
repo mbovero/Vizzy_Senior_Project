@@ -3,8 +3,8 @@
 # Protocol (from client):  ik x y z pitch_rad yaw_rad O|C
 #   - Pitch: radians go into IK; we use IK's q4 (PWM) directly (preserves original behavior)
 #   - Yaw:   radians mapped to your specified PWM endpoints
-#   - Claw:  O=1650 (open), C=1300 (closed)
-# All servos tween in sync with the motor group move duration so everything lands together.
+#   - Claw:  O=1700 (open), C=1200 (closed) - snaps immediately (no interpolation)
+# Pitch and yaw servos tween in sync with the motor group move duration. Claw snaps immediately.
 
 from __future__ import annotations
 import argparse, asyncio, math, time, sys, contextlib, pprint, re
@@ -29,7 +29,7 @@ YAW_RAD_MIN    = -math.pi/2   # -90°
 YAW_RAD_MAX    =  math.pi/2   # +90°
 
 # Claw PWM mapping (your exact endpoints)
-CLAW_PWM_OPEN   = 1700
+CLAW_PWM_OPEN   = 1675
 CLAW_PWM_CLOSED = 1200
 
 # Tween timing for servos
@@ -395,23 +395,28 @@ class ArmServer:
         if yaw_pwm is not None:
             self.servos["yaw"]["target"]   = int(clamp(yaw_pwm,   SERVO_MIN, SERVO_MAX))
         if claw_pwm is not None:
+            # Claw snaps immediately - no interpolation
             self.servos["claw"]["target"]  = int(clamp(claw_pwm,  SERVO_MIN, SERVO_MAX))
+            self.servos["claw"]["current"] = self.servos["claw"]["target"]
 
     async def servos_tween_multi(self, duration: float):
-        """Tween all servos linearly from their current to target PWM over 'duration' seconds."""
+        """Tween pitch and yaw linearly from their current to target PWM over 'duration' seconds.
+        Claw snaps immediately to target (no interpolation)."""
         await self._ensure_pi()
+
+        # Claw snaps immediately - no interpolation
+        t_claw = self.servos["claw"]["target"]
+        await self._safe_servo_write("claw", t_claw)
 
         if duration <= 0.0:
             await asyncio.gather(
                 self._safe_servo_write("pitch", self.servos["pitch"]["target"]),
                 self._safe_servo_write("yaw",   self.servos["yaw"]["target"]),
-                self._safe_servo_write("claw",  self.servos["claw"]["target"]),
             )
             return
 
         s_pitch, t_pitch = self.servos["pitch"]["current"], self.servos["pitch"]["target"]
         s_yaw,   t_yaw   = self.servos["yaw"]["current"],   self.servos["yaw"]["target"]
-        s_claw,  t_claw  = self.servos["claw"]["current"],  self.servos["claw"]["target"]
 
         t0 = time.monotonic()
         dt = max(SERVO_TWEEN_MIN_DT, min(SERVO_TWEEN_MAX_DT, duration / 50.0))
@@ -423,14 +428,12 @@ class ArmServer:
             await asyncio.gather(
                 self._safe_servo_write("pitch", int(round(lerp(s_pitch, t_pitch, a)))),
                 self._safe_servo_write("yaw",   int(round(lerp(s_yaw,   t_yaw,   a)))),
-                self._safe_servo_write("claw",  int(round(lerp(s_claw,  t_claw,  a)))),
             )
             await asyncio.sleep(dt)
 
         await asyncio.gather(
             self._safe_servo_write("pitch", t_pitch),
             self._safe_servo_write("yaw",   t_yaw),
-            self._safe_servo_write("claw",  t_claw),
         )
 
     async def servos_snap(self, *, pitch_pwm: int, yaw_pwm: int, claw_pwm: int):
@@ -703,6 +706,8 @@ class ArmServer:
                         async with self._lock:
                             # set servo targets (tween will run during group move)
                             self.set_servo_targets(pitch_pwm=q4_pwm, yaw_pwm=yaw_pwm, claw_pwm=claw_pwm)
+                            # Claw snaps immediately - write it right away
+                            await self._safe_servo_write("claw", self.servos["claw"]["target"])
                             # set motor targets (unless cooling)
                             if not (self.cooling2 or self.cooling3):
                                 self.t1, self.t2, self.t3 = q1, q2, q3
