@@ -96,33 +96,40 @@ class ClawHoldManager:
         self._paused = False
         self._lock = threading.Lock()
         self._stop_evt = threading.Event()
+        self._update_evt = threading.Event()
+        self._update_evt.set()  # ensure immediate first write
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def _run(self):
         while not self._stop_evt.is_set():
+            self._update_evt.wait(self.interval_s)
+            self._update_evt.clear()
             with self._lock:
                 paused = self._paused
                 target = self._target_pwm
             if not paused and target is not None:
                 self.pi.set_servo_pulsewidth(self.pin, target)
-            time.sleep(self.interval_s)
 
     def set_pwm(self, pwm):
         with self._lock:
             self._target_pwm = pwm
         self.pi.set_servo_pulsewidth(self.pin, pwm)
+        self._update_evt.set()
 
     def pause(self):
         with self._lock:
             self._paused = True
+        self._update_evt.set()
 
     def resume(self):
         with self._lock:
             self._paused = False
+        self._update_evt.set()
 
     def stop(self):
         self._stop_evt.set()
+        self._update_evt.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
 
