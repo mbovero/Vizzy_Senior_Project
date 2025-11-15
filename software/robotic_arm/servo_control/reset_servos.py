@@ -27,6 +27,10 @@ SERVOS = {
     3: ("Top",    SERVO_TOP),
 }
 
+# Claw (servo 2) reinforcement behavior
+CLAW_SERVO_ID = 2
+CLAW_HOLD_INTERVAL_S = 0.2  # seconds between reinforcement writes
+
 def clamp_pwm(pwm):
     return max(SERVO_MIN, min(SERVO_MAX, pwm))
 
@@ -82,6 +86,46 @@ class ServoSweeper:
             self.pi.set_servo_pulsewidth(self.pin, pwm)
             time.sleep(SWEEP_DELAY_S)
 
+class ClawHoldManager:
+    """Continuously reasserts the claw PWM target to push through resistance."""
+    def __init__(self, pi, pin, interval_s, initial_pwm):
+        self.pi = pi
+        self.pin = pin
+        self.interval_s = interval_s
+        self._target_pwm = initial_pwm
+        self._paused = False
+        self._lock = threading.Lock()
+        self._stop_evt = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop_evt.is_set():
+            with self._lock:
+                paused = self._paused
+                target = self._target_pwm
+            if not paused and target is not None:
+                self.pi.set_servo_pulsewidth(self.pin, target)
+            time.sleep(self.interval_s)
+
+    def set_pwm(self, pwm):
+        with self._lock:
+            self._target_pwm = pwm
+        self.pi.set_servo_pulsewidth(self.pin, pwm)
+
+    def pause(self):
+        with self._lock:
+            self._paused = True
+
+    def resume(self):
+        with self._lock:
+            self._paused = False
+
+    def stop(self):
+        self._stop_evt.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
 def main():
     print("Connecting to pigpio daemon...")
     pi = pigpio.pi()
@@ -91,10 +135,20 @@ def main():
     # Create sweep managers per servo
     sweepers = {sid: ServoSweeper(pi, pin) for sid, (_, pin) in SERVOS.items()}
 
+    # Create claw hold manager (continuous PWM reassertion) if claw servo is defined
+    claw_hold = None
+    if CLAW_SERVO_ID in SERVOS:
+        _, claw_pin = SERVOS[CLAW_SERVO_ID]
+        claw_hold = ClawHoldManager(pi, claw_pin, CLAW_HOLD_INTERVAL_S, SERVO_CENTER)
+
     # Center all servos on startup
     print("\nCentering all servos...")
-    for _, pin in SERVOS.values():
-        pi.set_servo_pulsewidth(pin, SERVO_CENTER)
+    for sid, (_, pin) in SERVOS.items():
+        if sid == CLAW_SERVO_ID and claw_hold:
+            claw_hold.resume()
+            claw_hold.set_pwm(SERVO_CENTER)
+        else:
+            pi.set_servo_pulsewidth(pin, SERVO_CENTER)
     time.sleep(1)
     print("All servos initialized to 1500 µs (center position).\n")
 
@@ -115,8 +169,13 @@ def main():
                 # Stop all sweeps and center everything
                 for sw in sweepers.values():
                     sw.stop()
-                for _, pin in SERVOS.values():
-                    pi.set_servo_pulsewidth(pin, SERVO_CENTER)
+                if claw_hold:
+                    claw_hold.resume()
+                for sid, (_, pin) in SERVOS.items():
+                    if sid == CLAW_SERVO_ID and claw_hold:
+                        claw_hold.set_pwm(SERVO_CENTER)
+                    else:
+                        pi.set_servo_pulsewidth(pin, SERVO_CENTER)
                 print("Centered all servos and stopped sweeps.")
                 continue
 
@@ -143,6 +202,11 @@ def main():
                 running = sweeper.toggle()
                 state = "started" if running else "stopped"
                 print(f"→ Sweep {state} for {name} servo (GPIO {pin})")
+                if sid == CLAW_SERVO_ID and claw_hold:
+                    if running:
+                        claw_hold.pause()
+                    else:
+                        claw_hold.resume()
                 continue
 
             # Otherwise treat as numeric PWM
@@ -156,10 +220,17 @@ def main():
             if sweeper.is_running():
                 sweeper.stop()
                 print(f"Stopped sweep for {name} servo to set PWM.")
+                if sid == CLAW_SERVO_ID and claw_hold:
+                    claw_hold.resume()
 
             pwm = clamp_pwm(pwm)
-            pi.set_servo_pulsewidth(pin, pwm)
-            print(f"→ Set {name} servo (GPIO {pin}) to {pwm} µs")
+            if sid == CLAW_SERVO_ID and claw_hold:
+                claw_hold.resume()
+                claw_hold.set_pwm(pwm)
+                print(f"→ Set {name} servo (GPIO {pin}) to {pwm} µs (continuous hold)")
+            else:
+                pi.set_servo_pulsewidth(pin, pwm)
+                print(f"→ Set {name} servo (GPIO {pin}) to {pwm} µs")
 
     except KeyboardInterrupt:
         pass
@@ -167,6 +238,8 @@ def main():
         print("\nStopping all sweeps and servos...")
         for sw in sweepers.values():
             sw.stop()
+        if claw_hold:
+            claw_hold.stop()
         for _, pin in SERVOS.values():
             pi.set_servo_pulsewidth(pin, 0)
         pi.stop()
