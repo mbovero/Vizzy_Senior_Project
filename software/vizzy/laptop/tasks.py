@@ -142,7 +142,7 @@ def expand_high_level_commands(plan: List[Dict], memory: ObjectMemory) -> List[D
             yaw_rot = task.get("yaw_rot", None)  # Optional yaw rotation
             
             # Expand to primitive sequence with approach offset
-            vertical_offset = [0, 0, C.APPROACH_OFFSET_Z]
+            vertical_offset = [0, 0, C.PLACE_OFFSET_Z]
             
             # Combine user offset + vertical approach offset
             combined_offset = [

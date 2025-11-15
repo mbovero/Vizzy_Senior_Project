@@ -203,6 +203,7 @@ REST_PITCH_ANGLE = 0.0           # degrees
 
 # Vertical offset for approach/retract moves (millimeters)
 APPROACH_OFFSET_Z = 300.0        # mm above object for safe approach
+PLACE_OFFSET_Z = 50.0           # mm above destination for safe place approach
 
 # Timeout for primitive command execution (seconds)
 PRIMITIVE_CMD_TIMEOUT = 30.0
