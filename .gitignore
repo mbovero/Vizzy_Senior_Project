@@ -2,6 +2,7 @@
 *.engine
 *.onnx
 *.json
+*.jsonl
 __pycache__
 *.env
 captured_images
