@@ -41,6 +41,10 @@ The user will provide a natural language request. You must parse it into a struc
 
 IMPORTANT: All coordinates are in MILLIMETERS.
 
+Coordinate system (robot frame) directions:
+- Positive Y (y > 0) is "right"; negative Y (y < 0) is "left".
+- Positive X (x > 0) is "forward"; negative X (x < 0) is "backward".
+
 Available command types:
 
 HIGH-LEVEL COMMANDS (automatically expanded by the system):
