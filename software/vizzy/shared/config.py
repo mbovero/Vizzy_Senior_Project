@@ -27,7 +27,7 @@ OBJ_BLACKLIST = [
 ]
 
 # Duration knobs (ms) - reduced for faster iteration
-SCAN_DURATION_MS   = 250  # Per-pose scan window (reduced from 1750)
+SCAN_DURATION_MS   = 600  # Per-pose scan window (reduced from 1750)
 CENTER_DURATION_MS = 10000  # Max time to attempt centering (10 seconds)
 
 # Centering movement calculation (matching object_centering.py)
@@ -37,7 +37,7 @@ MOVEMENT_SCALE_FACTOR = 1.2  # Scale factor for movement calculation
 
 # Camera to grasp position offset (mm)
 # Distance between camera center and actual grasp position on the end effector
-CAMERA_TO_GRASP_OFFSET_MM = 34.5  # mm offset to account for camera-to-grasp distance
+CAMERA_TO_GRASP_OFFSET_MM = 20  # mm offset to account for camera-to-grasp distance
 
 # Explicit scan gates (selection before attempting to center)
 # (Use these to filter scan results; centering thresholds remain separate.)
@@ -141,7 +141,7 @@ RETURN_TO_POSE_DWELL_S = 0.10 # dwell after returning to baseline before next sc
 POSE_CV_DELAY_S = 0         # extra delay at each pose to give CV model time to identify objects
 
 # Physical servo PWM bounds for the new arm (documentation for IK output clamping)
-SERVO_PITCH_CENTER_US = 1500
+SERVO_PITCH_CENTER_US = 1770
 SERVO_PITCH_MIN_US    = 1000
 SERVO_PITCH_MAX_US    = 2000
 
@@ -190,13 +190,13 @@ TASK_SCHEDULER_LOG_FILE = str(LAPTOP_DIR / "task_scheduler_log.jsonl")
 # Task Execution - Rest Position
 # -----------------------------
 # Rest/home position for robotic arm (all coordinates in millimeters)
-REST_POSITION = [250, 0, 300]    # [x_mm, y_mm, z_mm]
+REST_POSITION = [250, 0, 200]    # [x_mm, y_mm, z_mm]
 REST_YAW_ANGLE = 0.0             # degrees
 REST_PITCH_ANGLE = -90.0           # degrees
 REST_CLAW_STATE = "C"            # "O" for open, "C" for closed (arm rests with claw closed)
 
 # Vertical offset for approach/retract moves (millimeters)
-APPROACH_OFFSET_Z = 300.0        # mm above object for safe approach
+PICK_OFFSET_Z = 100.0        # mm above object for safe approach during PICK
 PLACE_OFFSET_Z = 20.0           # mm above destination for safe place approach
 
 # Timeout for primitive command execution (seconds)

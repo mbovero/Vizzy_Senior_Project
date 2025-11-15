@@ -19,7 +19,7 @@ SERVO_MIN    = 500
 SERVO_MAX    = 2500
 
 # Pitch center (original server behavior: pitch straight up)
-SERVO_PITCH_CENTER = 1755
+SERVO_PITCH_CENTER = 1770
 
 # Yaw PWM mapping (your exact endpoints)
 YAW_PWM_CENTER = 1700
