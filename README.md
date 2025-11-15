@@ -38,7 +38,7 @@
 </div>
 
 <p align="center" style="font-size:14px; color:#666;">
-  <em>Figure 1.1 — Left: Arm motion demonstration · Right: Vision-based object detection in action.</em>
+  <em>Figure 1 — Left: Arm motion demonstration · Right: Vision-based object detection in action.</em>
 </p>
 
 
@@ -68,7 +68,7 @@
        style="border:3px solid white; border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.15);">
 </p>
 
-<p align="center"><em>Figure 1 — Conceptual overview of Vizzy’s modular arm system.</em></p>
+<p align="center"><em>Figure 2 — Conceptual overview of Vizzy’s modular arm system.</em></p>
 
 <hr style="margin-top:28px; margin-bottom:0; border:0; height:1px; background:linear-gradient(90deg,rgba(0,0,0,0),rgba(140,140,140,.35),rgba(0,0,0,0));" />
 
@@ -123,7 +123,7 @@
   </tr>
 </table>
 
-<p align="center"><em>Figure 2 — Hardware overview showing mechanical components.</em></p>
+<p align="center"><em>Figure 3 — Hardware overview showing mechanical components.</em></p>
 
 
 <h3 id="software">Software</h3>
@@ -142,7 +142,7 @@
        style="max-width:100%;border:3px solid white;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.10);">
 </p>
 <p align="center" style="margin-top:4px;">
-  <em>Figure 3 — Software architecture illustrating perception, reasoning, and control flow.</em>
+  <em>Figure 4 — Software architecture illustrating perception, reasoning, and control flow.</em>
 </p>
 
 ---
@@ -158,7 +158,7 @@
     <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
       <strong>Miles Bovero</strong><br>
       <em style="color:#57606a;">Computer Engineering</em><br>
-      Designed subsystem interfaces, YOLO-based vision pipeline, object centering / location / orientation algorithms.
+      Designed subsystem interfaces, YOLO-based vision pipeline, object centering / location / orientation estimation algorithms.
     </td>
     <td style="width:33%;border:1px solid #d0d7de;border-radius:10px;padding:16px;background:#fafbfc;">
       <strong>Lawrence Ponce</strong><br>
