@@ -193,6 +193,9 @@ SKIP_SEMANTIC_ENRICHMENT = False # Skip LLM semantic enrichment
 # Output file for LLM task scheduler results (for verification)
 TASK_SCHEDULER_OUTPUT_FILE = str(LAPTOP_DIR / "task_scheduler_output.json")
 
+# Long-term log file for all LLM task scheduler outputs (appended, never overwritten)
+TASK_SCHEDULER_LOG_FILE = str(LAPTOP_DIR / "task_scheduler_log.jsonl")
+
 # -----------------------------
 # Task Execution - Rest Position
 # -----------------------------

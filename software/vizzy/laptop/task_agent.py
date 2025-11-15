@@ -184,11 +184,13 @@ class TaskAgent(threading.Thread):
         self.state_mgr.idle_deadline = time.time() + C.IDLE_TIMEOUT_S
     
     def _save_plan_to_file(self, user_query: str, plan: list) -> None:
-        """Save the task scheduler output to a file for verification."""
+        """Save the task scheduler output to a file for verification.
+        Also appends to a long-term log file that is never overwritten."""
         import json
         from datetime import datetime
         
         output_file = C.TASK_SCHEDULER_OUTPUT_FILE
+        log_file = C.TASK_SCHEDULER_LOG_FILE
         
         output_data = {
             "timestamp": datetime.now().isoformat(),
@@ -198,9 +200,18 @@ class TaskAgent(threading.Thread):
             "memory_objects": len(self._memory.list_objects())
         }
         
+        # Save to the main output file (overwrites previous)
         try:
             with open(output_file, 'w') as f:
                 json.dump(output_data, f, indent=2)
             print(f"[TaskAgent] Plan saved to: {output_file}")
         except Exception as e:
             print(f"[TaskAgent] Warning: Failed to save plan to file: {e}")
+        
+        # Append to long-term log file (JSONL format - one JSON object per line)
+        try:
+            with open(log_file, 'a') as f:
+                f.write(json.dumps(output_data) + '\n')
+            print(f"[TaskAgent] Plan logged to: {log_file}")
+        except Exception as e:
+            print(f"[TaskAgent] Warning: Failed to append to log file: {e}")
