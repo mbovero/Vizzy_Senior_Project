@@ -27,7 +27,7 @@ OBJ_BLACKLIST = [
 ]
 
 # Duration knobs (ms) - reduced for faster iteration
-SCAN_DURATION_MS   = 400  # Per-pose scan window (reduced from 1750)
+SCAN_DURATION_MS   = 250  # Per-pose scan window (reduced from 1750)
 CENTER_DURATION_MS = 10000  # Max time to attempt centering (10 seconds)
 
 # Centering movement calculation (matching object_centering.py)
@@ -101,39 +101,29 @@ SEARCH_PITCH_DEG = 5
 SEARCH_PATH_POINTS = [
     
     # Pass 1: negative diagonal (x+25, y+25)
-    (175.0, -125.0),
-    (225.0, -175.0),
+   
     (275.0, -225.0),
-    (325.0, -275.0),
-    (375.0, -325.0),
+    
 
     # Pass 1.5: between Pass 1 and Pass 2, reversed (x+25, y+25)
-    (400.0, -150.0),
-    (350.0, -125.0),
+  
     (300.0, -100.0),
-    (250.0, -75.0),
-    (200.0, -50.0),
+    
 
     # Pass 2: middle row (x +25, y unchanged)
-    (225.0, 0.0),
-    (275.0, 0.0),
+    
     (325.0, 0.0),
-    (375.0, 0.0),
-    (425.0, 0.0),
+    
 
     # Pass 2.5: between Pass 2 and Pass 3, reversed (x+25, y+25)
-    (400.0, 200.0),
-    (350.0, 175.0),
+    
     (300.0, 150.0),
-    (250.0, 125.0),
-    (200.0, 100.0),
+ 
 
     # Pass 3: positive diagonal (x+25, y+25)
-    (175.0, 175.0),
-    (225.0, 225.0),
+    
     (275.0, 275.0),
-    (325.0, 325.0),
-    (375.0, 375.0),
+   
 
     
     
@@ -173,7 +163,7 @@ IDLE_TIMEOUT_S = 60.0   # seconds of inactivity before auto SEARCH
 IMAGE_PROCESS_MODEL = "gpt-5-nano"
 
 # OpenAI model for task scheduling / planning
-TASK_SCHEDULER_MODEL = "gpt-5-nano"
+TASK_SCHEDULER_MODEL = "gpt-5-mini"
 
 # Number of concurrent LLM worker threads for semantic enrichment
 LLM_WORKERS = 5
@@ -202,11 +192,12 @@ TASK_SCHEDULER_LOG_FILE = str(LAPTOP_DIR / "task_scheduler_log.jsonl")
 # Rest/home position for robotic arm (all coordinates in millimeters)
 REST_POSITION = [250, 0, 300]    # [x_mm, y_mm, z_mm]
 REST_YAW_ANGLE = 0.0             # degrees
-REST_PITCH_ANGLE = 0.0           # degrees
+REST_PITCH_ANGLE = -90.0           # degrees
+REST_CLAW_STATE = "C"            # "O" for open, "C" for closed (arm rests with claw closed)
 
 # Vertical offset for approach/retract moves (millimeters)
 APPROACH_OFFSET_Z = 300.0        # mm above object for safe approach
-PLACE_OFFSET_Z = 50.0           # mm above destination for safe place approach
+PLACE_OFFSET_Z = 20.0           # mm above destination for safe place approach
 
 # Timeout for primitive command execution (seconds)
 PRIMITIVE_CMD_TIMEOUT = 30.0
