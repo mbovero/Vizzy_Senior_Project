@@ -37,7 +37,7 @@ MOVEMENT_SCALE_FACTOR = 1.2  # Scale factor for movement calculation
 
 # Camera to grasp position offset (mm)
 # Distance between camera center and actual grasp position on the end effector
-CAMERA_TO_GRASP_OFFSET_MM = 20  # mm offset to account for camera-to-grasp distance
+CAMERA_TO_GRASP_OFFSET_MM = 20  # mm offset to account for camera-to-grasp distance (34.5mm)
 
 # Explicit scan gates (selection before attempting to center)
 # (Use these to filter scan results; centering thresholds remain separate.)
@@ -196,7 +196,7 @@ REST_PITCH_ANGLE = -90.0           # degrees
 REST_CLAW_STATE = "C"            # "O" for open, "C" for closed (arm rests with claw closed)
 
 # Vertical offset for approach/retract moves (millimeters)
-PICK_OFFSET_Z = 100.0        # mm above object for safe approach during PICK
+PICK_OFFSET_Z = 50.0        # mm above object for safe approach during PICK
 PLACE_OFFSET_Z = 20.0           # mm above destination for safe place approach
 
 # Timeout for primitive command execution (seconds)
@@ -208,9 +208,3 @@ PRIMITIVE_CMD_TIMEOUT = 30.0
 # Note: Orientation is calculated from frames collected during centering (CENTER_FRAMES)
 # No additional frame capture needed - reuses centering frames for efficiency
 
-# -----------------------------
-# Camera to Gripper Offset
-# -----------------------------
-# Physical offset from camera center to gripper center (millimeters)
-# When camera is centered on object, gripper is offset by this distance along the radius
-CAMERA_TO_GRIPPER_OFFSET_MM = 34.5  # mm
