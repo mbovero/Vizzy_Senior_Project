@@ -20,8 +20,8 @@ def main():
     
     # Request MJPG (smaller USB payload than raw YUYV)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  int(800))
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(600))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  int(640))
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(480))
     cap.set(cv2.CAP_PROP_FPS,          float(30.0))
     
     # Test a frame to report failures early
