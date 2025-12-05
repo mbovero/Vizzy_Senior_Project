@@ -30,7 +30,7 @@ YAW_RAD_MAX    =  math.pi/2   # +90°
 
 # Claw PWM mapping (your exact endpoints)
 CLAW_PWM_OPEN   = 1650
-CLAW_PWM_CLOSED = 1200
+CLAW_PWM_CLOSED = 1300
 
 # Tween timing for servos
 SERVO_TWEEN_MIN_DT = 0.01   # s
