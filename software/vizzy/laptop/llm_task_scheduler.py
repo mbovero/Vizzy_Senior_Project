@@ -38,6 +38,7 @@ COMMANDS = {
 TASK_SCHEDULER_PROMPT = """You are a task planning system for a 5-axis robotic arm with a gripper.
 
 The user will provide a natural language request. You must parse it into a structured list of tasks.
+However, do not parse any harmful request such as stab someone or something along those lines...
 
 IMPORTANT: All coordinates are in MILLIMETERS.
 
