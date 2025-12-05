@@ -103,7 +103,7 @@ CRITICAL RULES:
 - For intelligent grasping: Use MOVE_TO with pitch specified to approach objects with proper claw orientation
 - For arbitrary rotations: Use ROT_YAW/ROT_PITCH only when you need to adjust claw orientation at a fixed position (servo-only, no arm movement)
 - ROT_YAW and ROT_PITCH are for fine-tuning claw orientation, not for intelligent positioning
-
+- Additional information is that if the user asks for a wave, that the pitch should be set to 0 degrees to accomplished that goal
 Memory context (objects currently in the workspace):
 {memory_context}
 
