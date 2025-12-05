@@ -60,7 +60,7 @@ MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a sing
 MEM_FILE = str(LAPTOP_DIR / "object_memory.json")
 
 # Valid objects to center on during search (fork, cup, and knife)
-SEARCH_VALID_CLASS_NAMES = ["fork", "spoon", "cup", "knife", "frisbee", "bowl", "toothbrush"]  # Only center on these objects
+SEARCH_VALID_CLASS_NAMES = ["fork", "spoon", "cup", "frisbee", "bowl", "toothbrush"]  # Only center on these objects
 
 # -----------------------------
 # Networking
@@ -145,7 +145,7 @@ SERVO_CLAW_MIN_US     = 1000
 SERVO_CLAW_MAX_US     = 2000
 
 # Idle/auto-search behavior (laptop)
-IDLE_TIMEOUT_S = 60.0   # seconds of inactivity before auto SEARCH
+IDLE_TIMEOUT_S = 30.0   # seconds of inactivity before auto SEARCH
 
 # -----------------------------
 # LLM / Semantic Enrichment
