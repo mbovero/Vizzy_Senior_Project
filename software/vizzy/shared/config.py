@@ -60,7 +60,7 @@ MAX_FAILS_PER_POSE = 2        # Prevent infinite failed centering loop at a sing
 MEM_FILE = str(LAPTOP_DIR / "object_memory.json")
 
 # Valid objects to center on during search (fork, cup, and knife)
-SEARCH_VALID_CLASS_NAMES = ["fork", "spoon", "cup", "knife", "frisbee", "bowl"]  # Only center on these objects
+SEARCH_VALID_CLASS_NAMES = ["fork", "spoon", "cup", "knife", "frisbee", "bowl", "toothbrush"]  # Only center on these objects
 
 # -----------------------------
 # Networking
