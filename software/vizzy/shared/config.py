@@ -27,7 +27,7 @@ OBJ_BLACKLIST = [
 ]
 
 # Duration knobs (ms) - reduced for faster iteration
-SCAN_DURATION_MS   = 600  # Per-pose scan window (reduced from 1750)
+SCAN_DURATION_MS   = 700  # Per-pose scan window (reduced from 1750)
 CENTER_DURATION_MS = 10000  # Max time to attempt centering (10 seconds)
 
 # Centering movement calculation (matching object_centering.py)
@@ -37,7 +37,7 @@ MOVEMENT_SCALE_FACTOR = 1.2  # Scale factor for movement calculation
 
 # Camera to grasp position offset (mm)
 # Distance between camera center and actual grasp position on the end effector
-CAMERA_TO_GRASP_OFFSET_MM = 20  # mm offset to account for camera-to-grasp distance (34.5mm)
+CAMERA_TO_GRASP_OFFSET_MM = 34.5  # mm offset to account for camera-to-grasp distance (34.5mm)
 
 # Explicit scan gates (selection before attempting to center)
 # (Use these to filter scan results; centering thresholds remain separate.)
@@ -103,27 +103,18 @@ SEARCH_PATH_POINTS = [
     # Pass 1: negative diagonal (x+25, y+25)
    
     (275.0, -225.0),
+    (287.5, -160.0),   # midpoint 1 (arc-shifted)
     
-
-    # Pass 1.5: between Pass 1 and Pass 2, reversed (x+25, y+25)
-  
     (300.0, -100.0),
-    
+    (312.5, -50.0),    # midpoint 2 (arc-shifted)
 
-    # Pass 2: middle row (x +25, y unchanged)
-    
     (325.0, 0.0),
-    
+    (312.5, 75.0),     # midpoint 3 (arc-shifted)
 
-    # Pass 2.5: between Pass 2 and Pass 3, reversed (x+25, y+25)
-    
     (300.0, 150.0),
- 
+    (287.5, 212.5),    # midpoint 4 (arc-shifted)
 
-    # Pass 3: positive diagonal (x+25, y+25)
-    
     (275.0, 275.0),
-   
 
     
     
